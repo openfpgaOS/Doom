@@ -98,6 +98,7 @@ help:
 	@printf "    $(C_CMD)make $(C_VERB)build$(C_RESET) $(C_ARG)CORE=<core|sdk>$(C_RESET)    Build core or sdk only\n"
 	@printf "    $(C_CMD)make $(C_VERB)build$(C_RESET) $(C_ARG)CORE=<core>$(C_RESET)        Build the <core> custom core only\n"
 	@printf "    $(C_CMD)make $(C_VERB)build$(C_RESET) $(C_ARG)APP=<app>$(C_RESET)          Build the <app> SDK app only\n"
+	@printf "    $(C_CMD)make $(C_VERB)debug$(C_RESET)                    Attach to running core (phdpd only, no push)\n"
 	@printf "    $(C_CMD)make $(C_VERB)debug$(C_RESET) $(C_ARG)CORE=<core>$(C_RESET)        Build + UART push + stream a custom core\n"
 	@printf "    $(C_CMD)make $(C_VERB)debug$(C_RESET) $(C_ARG)APP=<app>$(C_RESET)          Build + UART push + stream a single SDK app\n"
 	@printf "    $(C_CMD)make $(C_VERB)test$(C_RESET) $(C_ARG)CORE=<core>$(C_RESET)         Test a custom core on desktop (SDL2)\n"
@@ -143,7 +144,9 @@ else
 endif
 
 # ── Debug (UART push + console) ─────────────────────────────────────
-# `make debug`              → the lone custom core (if exactly one exists)
+# `make debug`              → listen-only: start phdpd and stream the console
+#                             of whatever is already running on the core. No
+#                             slot push, no JTAG reset.
 # `make debug CORE=<name>`  → custom core src/<name>/ — pushes its release ELF
 # `make debug APP=<name>`   → SDK app src/apps/<name>/ — pushes that single
 #                             app's ELF over UART (for iterating on one app
@@ -153,20 +156,16 @@ endif
 debug:
 ifdef APP
 	$(MAKE) -C src/apps debug APP=$(APP)
-else ifndef CORE
-ifneq ($(APP_NAME),)
-	$(MAKE) -C src/$(APP_NAME) debug
-else
-	@echo "Usage: make debug CORE=<custom-core>"
-	@echo "       make debug APP=<sdk-app>"
-	@exit 1
-endif
-else ifeq ($(CORE),sdk)
+else ifdef CORE
+ifeq ($(CORE),sdk)
 	@echo "make debug CORE=sdk is not supported — the SDK demo core is not a single ELF."
 	@echo "Use 'make debug APP=<sdk-app>' to push a single SDK app over UART instead."
 	@exit 1
 else
 	$(MAKE) -C src/$(CORE) debug
+endif
+else
+	@./scripts/debug.sh --listen
 endif
 
 # ── Test (desktop SDL2 build) ───────────────────────────────────────

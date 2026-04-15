@@ -1,4 +1,5 @@
 #include "test.h"
+#include "of_mixer.h"
 #include <time.h>
 
 /* PSRAM / SRAM memory map (cached CPU-side addresses)
@@ -48,9 +49,14 @@ void test_psram_memory(void) {
         return;
     }
 
+    /* DIAGNOSTIC: stop any lingering mixer voices to isolate whether the
+     * CRAM1 hang on iteration 2+ is caused by mixer state bleed-through.
+     * If this makes the hang go away, mixer is the culprit. */
+    of_mixer_stop_all();
+
     volatile uint32_t *cram0 = (volatile uint32_t *)(CRAM0_CACHED_BASE + CRAM0_TEST_OFFSET);
     volatile uint32_t *cram1 = (volatile uint32_t *)(CRAM1_UNCACHED_BASE + CRAM1_TEST_OFFSET);
-    volatile uint32_t *sram  = (volatile uint32_t *)SRAM_BASE;
+    // SRAM removed — GPU-exclusive (Z-buffer)
 
     cram0[0] = 0xDEADBEEF;
     cram0[1] = 0xCAFEBABE;
@@ -146,20 +152,7 @@ void test_psram_memory(void) {
         }
     }
 
-    sram[0] = 0xFEEDFACE;
-    sram[1] = 0xBAADF00D;
-    ASSERT("sram w/r[0]", sram[0] == 0xFEEDFACE);
-    ASSERT("sram w/r[1]", sram[1] == 0xBAADF00D);
-
-    {
-        int ok = 1;
-        for (int i = 0; i < 256; i++)
-            sram[i] = (uint32_t)i * 0x01010101;
-        for (int i = 0; i < 256; i++) {
-            if (sram[i] != (uint32_t)i * 0x01010101) { ok = 0; break; }
-        }
-        ASSERT("sram 1K", ok);
-    }
+    // SRAM tests removed — SRAM is GPU-exclusive (Z-buffer)
 
     {
         cram1[0] = 0x11111111;

@@ -14,11 +14,16 @@
 #   ./scripts/debug.sh --slot N path/to/file Push to explicit slot
 #   ./scripts/debug.sh -v <file>             Start phdpd with -v (verbose)
 #   ./scripts/debug.sh -t <file>             Start phdpd with -t (full hex trace)
+#   ./scripts/debug.sh --listen              Start phdpd in listen-only mode
+#                                            (no slot push, no JTAG reset —
+#                                            just attach to whatever is
+#                                            currently running on the core)
 #
 # From the top-level Makefile, pass via DEBUG=:
 #   make debug APP=foo            (silent phdpd)
 #   make debug APP=foo DEBUG=v    (verbose)
 #   make debug APP=foo DEBUG=t    (trace)
+#   make debug                    (listen-only — attach to running core)
 #
 
 set -e
@@ -43,6 +48,7 @@ RESET='\033[0m'
 SLOT=""
 FILE=""
 PHDPD_FLAGS=""
+LISTEN=0
 
 # Strip a leading -v / -vv / -t (verbosity flag for phdpd) before
 # the rest of the argument parsing. The flag is forwarded to phdpd
@@ -55,25 +61,30 @@ case "$1" in
         ;;
 esac
 
-if [ "$1" = "--slot" ]; then
+if [ "$1" = "--listen" ]; then
+    LISTEN=1
+elif [ "$1" = "--slot" ]; then
     SLOT="$2"
     FILE="$3"
 else
     FILE="$1"
 fi
 
-if [ -z "$FILE" ]; then
-    echo -e "${RED}Usage: $0 [--slot N] <file>${RESET}"
-    exit 1
-fi
+if [ "$LISTEN" -eq 0 ]; then
+    if [ -z "$FILE" ]; then
+        echo -e "${RED}Usage: $0 [--slot N] <file>${RESET}"
+        echo -e "       $0 --listen"
+        exit 1
+    fi
 
-if [ ! -f "$FILE" ]; then
-    echo -e "${RED}File not found: $FILE${RESET}"
-    exit 1
+    if [ ! -f "$FILE" ]; then
+        echo -e "${RED}File not found: $FILE${RESET}"
+        exit 1
+    fi
 fi
 
 # ── Auto-detect slot from filename if not specified ────────────────
-if [ -z "$SLOT" ]; then
+if [ "$LISTEN" -eq 0 ] && [ -z "$SLOT" ]; then
     case "$(basename "$FILE")" in
         os.bin)  SLOT=1 ;;
         *)       SLOT=2 ;;
@@ -118,41 +129,50 @@ if ! pgrep -x phdpd >/dev/null 2>&1; then
 fi
 
 # ── Clear pending slots ───────────────────────────────────────────
+# Always clear: both the push path (to start fresh) and the listen
+# path (so the boot ROM falls through to the SD-card data slots
+# instead of any stale override from a previous session).
 "$PHDP" clear
 
-# ── Always push the OS to slot 1 (unless the user is pushing it) ──
-# The boot ROM does PHDP discovery first and then falls back to
-# SD-card slot 1 if no override is queued. The SD-card path depends
-# on the Pocket having a valid os.bin in data slot 1 (environmental
-# state); always pushing runtime/os.bin via PHDP override eliminates
-# that dependency. Skipped if the user is already pushing os.bin
-# themselves (slot 1).
-OS_BIN="$SDK_DIR/runtime/os.bin"
-if [ "$SLOT" != "1" ] && [ -f "$OS_BIN" ]; then
-    "$PHDP" push --slot 1 "$OS_BIN"
-fi
+if [ "$LISTEN" -eq 0 ]; then
+    # ── Always push the OS to slot 1 (unless the user is pushing it) ──
+    # The boot ROM does PHDP discovery first and then falls back to
+    # SD-card slot 1 if no override is queued. The SD-card path depends
+    # on the Pocket having a valid os.bin in data slot 1 (environmental
+    # state); always pushing runtime/os.bin via PHDP override eliminates
+    # that dependency. Skipped if the user is already pushing os.bin
+    # themselves (slot 1).
+    OS_BIN="$SDK_DIR/runtime/os.bin"
+    if [ "$SLOT" != "1" ] && [ -f "$OS_BIN" ]; then
+        "$PHDP" push --slot 1 "$OS_BIN"
+    fi
 
-# ── Push file to slot ─────────────────────────────────────────────
-"$PHDP" push --slot "$SLOT" "$FILE"
+    # ── Push file to slot ─────────────────────────────────────────────
+    "$PHDP" push --slot "$SLOT" "$FILE"
 
-# ── Reset core via JTAG (quartus_pgm reload) ──────────────────────
-SOF="$SDK_DIR/runtime/ap_core.sof"
-if [ ! -f "$SOF" ]; then
-    echo -e "${RED}Missing JTAG bitstream: $SOF${RESET}"
-    echo "Run 'make sdk DEST=...' from the openfpgaOS source tree to populate runtime/."
-    exit 1
-fi
-if ! command -v quartus_pgm >/dev/null 2>&1; then
-    echo -e "${RED}quartus_pgm not on PATH${RESET}"
-    exit 1
-fi
-echo -e "${GREEN}Resetting core via JTAG (quartus_pgm)...${RESET}"
-quartus_pgm -m jtag -o "p;$SOF"
+    # ── Reset core via JTAG (quartus_pgm reload) ──────────────────────
+    SOF="$SDK_DIR/runtime/ap_core.sof"
+    if [ ! -f "$SOF" ]; then
+        echo -e "${RED}Missing JTAG bitstream: $SOF${RESET}"
+        echo "Run 'make sdk DEST=...' from the openfpgaOS source tree to populate runtime/."
+        exit 1
+    fi
+    if ! command -v quartus_pgm >/dev/null 2>&1; then
+        echo -e "${RED}quartus_pgm not on PATH${RESET}"
+        exit 1
+    fi
+    echo -e "${GREEN}Resetting core via JTAG (quartus_pgm)...${RESET}"
+    quartus_pgm -m jtag -o "p;$SOF"
 
-# ── Wait for OS boot ─────────────────────────────────────────────
-"$PHDP" wait
+    # ── Wait for OS boot ─────────────────────────────────────────────
+    "$PHDP" wait
+fi
 
 # Block until the user kills the script (Ctrl+C). phdpd keeps running
 # in the background and its stdout keeps flowing to the terminal.
-echo -e "${GREEN}Streaming console — Ctrl+C to exit${RESET}"
+if [ "$LISTEN" -eq 1 ]; then
+    echo -e "${GREEN}Listen mode — attach to running core, Ctrl+C to exit${RESET}"
+else
+    echo -e "${GREEN}Streaming console — Ctrl+C to exit${RESET}"
+fi
 wait

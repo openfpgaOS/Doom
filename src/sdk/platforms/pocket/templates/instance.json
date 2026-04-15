@@ -5,6 +5,7 @@
         "data_slots": [
             { "id": 1, "filename": "os.bin" },
             { "id": 2, "filename": "{{APP}}.elf" },
+            { "id": 7, "filename": "bank.ofsf" },
             { "id": 10, "filename": "{{APP}}.sav" }
         ]
     }

@@ -67,6 +67,13 @@ static const uint16_t period_table[36] = {
  * Amiga base clock = 7093789.2 Hz (PAL), period is clock divider. */
 #define AMIGA_CLOCK 7093789
 
+/* Amiga-style low-pass: the A500 output stage rolled off around 7 kHz
+ * (LED filter off).  SVF cutoff is Q0.16 where 65535 = Nyquist (24 kHz).
+ * 7 kHz → 7000/24000 × 65536 ≈ 19115.  A touch of resonance (Q ≈ 20)
+ * adds a slight presence bump at the cutoff. */
+#define MOD_LPF_CUTOFF  35000
+#define MOD_LPF_Q       80
+
 /* Pre-computed 16.16 fixed-point rates for each period */
 static uint32_t period_to_rate_fp16(uint16_t period) {
     if (period == 0) return 0;
@@ -111,6 +118,7 @@ typedef struct {
     int      trem_speed;     /* 7xy: x = speed */
     int      trem_depth;     /* 7xy: y = depth */
     int      trem_pos;       /* tremolo phase (0-63) */
+    int      out_volume;     /* final volume after tremolo (0-64) */
     /* Extended effects */
     uint8_t  effect;         /* current effect number */
     uint8_t  effect_param;   /* current effect parameter */
@@ -253,6 +261,9 @@ static int playing = 1;
 static int pattern_break = 0;     /* set by effect 0xD/0xB to prevent double-break */
 static int pattern_delay = 0;     /* EEx: extra row repeats remaining */
 
+/* Pre-allocate one mixer voice per MOD channel — just like the Amiga
+ * Paula chip, which had 4 fixed DMA channels.  Voices are never freed
+ * or reallocated, so there is zero risk of voice stealing. */
 /* Trigger (or retrigger) the current sample on a channel */
 static void trigger_note(channel_t *c, uint16_t period, int sample_offset) {
     c->period = period;
@@ -277,9 +288,8 @@ static void trigger_note(channel_t *c, uint16_t period, int sample_offset) {
                 int ls = s->loop_start - offset_bytes;
                 if (ls < 0) ls = 0;
                 of_mixer_set_loop(c->voice, ls, ls + (int)s->loop_length);
-                of_mixer_set_volume_ramp(c->voice, 8);
             }
-            of_mixer_set_pan(c->voice, c->pan);
+            of_mixer_set_filter(c->voice, MOD_LPF_CUTOFF, MOD_LPF_Q, 1);
         }
     }
 }
@@ -365,7 +375,6 @@ parse_effects:
         break;
     case 0x8:  /* Set panning */
         c->pan = n->param;
-        if (c->voice >= 0) of_mixer_set_pan(c->voice, c->pan);
         break;
     case 0xA:  /* Volume slide */
         c->vol_slide = (n->param >> 4) - (n->param & 0xF);
@@ -450,10 +459,13 @@ parse_effects:
             bpm = n->param;
         break;
     }
+
+    c->out_volume = c->volume;
 }
 
 static void tick_effects(int ch) {
     channel_t *c = &channels[ch];
+    c->out_volume = c->volume;
 
     /* Note delay — trigger on the right tick */
     if (c->note_delay > 0 && current_tick == c->note_delay) {
@@ -529,18 +541,14 @@ static void tick_effects(int ch) {
         c->vib_pos = (c->vib_pos + c->vib_speed) & 63;
     }
 
-    /* Tremolo (7xy) */
+    /* Tremolo (7xy) — modulates out_volume, doesn't change c->volume */
     if (c->trem_depth && c->effect == 0x7) {
         int delta = (vib_table[c->trem_pos & 63] * c->trem_depth) >> 6;
         if (c->trem_pos >= 32) delta = -delta;
         int tv = c->volume + delta;
         if (tv < 0) tv = 0;
         if (tv > 64) tv = 64;
-        /* Tremolo modulates output volume but doesn't change c->volume */
-        int vol_l = (tv * 255 / 64 * (255 - c->pan)) >> 8;
-        int vol_r = (tv * 255 / 64 * c->pan) >> 8;
-        if (c->voice >= 0)
-            of_mixer_set_voice_raw(c->voice, c->rate_fp16, vol_l, vol_r);
+        c->out_volume = tv;
         c->trem_pos = (c->trem_pos + c->trem_speed) & 63;
     }
 
@@ -550,6 +558,7 @@ static void tick_effects(int ch) {
         if (c->volume < 0) c->volume = 0;
         if (c->volume > 64) c->volume = 64;
     }
+
 }
 
 static void update_hardware(void) {
@@ -557,11 +566,9 @@ static void update_hardware(void) {
         channel_t *c = &channels[ch];
         if (c->voice < 0) continue;
 
-        /* Map MOD volume (0-64) + pan to L/R (clamp to 0-255) */
-        int vol = c->volume * 255 / 64;
-        int vol_l = (vol * (255 - c->pan)) >> 8;
+        int vol = c->out_volume * 255 / 64;
+        int vol_l = (vol * (256 - c->pan)) >> 8;
         int vol_r = (vol * c->pan) >> 8;
-
         of_mixer_set_voice_raw(c->voice, c->rate_fp16, vol_l, vol_r);
     }
 }
@@ -613,6 +620,153 @@ static void process_tick(void) {
             }
         }
     }
+}
+
+/* ======================================================================
+ * Effect Diagnostics
+ *
+ * Plays short test patterns to verify each effect.  Uses the first
+ * loaded MOD's sample 1 for melodic tests and the first available
+ * sample for percussive tests.
+ * ====================================================================== */
+
+typedef struct {
+    const char *name;
+    uint8_t effect;
+    uint8_t param;
+    uint16_t period;        /* 0 = use default C-2 (428) */
+    uint16_t period2;       /* second note for porta-to-note, 0 = unused */
+    int      ticks;         /* how many ticks to run */
+} effect_test_t;
+
+static const effect_test_t effect_tests[] = {
+    { "Arpeggio 047",     0x0, 0x47, 428, 0,   48 },
+    { "Porta Up",         0x1, 0x10, 428, 0,   48 },
+    { "Porta Down",       0x2, 0x10, 428, 0,   48 },
+    { "Porta to Note",    0x3, 0x08, 428, 214, 96 },  /* needs special handling */
+    { "Vibrato deep",     0x4, 0x4F, 428, 0,   96 },
+    { "Vibrato gentle",   0x4, 0x24, 428, 0,   96 },
+    { "Tremolo deep",     0x7, 0x4F, 428, 0,   96 },
+    { "Tremolo gentle",   0x7, 0x24, 428, 0,   96 },
+    { "Vol Slide Up",     0xA, 0x40, 428, 0,   48 },
+    { "Vol Slide Down",   0xA, 0x04, 428, 0,   48 },
+    { "Set Volume 32",    0xC, 0x20, 428, 0,   24 },
+    { "Set Volume 64",    0xC, 0x40, 428, 0,   24 },
+    { "Speed 3",          0xF, 0x03, 428, 0,   24 },
+    { "Speed 6",          0xF, 0x06, 428, 0,   24 },
+    { "Sample Offset 10", 0x9, 0x10, 428, 0,   48 },
+    { "Fine Porta Up",    0xE, 0x13, 428, 0,   24 },
+    { "Fine Porta Down",  0xE, 0x23, 428, 0,   24 },
+    { "Note Cut tick 3",  0xE, 0xC3, 428, 0,   24 },
+    { "Retrigger /3",     0xE, 0x93, 428, 0,   48 },
+    { "Fine VolUp +8",    0xE, 0xA8, 428, 0,   24 },
+    { "Fine VolDown -8",  0xE, 0xB8, 428, 0,   24 },
+    { "Pan Left",         0x8, 0x20, 428, 0,   48 },
+};
+#define NUM_EFFECT_TESTS (sizeof(effect_tests) / sizeof(effect_tests[0]))
+
+static void run_effect_test(int idx) {
+    if (!mod || !mod->sample_data[0]) return;
+    const effect_test_t *t = &effect_tests[idx];
+
+    /* Reset channel 0 */
+    channel_t *c = &channels[0];
+    memset(c, 0, sizeof(*c));
+    c->voice = -1;
+    c->pan = 128;
+    c->sample_idx = 1;
+
+    /* Pick a starting volume that makes the effect audible */
+    int is_vol_up   = (t->effect == 0xA && (t->param >> 4) > 0) ||
+                      (t->effect == 0xE && (t->param >> 4) == 0xA);
+    int is_vol_down = (t->effect == 0xA && (t->param & 0xF) > 0 && (t->param >> 4) == 0) ||
+                      (t->effect == 0xE && (t->param >> 4) == 0xB);
+    if (is_vol_up)        c->volume = 0;
+    else if (is_vol_down) c->volume = 64;
+    else                  c->volume = 48;
+
+    /* Use a looping sample for effects that need sustain */
+    int needs_sustain = (t->effect == 0x4 || t->effect == 0x7 ||
+                         t->effect == 0x1 || t->effect == 0x2);
+    if (needs_sustain) {
+        for (int s = 0; s < MOD_NUM_SAMPLES; s++) {
+            if (mod->samples[s].loop_length > 2 && mod->sample_data[s] &&
+                mod->samples[s].volume > 0) {
+                c->sample_idx = s + 1;
+                break;
+            }
+        }
+    }
+
+    current_tick = 0;
+    ticks_per_row = 6;
+    bpm = 125;
+
+    /* Porta-to-note needs a note already playing, then the effect on
+     * a second "row" with the target period. */
+    if (t->effect == 0x3 && t->period2) {
+        mod_note_t first = {0};
+        first.sample = 1;
+        first.period = t->period;
+        play_note(0, &first);
+        update_hardware();
+        /* Let it sound for a few ticks */
+        for (int i = 0; i < 6; i++) {
+            usleep(20 * 1000);
+            current_tick = (i + 1) % ticks_per_row;
+            update_hardware();
+        }
+        /* Now apply porta-to-note on a new "row" */
+        mod_note_t porta = {0};
+        porta.period = t->period2;
+        porta.effect = 0x3;
+        porta.param  = t->param;
+        current_tick = 0;
+        play_note(0, &porta);
+        update_hardware();
+        for (int tick = 1; tick < t->ticks; tick++) {
+            usleep(20 * 1000);
+            current_tick = tick % ticks_per_row;
+            tick_effects(0);
+            update_hardware();
+        }
+    } else {
+        mod_note_t note = {0};
+        note.period = t->period ? t->period : 428;
+        note.effect = t->effect;
+        note.param  = t->param;
+
+        play_note(0, &note);
+        update_hardware();
+        {
+            int vol = c->out_volume * 255 / 64;
+            int vol_l = (vol * (255 - c->pan)) >> 8;
+            int vol_r = (vol * c->pan) >> 8;
+            printf("  t0: v=%d ov=%d per=%d rate=%lu vl=%d vr=%d voice=%d pan=%d\n",
+                   c->volume, c->out_volume, c->period,
+                   (unsigned long)c->rate_fp16, vol_l, vol_r, c->voice, c->pan);
+        }
+
+        for (int tick = 1; tick < t->ticks; tick++) {
+            usleep(20 * 1000);
+            current_tick = tick % ticks_per_row;
+            tick_effects(0);
+            update_hardware();
+            if (tick <= 6 || tick == t->ticks - 1) {
+                int vol = c->out_volume * 255 / 64;
+                int vol_l = (vol * (255 - c->pan)) >> 8;
+                int vol_r = (vol * c->pan) >> 8;
+                int pos = (c->voice >= 0) ? of_mixer_get_position(c->voice) : -1;
+                int active = (c->voice >= 0) ? of_mixer_voice_active(c->voice) : 0;
+                printf("  t%d: ov=%d rate=%lu vl=%d vr=%d pos=%d act=%d\n",
+                       tick, c->out_volume,
+                       (unsigned long)c->rate_fp16, vol_l, vol_r, pos, active);
+            }
+        }
+    }
+
+    if (c->voice >= 0) of_mixer_stop(c->voice);
+    c->voice = -1;
 }
 
 /* ======================================================================
@@ -677,20 +831,52 @@ int main(void) {
     printf("Tick rate: %d Hz (BPM=%d, speed=%d)\n", tick_hz, bpm, ticks_per_row);
     of_timer_set_callback(mod_timer_tick, tick_hz);
 
-    printf("\nPlaying... A=next song B=next pattern\n");
-    printf("Waiting for first tick...\n");
+    printf("\nA=next song B=next pattern SELECT=effects\n\n");
+
+    /* HW register update test: play note, change rate after 500ms */
+    if (mod->sample_data[0]) {
+        mod_sample_t *s = &mod->samples[0];
+        uint32_t rate1 = OF_MIXER_RATE_FP16(8363);
+        uint32_t rate2 = OF_MIXER_RATE_FP16(16726);  /* double pitch */
+        int v = of_mixer_play((const uint8_t *)mod->sample_data[0],
+                              s->length, 8363, 0, 200);
+        if (v >= 0 && s->loop_length > 2)
+            of_mixer_set_loop(v, s->loop_start, s->loop_start + (int)s->loop_length);
+        printf("HW test: voice=%d rate1=%lu\n", v, (unsigned long)rate1);
+        usleep(500 * 1000);
+        if (v >= 0) {
+            printf("  changing rate to %lu...\n", (unsigned long)rate2);
+            of_mixer_set_rate_raw(v, rate2);
+        }
+        usleep(500 * 1000);
+        if (v >= 0) {
+            printf("  changing rate back to %lu...\n", (unsigned long)rate1);
+            of_mixer_set_rate_raw(v, rate1);
+        }
+        usleep(500 * 1000);
+        if (v >= 0) {
+            printf("  setting volume to 0...\n");
+            of_mixer_set_vol_lr(v, 0, 0);
+        }
+        usleep(200 * 1000);
+        if (v >= 0) {
+            printf("  setting volume to 200...\n");
+            of_mixer_set_vol_lr(v, 200, 200);
+        }
+        usleep(500 * 1000);
+        if (v >= 0) of_mixer_stop(v);
+        printf("HW test done\n");
+    }
+
+    int mode = 0;  /* 0=play, 1=effect diag */
+    int diag_idx = 0;
 
     /* Display loop */
     int display_counter = 0;
-    int first_tick = 1;
     for (;;) {
-        /* Process pending tick from timer ISR */
-        if (tick_pending) {
+        /* Process pending tick from timer ISR (play mode only) */
+        if (mode == 0 && tick_pending) {
             tick_pending = 0;
-            if (first_tick) {
-                printf("Timer OK, processing first tick\n");
-                first_tick = 0;
-            }
             process_tick();
 
             /* Update timer rate if BPM changed */
@@ -708,33 +894,71 @@ int main(void) {
 
             of_input_poll();
 
-            if (of_btn_pressed(OF_BTN_A) && num_songs > 1) {
-                /* Switch song */
+            /* SELECT toggles between play and effect diagnostic mode */
+            if (of_btn_pressed(OF_BTN_SELECT)) {
                 of_mixer_stop_all();
                 for (int i = 0; i < MOD_NUM_CHANNELS; i++)
                     channels[i].voice = -1;
-                cur_song = (cur_song + 1) % num_songs;
-                mod = &songs[cur_song];
-                current_order = 0;
-                current_row = 0;
-                current_tick = 0;
-                ticks_per_row = 6;
-                bpm = 125;
-                tick_hz = (bpm * 2) / 5;
-                of_timer_set_callback(mod_timer_tick, tick_hz);
-                printf("\n>>> Song %d: %s\n", cur_song + 1, mod->title);
-            }
-            if (of_btn_pressed(OF_BTN_B)) {
-                current_row = 0;
-                current_tick = 0;
-                current_order++;
-                if (current_order >= mod->song_length)
+                mode = !mode;
+                if (mode == 0) {
                     current_order = 0;
+                    current_row = 0;
+                    current_tick = 0;
+                    ticks_per_row = 6;
+                    bpm = 125;
+                    tick_hz = (bpm * 2) / 5;
+                    of_timer_set_callback(mod_timer_tick, tick_hz);
+                }
+                printf("\r\033[K %s\n", mode ? "EFFECT DIAGNOSTICS" : "PLAY MODE");
             }
 
-            printf("\rSong:%d Ord:%02d Pat:%02d Row:%02d Spd:%d BPM:%d ",
-                   cur_song + 1, current_order, mod->order[current_order],
-                   current_row, ticks_per_row, bpm);
+            if (mode == 0) {
+                /* Play mode controls */
+                if (of_btn_pressed(OF_BTN_A) && num_songs > 1) {
+                    of_mixer_stop_all();
+                    for (int i = 0; i < MOD_NUM_CHANNELS; i++)
+                        channels[i].voice = -1;
+                    cur_song = (cur_song + 1) % num_songs;
+                    mod = &songs[cur_song];
+                    current_order = 0;
+                    current_row = 0;
+                    current_tick = 0;
+                    ticks_per_row = 6;
+                    bpm = 125;
+                    tick_hz = (bpm * 2) / 5;
+                    of_timer_set_callback(mod_timer_tick, tick_hz);
+                    printf("\r\033[K>>> Song %d: %s\n", cur_song + 1, mod->title);
+                }
+                if (of_btn_pressed(OF_BTN_B)) {
+                    current_row = 0;
+                    current_tick = 0;
+                    current_order++;
+                    if (current_order >= mod->song_length)
+                        current_order = 0;
+                }
+                printf("\r\033[K Song:%d Ord:%02d Pat:%02d Row:%02d Spd:%d BPM:%d",
+                       cur_song + 1, current_order, mod->order[current_order],
+                       current_row, ticks_per_row, bpm);
+            } else {
+                /* Effect diagnostic controls */
+                int changed = -1;
+                if (of_btn_pressed(OF_BTN_RIGHT))
+                    changed = (diag_idx + 1) % (int)NUM_EFFECT_TESTS;
+                if (of_btn_pressed(OF_BTN_LEFT))
+                    changed = (diag_idx + (int)NUM_EFFECT_TESTS - 1) % (int)NUM_EFFECT_TESTS;
+                if (of_btn_pressed(OF_BTN_A))
+                    changed = diag_idx;
+
+                if (changed >= 0) {
+                    diag_idx = changed;
+                    printf("\r\033[K [%2d/%d] %s\n",
+                           diag_idx + 1, (int)NUM_EFFECT_TESTS,
+                           effect_tests[diag_idx].name);
+                    run_effect_test(diag_idx);
+                    printf("\r\033[K vol=%d voice=%d",
+                           channels[0].volume, channels[0].voice);
+                }
+            }
         }
 
         /* Sleep until next tick (~20ms at 50Hz default) */

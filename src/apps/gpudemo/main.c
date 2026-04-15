@@ -867,9 +867,6 @@ int main(void) {
             case 1: draw_persp_demo(frame); break;
         }
         of_video_flip();
-        of_video_wait_flip();  /* pace the loop to real display cadence so
-                                * VRR sees clean flip-to-flip intervals and
-                                * the fps counter reports presented frames */
         fps_frames++;
 
         unsigned int now_ms = of_time_ms();
