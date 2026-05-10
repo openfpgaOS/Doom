@@ -260,15 +260,14 @@ int main(void) {
     of_mixer_set_group_volume(OF_MIXER_GROUP_MUSIC, 255);
     of_mixer_set_group_volume(OF_MIXER_GROUP_SFX, 255);
 
-    /* Load sample bank — must happen before of_midi_init() */
-    int brc = of_smp_bank_load("slot:4");
-    if (brc < 0) {
-        printf(" Bank load failed! rc=%d\n", brc);
-        printf(" Place bank.ofsf in assets/\n");
+    /* Sample bank is auto-loaded by the kernel from a staged slot before
+     * main(); an SDK constructor binds of_smp_bank to it. Just verify. */
+    const ofsf_header_t *bank_hdr = of_smp_bank_get();
+    if (!bank_hdr) {
+        printf(" No bank bound — stage a .ofsf file in a data slot\n");
         while (1) {}
     }
-    printf(" Bank loaded (%.1f KB)\n",
-           of_smp_bank_get()->sample_data_size / 1024.0f);
+    printf(" Bank loaded (%.1f KB)\n", bank_hdr->sample_data_size / 1024.0f);
 
     /* Raw bank playback test — bypass MIDI engine */
     {

@@ -165,9 +165,14 @@ static void opl_PlaySong(void *handle, boolean looping)
 static void    opl_StopSong(void)    { of_midi_stop(); }
 static boolean opl_IsPlaying(void)   { return of_midi_playing(); }
 
-/* MIDI is pumped by a 500 Hz machine-timer ISR installed by of_midi_play,
- * so Poll is a no-op — main-thread pumping would race the ISR. */
-static void    opl_Poll(void) { }
+/* MIDI envelope/LFO advance is still pumped by the 1 kHz timer ISR
+ * (it's cheap).  But the heavy sample-mixing work has moved to the
+ * main thread so the renderer can keep its cache warm — the ISR
+ * used to trash it every ms and Doom rendered at 0.1 fps.  Poll is
+ * called once per game tic (35 Hz); each call catches the CRAM1 DMA
+ * ring back up to ~42 ms of buffered audio.  of_mixer_pump loops
+ * swmixer_tick internally with a sane cap. */
+static void    opl_Poll(void) { of_mixer_pump(); }
 
 static const snddevice_t opl_devs[] = { SNDDEVICE_SB, SNDDEVICE_PAS,
                                          SNDDEVICE_ADLIB };

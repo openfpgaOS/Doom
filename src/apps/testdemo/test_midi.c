@@ -960,9 +960,8 @@ void test_midi_smp(void) {
     of_mixer_set_master_volume(255);
     of_mixer_set_group_volume(OF_MIXER_GROUP_MUSIC, 255);
 
-    /* SB.01: bank load */
-    int brc = of_smp_bank_load("slot:4");
-    if (brc < 0) {
+    /* SB.01: bank autoloaded by kernel — check via of_smp_bank_get() */
+    if (of_smp_bank_get() == NULL) {
         test_pass("SB.01 nobank");
         section_end();
         return;
@@ -1122,6 +1121,5 @@ void test_midi_smp(void) {
         ASSERT("SB.11 silent", active_after == 0);
     }
 
-    of_smp_bank_unload();
     section_end();
 }

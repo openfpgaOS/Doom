@@ -6,8 +6,17 @@
             { "id": 1, "filename": "os.bin" },
             { "id": 2, "filename": "doom.elf" },
             { "id": 3, "filename": "DOOM.WAD" },
-            { "id": 4, "filename": "8mbgmsfx.ofsf" },
-            { "id": 10, "filename": "doom.sav" }
+            { "id": 4, "filename": "bank.ofsf" },
+            { "id": 10, "filename": "doom.sav" },
+            { "id": 11, "filename": "doom_1.sav" },
+            { "id": 12, "filename": "doom_2.sav" },
+            { "id": 13, "filename": "doom_3.sav" },
+            { "id": 14, "filename": "doom_4.sav" },
+            { "id": 15, "filename": "doom_5.sav" },
+            { "id": 16, "filename": "doom_6.sav" },
+            { "id": 17, "filename": "doom_7.sav" },
+            { "id": 18, "filename": "doom_8.sav" },
+            { "id": 19, "filename": "doom_9.sav" }
         ]
     }
 }

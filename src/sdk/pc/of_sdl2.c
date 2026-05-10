@@ -124,9 +124,6 @@ static void (*g_end_cb)(uint32_t);
 /* ---- Timer ---- */
 static uint64_t g_start_us;
 
-/* ---- Save files ---- */
-#define SAVE_SIZE (64 * 1024)
-
 static uint64_t get_us(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1045,29 +1042,6 @@ void of_mixer_commit(void) {
 }
 
 /* MIDI playback: provided by of_midi.c (shared across targets). */
-
-/* ======================================================================
- * Save Files (file-backed)
- * ====================================================================== */
-
-static void save_path(int slot, char *buf, int buflen) {
-    snprintf(buf, buflen, "save_%d.bin", slot);
-}
-
-void of_save_flush(int slot) { (void)slot; }
-
-void of_save_erase(int slot) {
-    char path[64];
-    save_path(slot, path, sizeof(path));
-    uint8_t *data = malloc(SAVE_SIZE);
-    memset(data, 0xFF, SAVE_SIZE);
-    FILE *f = fopen(path, "wb");
-    if (f) {
-        fwrite(data, 1, SAVE_SIZE, f);
-        fclose(f);
-    }
-    free(data);
-}
 
 /* ======================================================================
  * File I/O

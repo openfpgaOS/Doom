@@ -1,9 +1,9 @@
 /*
  * of_smp_voice.h -- Software voice engine for sample-based MIDI synthesis.
  *
- * Manages up to 32 simultaneous sample voices with DAHDSR envelopes
- * and dual LFOs, driving the hardware PCM mixer.  All math is
- * fixed-point Q16.16; designed to run in a 1 kHz ISR on RV32IMFC.
+ * Manages simultaneous sample voices with DAHDSR envelopes and dual
+ * LFOs, driving the hardware mixer.  All math is fixed-point Q16.16;
+ * runs in the 1 kHz timer ISR on RV32IMFC.
  */
 
 #ifndef OF_SMP_VOICE_H
@@ -16,11 +16,12 @@ extern "C" {
 #include <stdint.h>
 #include "of_smp_bank.h"
 
-/* 28 = SC-55 polyphony standard. Hardware mixer has 47 usable slots
- * but running at the full ~48 saturates the allocator — every note-on
- * has to steal, causing constant click/truncate artifacts.  Keeping
- * headroom lets voice_alloc find free or ENV_DONE slots cleanly. */
-#define SMP_MAX_VOICES 28
+/* Cut from 28→12 so smp_voice_tick's ISR loop finishes fast enough
+ * for Doom's renderer to get the CPU back.  Dense MIDI passages lose
+ * the quietest couple of voices to the stealer; audible but acceptable
+ * tradeoff.  Sits well under OF_MIXER_MAX_VOICES (32) so the allocator
+ * never has to re-steal. */
+#define SMP_MAX_VOICES 12
 
 typedef enum {
     ENV_OFF = 0, ENV_DELAY, ENV_ATTACK, ENV_HOLD,
@@ -48,10 +49,7 @@ typedef struct {
     uint8_t note;
     uint8_t velocity;
     uint8_t voice_base_vol;  /* Pre-baked at note-on: (vel_scale × initial_attn_scale) >> 8.
-                               * Same 0..255 field the AWE fabric reads from voice-state RAM so
-                               * SW and HW compose paths can be bit-identical once HW takes over
-                               * (Phase 3).  Collapsing the two multiplies into one slot also
-                               * drops a per-tick multiply from the SW path. */
+                                Collapses two multiplies into one slot, drops one mul/tick. */
     uint8_t sustain_held; /* CC64 holding this note in sustain */
     int mixer_voice;      /* hardware mixer voice index */
     env_state_t vol_env;
@@ -89,7 +87,7 @@ void smp_voice_note_off(int midi_ch, int note);
 void smp_voice_tick(void);  /* 1 kHz ISR */
 
 /* Diagnostic stats for smp_voice_tick cost.  Task #10 probe: detect
- * whether the tick exceeds its 2 ms budget (500 Hz tick rate).
+ * whether a 1 kHz voice tick exceeds the 2 ms pump cap.
  * Fields are named cycles_* but actually hold microseconds — the
  * VexRiscv here does not expose rdcycle to user mode, so of_time_us()
  * (kernel ecall) is used instead. */
@@ -147,21 +145,17 @@ void smp_voice_update_bend(int midi_ch, int bend);
 void smp_voice_update_mod(int midi_ch, int mod_depth);
 void smp_voice_update_sustain(int midi_ch, int sustain_on);
 void smp_voice_update_filter(int midi_ch, int brightness, int resonance);
-/* CC91 (reverb send) and CC93 (chorus send), 0..127 MIDI scaled to 0..255
- * for the AWE backend.  SW-only path stores the value but does not act on
- * it — the SW mixer has no per-voice send paths. */
+/* CC91 (reverb send) and CC93 (chorus send), 0..127 — stored per channel
+ * but not yet acted on (the CPU mixer has no per-voice send paths). */
 void smp_voice_update_reverb_send(int midi_ch, int send_0_127);
 void smp_voice_update_chorus_send(int midi_ch, int send_0_127);
 void smp_voice_all_off(int midi_ch);
 void smp_voice_all_off_global(void);
 void smp_voice_set_master_volume(int vol);
 
-/* AWE-backend redirect (Phase 5).  When enabled, note_on / note_off /
- * per-channel CC updates route through the AWE coprocessor (fabric
- * envelope, LFOs, mod-matrix, VOL_COMPOSE, PITCH_COMPOSE) instead of
- * the per-tick SW voice engine.  of_smp_voice's tick pump becomes a
- * no-op; only MIDI parsing remains on the CPU.  Disable to fall back
- * to SW mixing. */
+/* AWE-backend redirect (retired).  Preserved as ABI no-ops so existing
+ * SDK apps that enable/query the AWE path still link; the CPU-side SW
+ * voice engine is the only backend now. */
 void smp_voice_enable_awe_backend(int on);
 int  smp_voice_awe_backend_enabled(void);
 
@@ -170,9 +164,8 @@ int  smp_voice_awe_backend_enabled(void);
 /* ------------------------------------------------------------------ */
 /* Compile with -DOF_TRACE_MIXER_WRITES to log every rate / vol / filter
  * mixer write the voice engine performs into an in-memory ring buffer.
- * Used for bit-identical pre/post-refactor verification (Phase 0 AWE
- * bake-time migration, future HW-migration phases, etc.) by replaying
- * a deterministic MIDI clip before and after a change and diffing the
+ * Used for bit-identical pre/post-refactor verification by replaying a
+ * deterministic MIDI clip before and after a change and diffing the
  * dumped traces.
  *
  * Zero overhead when the flag is not defined — the API symbols exist

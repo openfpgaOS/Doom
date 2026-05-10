@@ -12,6 +12,7 @@
 #include "include/of_smp_voice.h"
 #include "include/of_timer.h"
 #include "include/of_services.h"
+#include "include/of_fastram.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -31,7 +32,10 @@ typedef struct {
     int      done;
 } midi_track_t;
 
-static struct {
+/* Pinned to BRAM (OF_FASTDATA): the timer ISR updates this struct every
+ * tick (track cursors, tick_accum_us, channel state).  ISR SDRAM stores
+ * race with GPU/bridge bus traffic — BRAM breaks the race. */
+static OF_FASTDATA struct {
     int inited;
     int playing;
     int paused;
@@ -328,14 +332,13 @@ int of_midi_init(void) {
     M.playing       = 0;
     M.paused        = 0;
     M.tick_accum_us = 0;
-    /* Default below full-scale to give the HW mixer headroom for dense
-     * polyphony.  audio_mixer.v sums voices into a 32-bit accumulator and
-     * shifts ÷4 before clamping to int16 — about 6 voices at vol=180 fill
-     * the range.  With SF2 polyphony routinely 20-28 voices, master=255
-     * hard-clips at peaks and sounds like occasional voice "breakup".
-     * 128 quarters per-voice peak output (via the HW log² curve) so
-     * roughly 4× more concurrent voices fit without clipping.  Apps can
-     * raise it with of_midi_set_volume() if they know polyphony is low. */
+    /* Default below full-scale to give the mixer headroom for dense
+     * polyphony.  The HW mixer sums voices into s32 accumulators and
+     * saturates to s16 — at master=255 a 20-28 voice MIDI passage
+     * hard-clips at peaks and sounds like voice "breakup".  128 halves
+     * the per-voice peak so roughly 4× more concurrent voices fit
+     * without clipping.  Apps can raise it with of_midi_set_volume()
+     * if they know polyphony is low. */
     M.master_volume = 128;
     smp_voice_set_master_volume(M.master_volume);
     return OF_MIDI_OK;

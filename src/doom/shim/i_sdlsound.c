@@ -64,6 +64,13 @@ static boolean load_sfx(sfxinfo_t *sfx)
     if (len < 8) return false;
     byte *data = W_CacheLumpNum(sfx->lumpnum, PU_STATIC);
 
+    /* DMX magic: 03 00 00 00.  Reject non-DMX lumps so we don't expand
+     * arbitrary bytes into samples. */
+    if (data[0] != 0x03 || data[1] != 0x00) {
+        W_ReleaseLumpNum(sfx->lumpnum);
+        return false;
+    }
+
     uint32_t rate = data[2] | (data[3] << 8);
     uint32_t samples = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
     if (samples > (uint32_t)(len - 8)) samples = len - 8;
@@ -72,6 +79,20 @@ static boolean load_sfx(sfxinfo_t *sfx)
     /* DMX format skips 16 bytes of padding after the header, then PCM. */
     byte *pcm8 = data + 8;
     if (samples > 32) { pcm8 += 16; samples -= 32; }
+
+    /* First-few-loads diagnostic so we can sanity-check rate/length/CRAM1
+     * contents when SFX sound wrong (e.g. whiny = rate misinterpretation,
+     * silent-then-garbage = CRAM1 write not visible to mixer DMA). */
+    static int sfx_load_diag = 0;
+    if (sfx_load_diag < 6) {
+        printf("SFX load[%d]: name=%-8s lump=%d len=%d rate=%u samples=%u\n",
+               sfx_load_diag, sfx->name, sfx->lumpnum, len,
+               (unsigned)rate, (unsigned)samples);
+        printf("  first 8 raw DMX bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+               pcm8[0], pcm8[1], pcm8[2], pcm8[3],
+               pcm8[4], pcm8[5], pcm8[6], pcm8[7]);
+        sfx_load_diag++;
+    }
 
     /* The hardware mixer reads samples from CRAM1 — ordinary malloc'd
      * heap memory is not accessible to it, so we MUST allocate via
@@ -82,6 +103,11 @@ static boolean load_sfx(sfxinfo_t *sfx)
         pcm16[i] = (int16_t)((pcm8[i] - 128) << 8);
 
     W_ReleaseLumpNum(sfx->lumpnum);
+
+    if (sfx_load_diag <= 6 && sfx_load_diag > 0) {
+        printf("  cram1=%p first 4 int16: %d %d %d %d\n",
+               (void *)pcm16, pcm16[0], pcm16[1], pcm16[2], pcm16[3]);
+    }
 
     sfx_slot_t *slot = malloc(sizeof(*slot));
     slot->pcm          = pcm16;
@@ -136,30 +162,89 @@ static void set_params(int voice, int vol, int sep)
 
 static void I_SDL_UpdateSoundParams(int channel, int vol, int sep)
 {
-    (void)channel; (void)vol; (void)sep;
+    if ((unsigned)channel >= NUM_CHANNELS) return;
+    set_params(channel_voice[channel], vol, sep);
 }
 
-/* SFX temporarily stubbed so we can validate music in isolation.  With
- * of_midi_pump no longer called from the main thread, music should be
- * clean on its own before we re-introduce the mixer voice competition
- * SFX adds. */
+/* SFX priority is set above MIDI note priority (which of_smp_voice uses
+ * with priority=0) so a busy music track can't starve gameplay sounds
+ * when the 32-voice mixer is saturated.  NORM_PITCH (=127) comes from
+ * i_sound.h. */
+#define SFX_PRIORITY 100
+
 static int I_SDL_StartSound(sfxinfo_t *sfx, int channel, int vol, int sep, int pitch)
 {
-    (void)sfx; (void)vol; (void)sep; (void)pitch;
+    sfx_slot_t *slot;
+    uint32_t    rate;
+    int         voice;
+
     if ((unsigned)channel >= NUM_CHANNELS) return -1;
+
+    if (!sfx->driver_data && !load_sfx(sfx)) return -1;
+    slot = sfx->driver_data;
+    if (!slot || !slot->pcm || !slot->sample_count) return -1;
+
+    /* Stop any prior voice on this channel before reusing it. */
+    if (channel_voice[channel] >= 0)
+        of_mixer_stop(channel_voice[channel]);
+
+    /* Linear pitch bend around NORM_PITCH (=128).  Vanilla uses a log
+     * steptable; linear is within a few cents at the ±16 range Doom
+     * actually emits and keeps the code arithmetic-only. */
+    rate = slot->sample_rate;
+    if (pitch != NORM_PITCH && pitch > 0)
+        rate = (rate * (uint32_t)pitch) / NORM_PITCH;
+
+    voice = of_mixer_play((const uint8_t *)slot->pcm, slot->sample_count,
+                          rate, SFX_PRIORITY, 200);
+    if (voice < 0) return -1;
+
+    /* Hardware mixer may ignore the sample_rate arg in of_mixer_play and
+     * default to output rate (48 kHz), which plays an 11025 Hz DMX sample
+     * ~4.4x too fast — whiny/chirpy.  Set rate explicitly like the MIDI
+     * synth does after its own of_mixer_play.
+     *
+     * Do NOT call of_mixer_set_loop here: PC uses loop_end<0 as the "no
+     * loop" sentinel, but passing -1 across the HW service ABI becomes
+     * 0xFFFFFFFF and the mixer treats it as an infinite loop — the SFX
+     * keeps playing forever.  Every voice starts as a one-shot from
+     * of_mixer_play, so leaving it alone is correct. */
+    of_mixer_set_rate(voice, (int)rate);
+
+    of_mixer_set_group(voice, OF_MIXER_GROUP_SFX);
+    channel_voice[channel] = voice;
+    set_params(voice, vol, sep);
     return channel;
 }
 
-static void I_SDL_StopSound(int channel)    { (void)channel; }
-static boolean I_SDL_SoundIsPlaying(int channel) { (void)channel; return false; }
+static void I_SDL_StopSound(int channel)
+{
+    if ((unsigned)channel >= NUM_CHANNELS) return;
+    if (channel_voice[channel] >= 0) {
+        of_mixer_stop(channel_voice[channel]);
+        channel_voice[channel] = -1;
+    }
+}
+
+static boolean I_SDL_SoundIsPlaying(int channel)
+{
+    int v;
+    if ((unsigned)channel >= NUM_CHANNELS) return false;
+    v = channel_voice[channel];
+    if (v < 0) return false;
+    if (!of_mixer_voice_active(v)) {
+        /* Voice finished on its own — clear the slot so StartSound
+         * doesn't try to stop a voice the mixer has already recycled. */
+        channel_voice[channel] = -1;
+        return false;
+    }
+    return true;
+}
 
 static void I_SDL_PrecacheSounds(sfxinfo_t *sounds, int num_sounds)
 {
-    /* SFX path is stubbed (StartSound returns the channel without playing),
-     * so loading them just consumes CRAM1 sample-pool space adjacent to
-     * the SF2 bank for no audible effect.  Skip until SFX is wired up. */
-    (void)sounds; (void)num_sounds;
-    (void)load_sfx; (void)free_sfx_slot;
+    for (int i = 0; i < num_sounds; i++) load_sfx(&sounds[i]);
+    (void)free_sfx_slot;
 }
 
 const sound_module_t sound_sdl_module = {
