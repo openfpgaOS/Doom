@@ -13,6 +13,10 @@
 #include "include/of_fastram.h"
 #include <string.h>
 
+#ifndef SMP_VOICE_ENABLE_TICK_STATS
+#define SMP_VOICE_ENABLE_TICK_STATS 0
+#endif
+
 /* ------------------------------------------------------------------ */
 /* Static state                                                       */
 /* ------------------------------------------------------------------ */
@@ -63,77 +67,6 @@ static OF_FASTDATA uint16_t stat_cutoff_delta_max;
 
 /* A single 1 kHz voice tick should stay comfortably below the pump cap. */
 #define SMP_TICK_SPIKE_US  2000u
-
-/* ------------------------------------------------------------------ */
-/* Mixer-write trace (OF_TRACE_MIXER_WRITES)                          */
-/* ------------------------------------------------------------------ */
-
-#ifdef OF_TRACE_MIXER_WRITES
-
-/* ~640 KB ring at 20 B/entry.  Enough to hold ~0.7 s of a dense drum
- * MIDI with every rate/vol/filter write captured, at which point the
- * ring wraps.  Short-clip bit-identical diffs are the intended use
- * case; the stats counters remain for aggregate checks on long runs. */
-#define SMP_TRACE_CAP 32768u
-
-static smp_mixer_trace_entry_t smp_trace_buf[SMP_TRACE_CAP];
-static uint32_t smp_trace_next;   /* next write index in ring */
-static uint32_t smp_trace_total;  /* monotonic entries recorded (wraps never) */
-
-static void smp_mixer_trace_log(uint8_t op, int voice,
-                                uint32_t a0, uint32_t a1, uint32_t a2)
-{
-    uint32_t idx = smp_trace_next;
-    smp_trace_next = (idx + 1u) % SMP_TRACE_CAP;
-
-    smp_mixer_trace_entry_t *e = &smp_trace_buf[idx];
-    e->seq   = smp_trace_total++;
-    e->op    = op;
-    e->voice = (uint8_t)voice;
-    e->_pad  = 0;
-    e->arg0  = a0;
-    e->arg1  = a1;
-    e->arg2  = a2;
-}
-
-#define SMP_TRACE(op, v, a, b, c) smp_mixer_trace_log((op), (v), (a), (b), (c))
-
-void smp_mixer_trace_reset(void)
-{
-    smp_trace_next  = 0;
-    smp_trace_total = 0;
-}
-
-uint32_t smp_mixer_trace_total(void) { return smp_trace_total; }
-
-uint32_t smp_mixer_trace_dump(smp_mixer_trace_entry_t *out, uint32_t max)
-{
-    if (!out || max == 0) return 0;
-
-    uint32_t total = smp_trace_total;
-    uint32_t count = total > SMP_TRACE_CAP ? SMP_TRACE_CAP : total;
-    if (count > max) count = max;
-
-    uint32_t start = total > SMP_TRACE_CAP ? smp_trace_next : 0;
-    for (uint32_t i = 0; i < count; i++) {
-        out[i] = smp_trace_buf[(start + i) % SMP_TRACE_CAP];
-    }
-    return count;
-}
-
-#else  /* !OF_TRACE_MIXER_WRITES */
-
-#define SMP_TRACE(op, v, a, b, c) ((void)0)
-
-void     smp_mixer_trace_reset(void)                                   { }
-uint32_t smp_mixer_trace_total(void)                                   { return 0; }
-uint32_t smp_mixer_trace_dump(smp_mixer_trace_entry_t *out, uint32_t max)
-{
-    (void)out; (void)max;
-    return 0;
-}
-
-#endif /* OF_TRACE_MIXER_WRITES */
 
 void smp_voice_tick_get_stats(smp_tick_stats_t *out)
 {
@@ -192,23 +125,28 @@ void smp_voice_tick_record_pump(uint32_t elapsed_us, int ticks_fired,
     if (budget_exceeded) stat_pump_budget_exceeded++;
 }
 
-/* Per-channel state (16 MIDI channels) */
-static OF_FASTDATA int ch_volume[16];        /* CC7  (0-127) */
-static OF_FASTDATA int ch_expression[16];    /* CC11 (0-127) */
-static OF_FASTDATA int ch_pan[16];           /* CC10 (0-127, 64=center) */
-static OF_FASTDATA int ch_bend[16];          /* -8192..+8191 */
-static OF_FASTDATA int ch_mod_depth[16];     /* CC1  (0-127) */
-static OF_FASTDATA int ch_sustain[16];       /* CC64 on/off */
-static OF_FASTDATA int ch_brightness[16];    /* CC74 (0-127) */
-static OF_FASTDATA int ch_resonance[16];     /* CC71 (0-127) */
-static OF_FASTDATA int ch_reverb_send[16];   /* CC91 (0-127), default 40 = GM tasteful default */
-static OF_FASTDATA int ch_chorus_send[16];   /* CC93 (0-127), default 0 */
+/* Per-channel state (16 MIDI channels).  These stay in BRAM because the
+ * 1 kHz MIDI ISR reads them for every active voice, but most are native
+ * MIDI 7-bit values and do not need 32-bit storage. */
+static OF_FASTDATA uint8_t ch_volume[16];        /* CC7  (0-127) */
+static OF_FASTDATA uint8_t ch_expression[16];    /* CC11 (0-127) */
+static OF_FASTDATA uint8_t ch_pan[16];           /* CC10 (0-127, 64=center) */
+static OF_FASTDATA int16_t ch_bend[16];          /* -8192..+8191 */
+static OF_FASTDATA int16_t ch_bend_cents[16];    /* pitch-bend contribution in cents */
+static OF_FASTDATA uint8_t ch_mod_depth[16];     /* CC1  (0-127) */
+static OF_FASTDATA uint8_t ch_sustain[16];       /* CC64 on/off */
+static OF_FASTDATA uint8_t ch_brightness[16];    /* CC74 (0-127) */
+static OF_FASTDATA uint8_t ch_resonance[16];     /* CC71 (0-127) */
+static OF_FASTDATA uint8_t ch_reverb_send[16];   /* CC91 (0-127), default 40 = GM tasteful default */
+static OF_FASTDATA uint8_t ch_chorus_send[16];   /* CC93 (0-127), default 0 */
+static OF_FASTDATA uint8_t ch_vol_combined[16];  /* (CC7 * CC11) / 127, cached */
+static OF_FASTDATA int16_t ch_pan_midi[16];      /* CC10 mapped to roughly -507..+500 */
 static OF_FASTDATA int master_vol = 255;
 
 /* Cached mixer state to avoid redundant CDC writes */
 static OF_FASTDATA uint32_t prev_rate[SMP_MAX_VOICES];
-static OF_FASTDATA int      prev_vol_l[SMP_MAX_VOICES];
-static OF_FASTDATA int      prev_vol_r[SMP_MAX_VOICES];
+static OF_FASTDATA uint8_t  prev_vol_l[SMP_MAX_VOICES];
+static OF_FASTDATA uint8_t  prev_vol_r[SMP_MAX_VOICES];
 
 /* Voices pending steal (waiting for hardware fade-out) */
 #define STEAL_PENDING -2
@@ -234,6 +172,13 @@ static int32_t triangle_wave(int32_t phase)
         return 0x20000 - (phase << 2);          /* 0x10000..-0x10000 */
     else
         return (phase << 2) - 0x40000;          /* -0x10000..0 */
+}
+
+static int clamp_midi7(int v)
+{
+    if (v < 0) return 0;
+    if (v > 127) return 127;
+    return v;
 }
 
 /* ------------------------------------------------------------------ */
@@ -493,7 +438,6 @@ static void voice_force_off(int idx)
         return;
 
     of_mixer_set_vol_lr(v->mixer_voice, 0, 0);
-    SMP_TRACE(SMP_TRACE_OP_VOL_LR, v->mixer_voice, 0, 0, 0);
     of_mixer_set_volume_ramp(v->mixer_voice, 16);
     v->active = STEAL_PENDING;
 }
@@ -537,9 +481,7 @@ static void compute_vol_lr(smp_voice_t *v, int *out_l, int *out_r)
     if (env_vol > 255) env_vol = 255;
     if (env_vol < 0)   env_vol = 0;
 
-    /* channel volume: (CC7 * CC11) / 127 -> 0..127 */
     int ch = v->midi_ch;
-    int ch_vol_combined = (ch_volume[ch] * ch_expression[ch]) / 127;
 
     /* Design-doc compose: VOICE_BASE_VOL × RAMP0_LEVEL × CH_VOL × CH_EXPR × MASTER.
      * voice_base_vol (0..255) = (vel_scale × initial_attn_scale) >> 8, baked at
@@ -547,7 +489,7 @@ static void compute_vol_lr(smp_voice_t *v, int *out_l, int *out_r)
      * AWE fabric's compose arithmetic verbatim (Phase 3 bit-identical). */
     int32_t vol = env_vol;
     vol = (vol * v->voice_base_vol) >> 8;
-    vol = (vol * ch_vol_combined) >> 7;
+    vol = (vol * ch_vol_combined[ch]) >> 7;
     vol = (vol * master_vol) >> 8;
     if (vol > 255) vol = 255;
     if (vol < 0)   vol = 0;
@@ -557,7 +499,7 @@ static void compute_vol_lr(smp_voice_t *v, int *out_l, int *out_r)
      * Channel CC10: 0..127 (64=center)
      * Combined pan: -500..+500 range */
     int zone_pan = v->zone ? v->zone->pan : 0;
-    int midi_pan = ((ch_pan[ch] - 64) * 500) / 63;
+    int midi_pan = ch_pan_midi[ch];
     int pan = zone_pan + midi_pan;
     if (pan < -500) pan = -500;
     if (pan > 500)  pan = 500;
@@ -585,29 +527,41 @@ static void compute_vol_lr(smp_voice_t *v, int *out_l, int *out_r)
 static uint32_t compute_pitch(smp_voice_t *v)
 {
     int ch = v->midi_ch;
-    int32_t cents_offset = 0;
+    const ofsf_zone_t *z = v->zone;
+    int32_t cents_offset = ch_bend_cents[ch];
 
-    /* Pitch bend */
-    cents_offset += ((int32_t)ch_bend[ch] * BEND_RANGE_CENTS) / 8192;
+    if (!z)
+        return v->base_rate_fp16;
+
+    if (z->vib_lfo_to_pitch == 0 &&
+        z->mod_env_to_pitch == 0 &&
+        (z->mod_lfo_to_pitch == 0 || ch_mod_depth[ch] == 0)) {
+        if (cents_offset == 0)
+            return v->base_rate_fp16;
+        if (cents_offset > 12000) cents_offset = 12000;
+        if (cents_offset < -12000) cents_offset = -12000;
+        uint32_t mult = smp_cents_to_multiplier(cents_offset);
+        return (uint32_t)(((uint64_t)v->base_rate_fp16 * mult) >> 16);
+    }
 
     /* Vibrato LFO */
-    if (v->zone && v->zone->vib_lfo_to_pitch != 0) {
+    if (z->vib_lfo_to_pitch != 0) {
         int32_t lfo_out = triangle_wave(v->vib_lfo.phase);
-        cents_offset += (lfo_out * v->zone->vib_lfo_to_pitch) >> 16;
+        cents_offset += (lfo_out * z->vib_lfo_to_pitch) >> 16;
     }
 
     /* Mod LFO to pitch */
-    if (v->zone && v->zone->mod_lfo_to_pitch != 0) {
+    if (z->mod_lfo_to_pitch != 0) {
         int32_t lfo_out = triangle_wave(v->mod_lfo.phase);
-        int32_t depth = v->zone->mod_lfo_to_pitch;
+        int32_t depth = z->mod_lfo_to_pitch;
         /* Scale by CC1 mod wheel */
         depth = (depth * ch_mod_depth[ch]) / 127;
         cents_offset += (lfo_out * depth) >> 16;
     }
 
     /* Mod envelope to pitch */
-    if (v->zone && v->zone->mod_env_to_pitch != 0) {
-        cents_offset += ((int64_t)v->mod_env.level * v->zone->mod_env_to_pitch) >> 16;
+    if (z->mod_env_to_pitch != 0) {
+        cents_offset += ((int64_t)v->mod_env.level * z->mod_env_to_pitch) >> 16;
     }
 
     if (cents_offset == 0)
@@ -617,6 +571,12 @@ static uint32_t compute_pitch(smp_voice_t *v)
 
     uint32_t mult = smp_cents_to_multiplier(cents_offset);
     return (uint32_t)(((uint64_t)v->base_rate_fp16 * mult) >> 16);
+}
+
+static void channel_recompute_cached(int ch)
+{
+    ch_vol_combined[ch] = (ch_volume[ch] * ch_expression[ch]) / 127;
+    ch_pan_midi[ch] = ((ch_pan[ch] - 64) * 500) / 63;
 }
 
 /* ------------------------------------------------------------------ */
@@ -643,12 +603,14 @@ void smp_voice_init(void)
         ch_expression[i] = 127;
         ch_pan[i]        = 64;
         ch_bend[i]       = 0;
+        ch_bend_cents[i] = 0;
         ch_mod_depth[i]  = 0;
         ch_sustain[i]    = 0;
         ch_brightness[i] = 64;
         ch_resonance[i]  = 0;
         ch_reverb_send[i] = 40;   /* GM tasteful default ~31 % wet */
         ch_chorus_send[i] = 0;
+        channel_recompute_cached(i);
     }
 
     master_vol = 255;
@@ -742,7 +704,6 @@ int smp_voice_note_on(const ofsf_zone_t *zone, int midi_ch, int note,
 
     v->mixer_voice = mhv;
     of_mixer_set_rate_raw(mhv, v->base_rate_fp16);
-    SMP_TRACE(SMP_TRACE_OP_RATE, mhv, v->base_rate_fp16, 0, 0);
     stat_rate_writes++;
 
     /* Loop setup */
@@ -781,13 +742,6 @@ int smp_voice_note_on(const ofsf_zone_t *zone, int midi_ch, int note,
     lfo_init(&v->mod_lfo, zone->mod_lfo_delay_ticks, zone->mod_lfo_rate);
     lfo_init(&v->vib_lfo, zone->vib_lfo_delay_ticks, zone->vib_lfo_rate);
 
-    /* Filter state retired in v3 — mixer RTL has no SVF.  Fields kept
-     * in smp_voice_t so the existing struct layout / pinned BRAM size
-     * doesn't shift; just zero them. */
-    v->cur_filter_fc = 0;
-    v->cur_filter_q  = 0;
-    v->cur_cutoff_hw = 0;
-
     /* Advance the envelope one tick so the level is non-zero before
      * the ISR runs — otherwise the ISR writes volume 0 immediately. */
     env_advance(&v->vol_env, zone, 1);
@@ -795,7 +749,6 @@ int smp_voice_note_on(const ofsf_zone_t *zone, int midi_ch, int note,
     int vl, vr;
     compute_vol_lr(v, &vl, &vr);
     of_mixer_set_vol_lr(mhv, vl, vr);
-    SMP_TRACE(SMP_TRACE_OP_VOL_LR, mhv, (uint32_t)vl, (uint32_t)vr, 0);
     stat_vol_writes++;
     prev_vol_l[idx] = vl;
     prev_vol_r[idx] = vr;
@@ -824,6 +777,7 @@ void smp_voice_note_off(int midi_ch, int note)
 
 void smp_voice_tick(void)
 {
+#if SMP_VOICE_ENABLE_TICK_STATS
     uint32_t _probe_t0 = OF_SVC->timer_get_us();
     uint8_t  _probe_active = 0;
     uint8_t  _probe_sustain = 0;
@@ -831,6 +785,7 @@ void smp_voice_tick(void)
     uint8_t  _probe_decay = 0;
     uint8_t  _probe_held = 0;
     uint8_t  _probe_ch[16] = {0};
+#endif
 
     tick_counter++;
     voice_cleanup_stolen();
@@ -842,14 +797,14 @@ void smp_voice_tick(void)
         if (voice_drop_if_stale(v))
             continue;
 
+#if SMP_VOICE_ENABLE_TICK_STATS
         _probe_active++;
         if (v->vol_env.stage == ENV_SUSTAIN) _probe_sustain++;
         else if (v->vol_env.stage == ENV_RELEASE) _probe_release++;
         else if (v->vol_env.stage == ENV_DECAY) _probe_decay++;
         if (v->sustain_held) _probe_held++;
         if (v->midi_ch < 16) _probe_ch[v->midi_ch]++;
-
-        const ofsf_zone_t *z = v->zone;
+#endif
 
         /* Natural sample-end check for one-shots.  When the sample has
          * played to its end the mixer is already emitting silence, so we
@@ -872,6 +827,7 @@ void smp_voice_tick(void)
          * effective 1 kHz; with 1 kHz pump the second pass would
          * make envelopes 2× too fast (snappy attacks, premature
          * releases). */
+        const ofsf_zone_t *z = v->zone;
         env_advance(&v->vol_env, z, 1);
         env_advance(&v->mod_env, z, 0);
         lfo_advance(&v->mod_lfo);
@@ -890,8 +846,6 @@ void smp_voice_tick(void)
         if (vl != prev_vol_l[i] || vr != prev_vol_r[i] ||
             rate != prev_rate[i]) {
             of_mixer_set_voice_raw(v->mixer_voice, rate, vl, vr);
-            SMP_TRACE(SMP_TRACE_OP_VOICE_RAW, v->mixer_voice,
-                      rate, (uint32_t)vl, (uint32_t)vr);
             /* set_voice_raw coalesces rate + vol; count each independently
              * changed field so the stats reflect the underlying load. */
             if (rate != prev_rate[i]) stat_rate_writes++;
@@ -902,6 +856,7 @@ void smp_voice_tick(void)
         }
     }
 
+#if SMP_VOICE_ENABLE_TICK_STATS
     uint32_t _probe_dt = OF_SVC->timer_get_us() - _probe_t0;
     tick_us_last = _probe_dt;
     if (_probe_dt > tick_us_max) tick_us_max = _probe_dt;
@@ -913,31 +868,41 @@ void smp_voice_tick(void)
     tick_sustain_held  = _probe_held;
     for (int i = 0; i < 16; i++)
         tick_ch_active[i] = _probe_ch[i];
+#endif
     tick_stat_count++;
 }
 
 void smp_voice_update_volume(int midi_ch, int volume, int expression)
 {
     if (midi_ch < 0 || midi_ch > 15) return;
+    volume = clamp_midi7(volume);
+    expression = clamp_midi7(expression);
     ch_volume[midi_ch]     = volume;
     ch_expression[midi_ch] = expression;
+    channel_recompute_cached(midi_ch);
 }
 
 void smp_voice_update_pan(int midi_ch, int pan)
 {
     if (midi_ch < 0 || midi_ch > 15) return;
+    pan = clamp_midi7(pan);
     ch_pan[midi_ch] = pan;
+    channel_recompute_cached(midi_ch);
 }
 
 void smp_voice_update_bend(int midi_ch, int bend)
 {
     if (midi_ch < 0 || midi_ch > 15) return;
+    if (bend < -8192) bend = -8192;
+    if (bend > 8191) bend = 8191;
     ch_bend[midi_ch] = bend;
+    ch_bend_cents[midi_ch] = ((int32_t)bend * BEND_RANGE_CENTS) / 8192;
 }
 
 void smp_voice_update_mod(int midi_ch, int mod_depth)
 {
     if (midi_ch < 0 || midi_ch > 15) return;
+    mod_depth = clamp_midi7(mod_depth);
     ch_mod_depth[midi_ch] = mod_depth;
 }
 
@@ -962,6 +927,8 @@ void smp_voice_update_sustain(int midi_ch, int sustain_on)
 void smp_voice_update_filter(int midi_ch, int brightness, int resonance)
 {
     if (midi_ch < 0 || midi_ch > 15) return;
+    brightness = clamp_midi7(brightness);
+    resonance = clamp_midi7(resonance);
     ch_brightness[midi_ch] = brightness;
     ch_resonance[midi_ch]  = resonance;
 }
@@ -969,16 +936,14 @@ void smp_voice_update_filter(int midi_ch, int brightness, int resonance)
 void smp_voice_update_reverb_send(int midi_ch, int send_0_127)
 {
     if (midi_ch < 0 || midi_ch > 15) return;
-    if (send_0_127 < 0)   send_0_127 = 0;
-    if (send_0_127 > 127) send_0_127 = 127;
+    send_0_127 = clamp_midi7(send_0_127);
     ch_reverb_send[midi_ch] = send_0_127;
 }
 
 void smp_voice_update_chorus_send(int midi_ch, int send_0_127)
 {
     if (midi_ch < 0 || midi_ch > 15) return;
-    if (send_0_127 < 0)   send_0_127 = 0;
-    if (send_0_127 > 127) send_0_127 = 127;
+    send_0_127 = clamp_midi7(send_0_127);
     ch_chorus_send[midi_ch] = send_0_127;
 }
 
