@@ -34,6 +34,7 @@
 #include "i_video.h"
 #include "m_bbox.h"
 #include "m_misc.h"
+#include "r_gpu.h"
 #include "v_video.h"
 #include "w_wad.h"
 #include "z_zone.h"
@@ -65,6 +66,14 @@ int dirtybox[4];
 // This is needed for Chocolate Strife, which clips patches to the screen.
 static vpatchclipfunc_t patchclip_callback = NULL;
 
+static void V_PrepareFramebufferWrite(void)
+{
+    if (dest_screen == I_VideoBuffer)
+    {
+        R_GPU_PrepareForCPUAccess();
+    }
+}
+
 //
 // V_MarkRect 
 // 
@@ -75,6 +84,7 @@ void V_MarkRect(int x, int y, int width, int height)
 
     if (dest_screen == I_VideoBuffer)
     {
+        V_PrepareFramebufferWrite();
         M_AddToBox (dirtybox, x, y); 
         M_AddToBox (dirtybox, x + width-1, y + height-1); 
     }
@@ -541,6 +551,8 @@ void V_DrawFilledBox(int x, int y, int w, int h, int c)
     pixel_t *buf, *buf1;
     int x1, y1;
 
+    V_PrepareFramebufferWrite();
+
     buf = I_VideoBuffer + SCREENWIDTH * y + x;
 
     for (y1 = 0; y1 < h; ++y1)
@@ -561,6 +573,8 @@ void V_DrawHorizLine(int x, int y, int w, int c)
     pixel_t *buf;
     int x1;
 
+    V_PrepareFramebufferWrite();
+
     buf = I_VideoBuffer + SCREENWIDTH * y + x;
 
     for (x1 = 0; x1 < w; ++x1)
@@ -573,6 +587,8 @@ void V_DrawVertLine(int x, int y, int h, int c)
 {
     pixel_t *buf;
     int y1;
+
+    V_PrepareFramebufferWrite();
 
     buf = I_VideoBuffer + SCREENWIDTH * y + x;
 
@@ -598,6 +614,7 @@ void V_DrawBox(int x, int y, int w, int h, int c)
  
 void V_DrawRawScreen(pixel_t *raw)
 {
+    V_PrepareFramebufferWrite();
     memcpy(dest_screen, raw, SCREENWIDTH * SCREENHEIGHT * sizeof(*dest_screen));
 }
 
@@ -1024,4 +1041,3 @@ void V_DrawMouseSpeedBox(int speed)
         DrawNonAcceleratingBox(speed);
     }
 }
-

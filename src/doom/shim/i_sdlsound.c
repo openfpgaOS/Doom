@@ -80,20 +80,6 @@ static boolean load_sfx(sfxinfo_t *sfx)
     byte *pcm8 = data + 8;
     if (samples > 32) { pcm8 += 16; samples -= 32; }
 
-    /* First-few-loads diagnostic so we can sanity-check rate/length/CRAM1
-     * contents when SFX sound wrong (e.g. whiny = rate misinterpretation,
-     * silent-then-garbage = CRAM1 write not visible to mixer DMA). */
-    static int sfx_load_diag = 0;
-    if (sfx_load_diag < 6) {
-        printf("SFX load[%d]: name=%-8s lump=%d len=%d rate=%u samples=%u\n",
-               sfx_load_diag, sfx->name, sfx->lumpnum, len,
-               (unsigned)rate, (unsigned)samples);
-        printf("  first 8 raw DMX bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-               pcm8[0], pcm8[1], pcm8[2], pcm8[3],
-               pcm8[4], pcm8[5], pcm8[6], pcm8[7]);
-        sfx_load_diag++;
-    }
-
     /* The hardware mixer reads samples from CRAM1 — ordinary malloc'd
      * heap memory is not accessible to it, so we MUST allocate via
      * of_mixer_alloc_samples and expand 8→16-bit into that buffer. */
@@ -103,11 +89,6 @@ static boolean load_sfx(sfxinfo_t *sfx)
         pcm16[i] = (int16_t)((pcm8[i] - 128) << 8);
 
     W_ReleaseLumpNum(sfx->lumpnum);
-
-    if (sfx_load_diag <= 6 && sfx_load_diag > 0) {
-        printf("  cram1=%p first 4 int16: %d %d %d %d\n",
-               (void *)pcm16, pcm16[0], pcm16[1], pcm16[2], pcm16[3]);
-    }
 
     sfx_slot_t *slot = malloc(sizeof(*slot));
     slot->pcm          = pcm16;
@@ -126,7 +107,6 @@ static boolean I_SDL_InitSound(GameMission_t mission)
      * race over master/group volumes and were the only divergence from
      * mididemo's clean path. */
     for (int i = 0; i < NUM_CHANNELS; i++) channel_voice[i] = -1;
-    printf("SFX: init ok (stub — music_opl_module owns mixer)\n");
     return true;
 }
 

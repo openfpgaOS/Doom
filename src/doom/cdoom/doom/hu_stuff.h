@@ -53,6 +53,7 @@ void HU_Ticker(void);
 void HU_Drawer(void);
 char HU_dequeueChatChar(void);
 void HU_Erase(void);
+const char *HU_GetLevelName(void);
 
 extern const char *player_names[4];
 extern char *chat_macros[10];
@@ -65,4 +66,3 @@ extern boolean chat_on;
 
 
 #endif
-

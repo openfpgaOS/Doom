@@ -144,7 +144,8 @@ STlib_updateNum
 ( st_number_t*		n,
   boolean		refresh )
 {
-    if (*n->on) STlib_drawNum(n, refresh);
+    if (*n->on && (refresh || n->oldnum != *n->num))
+	STlib_drawNum(n, refresh);
 }
 
 
@@ -280,4 +281,3 @@ STlib_updateBinIcon
     }
 
 }
-

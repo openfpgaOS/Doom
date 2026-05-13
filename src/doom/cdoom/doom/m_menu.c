@@ -20,6 +20,7 @@
 
 #include <stdlib.h>
 #include <ctype.h>
+#include <string.h>
 
 
 #include "doomdef.h"
@@ -35,6 +36,7 @@
 #include "i_system.h"
 #include "i_timer.h"
 #include "i_video.h"
+#include "m_config.h"
 #include "m_misc.h"
 #include "v_video.h"
 #include "w_wad.h"
@@ -124,6 +126,29 @@ char			savegamestrings[10][SAVESTRINGSIZE];
 char	endstring[160];
 
 static boolean opldev;
+#ifndef OF_PC
+static boolean settings_dirty;
+#endif
+
+static void M_SaveSettingsIfNeeded(void)
+{
+#ifndef OF_PC
+    settings_dirty = true;
+#endif
+}
+
+static void M_FlushSettingsIfNeeded(void)
+{
+#ifndef OF_PC
+    if (!settings_dirty)
+    {
+        return;
+    }
+
+    settings_dirty = false;
+    M_SaveDefaults();
+#endif
+}
 
 //
 // MENU TYPEDEFS
@@ -229,7 +254,6 @@ enum
     loadgame,
     savegame,
     readthis,
-    quitdoom,
     main_end
 } main_e;
 
@@ -240,8 +264,7 @@ menuitem_t MainMenu[]=
     {1,"M_LOADG",M_LoadGame,'l'},
     {1,"M_SAVEG",M_SaveGame,'s'},
     // Another hickup with Special edition.
-    {1,"M_RDTHIS",M_ReadThis,'r'},
-    {1,"M_QUITG",M_QuitDOOM,'q'}
+    {1,"M_RDTHIS",M_ReadThis,'r'}
 };
 
 menu_t  MainDef =
@@ -494,6 +517,48 @@ menu_t  SaveDef =
 // M_ReadSaveStrings
 //  read the strings from the savegame files
 //
+static boolean M_SaveGameHeaderValid(byte *header)
+{
+    char vcheck[VERSIONSIZE];
+    boolean has_description;
+    int i;
+
+    has_description = false;
+    for (i = 0; i < SAVESTRINGSIZE; ++i)
+    {
+        if (header[i] == '\0')
+        {
+            break;
+        }
+
+        if (header[i] == 0xff || !isprint(header[i]))
+        {
+            return false;
+        }
+
+        has_description = true;
+    }
+
+    if (!has_description)
+    {
+        return false;
+    }
+
+    memset(vcheck, 0, sizeof(vcheck));
+    M_snprintf(vcheck, sizeof(vcheck), "version %i",
+               G_VanillaVersionCode());
+
+    for (i = 0; i < VERSIONSIZE; ++i)
+    {
+        if (header[SAVESTRINGSIZE + i] != (byte) vcheck[i])
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void M_ReadSaveStrings(void)
 {
     FILE   *handle;
@@ -502,7 +567,8 @@ void M_ReadSaveStrings(void)
 
     for (i = 0;i < load_end;i++)
     {
-        int retval;
+        size_t retval;
+        byte header[SAVESTRINGSIZE + VERSIONSIZE];
         M_StringCopy(name, P_SaveGameFile(i), sizeof(name));
 
 	handle = M_fopen(name, "rb");
@@ -512,9 +578,18 @@ void M_ReadSaveStrings(void)
             LoadMenu[i].status = 0;
             continue;
         }
-        retval = fread(&savegamestrings[i], 1, SAVESTRINGSIZE, handle);
+        retval = fread(header, 1, sizeof(header), handle);
 	fclose(handle);
-        LoadMenu[i].status = retval == SAVESTRINGSIZE;
+        if (retval != sizeof(header) || !M_SaveGameHeaderValid(header))
+        {
+            M_StringCopy(savegamestrings[i], EMPTYSTRING, SAVESTRINGSIZE);
+            LoadMenu[i].status = 0;
+            continue;
+        }
+
+        memcpy(savegamestrings[i], header, SAVESTRINGSIZE);
+        savegamestrings[i][SAVESTRINGSIZE - 1] = '\0';
+        LoadMenu[i].status = true;
     }
 }
 
@@ -625,33 +700,19 @@ void M_DoSave(int slot)
 }
 
 //
-// Generate a default save slot name when the user saves to
-// an empty slot via the joypad.
+// Generate a default save slot name when the user saves to an empty slot.
 //
 static void SetDefaultSaveName(int slot)
 {
-    // map from IWAD or PWAD?
-    if (W_IsIWADLump(maplumpinfo) && strcmp(savegamedir, ""))
-    {
-        M_snprintf(savegamestrings[itemOn], SAVESTRINGSIZE,
-                   "%s", maplumpinfo->name);
-    }
-    else
-    {
-        char *wadname = M_StringDuplicate(W_WadNameForLump(maplumpinfo));
-        char *ext = strrchr(wadname, '.');
+    const char *name = HU_GetLevelName();
 
-        if (ext != NULL)
-        {
-            *ext = '\0';
-        }
-
-        M_snprintf(savegamestrings[itemOn], SAVESTRINGSIZE,
-                   "%s (%s)", maplumpinfo->name,
-                   wadname);
-        free(wadname);
+    if (name == NULL || name[0] == '\0')
+    {
+        name = maplumpinfo != NULL ? maplumpinfo->name : "LEVEL";
     }
-    M_ForceUppercase(savegamestrings[itemOn]);
+
+    M_snprintf(savegamestrings[slot], SAVESTRINGSIZE, "%s", name);
+    M_ForceUppercase(savegamestrings[slot]);
     joypadSave = false;
 }
 
@@ -675,11 +736,7 @@ void M_SaveSelect(int choice)
     if (!strcmp(savegamestrings[choice], EMPTYSTRING))
     {
         savegamestrings[choice][0] = 0;
-
-        if (joypadSave)
-        {
-            SetDefaultSaveName(choice);
-        }
+        SetDefaultSaveName(choice);
     }
     saveCharIndex = strlen(savegamestrings[choice]);
 }
@@ -846,6 +903,7 @@ void M_SfxVol(int choice)
     }
 	
     S_SetSfxVolume(sfxVolume * 8);
+    M_SaveSettingsIfNeeded();
 }
 
 void M_MusicVol(int choice)
@@ -863,6 +921,7 @@ void M_MusicVol(int choice)
     }
 	
     S_SetMusicVolume(musicVolume * 8);
+    M_SaveSettingsIfNeeded();
 }
 
 
@@ -1001,6 +1060,7 @@ void M_ChangeMessages(int choice)
 	players[consoleplayer].message = DEH_String(MSGON);
 
     message_dontfuckwithme = true;
+    M_SaveSettingsIfNeeded();
 }
 
 
@@ -1152,6 +1212,7 @@ void M_ChangeSensitivity(int choice)
 	    mouseSensitivity++;
 	break;
     }
+    M_SaveSettingsIfNeeded();
 }
 
 
@@ -1168,6 +1229,8 @@ void M_ChangeDetail(int choice)
 	players[consoleplayer].message = DEH_String(DETAILHI);
     else
 	players[consoleplayer].message = DEH_String(DETAILLO);
+
+    M_SaveSettingsIfNeeded();
 }
 
 
@@ -1195,6 +1258,7 @@ void M_SizeDisplay(int choice)
 	
 
     R_SetViewSize (screenblocks, detailLevel);
+    M_SaveSettingsIfNeeded();
 }
 
 
@@ -1744,6 +1808,7 @@ boolean M_Responder (event_t* ev)
 		usegamma = 0;
 	    players[consoleplayer].message = DEH_String(gammamsg[usegamma]);
             I_SetPalette (W_CacheLumpName (DEH_String("PLAYPAL"),PU_CACHE));
+	    M_SaveSettingsIfNeeded();
 	    return true;
 	}
     }
@@ -2034,6 +2099,7 @@ void M_Drawer (void)
 //
 void M_ClearMenus (void)
 {
+    M_FlushSettingsIfNeeded();
     menuactive = 0;
     // if (!netgame && usergame && paused)
     //       sendpause = true;
@@ -2099,7 +2165,6 @@ void M_Init (void)
 
     if (gamemode == commercial)
     {
-        MainMenu[readthis] = MainMenu[quitdoom];
         MainDef.numitems--;
         MainDef.y += 8;
         NewDef.prevMenu = &MainDef;
@@ -2125,4 +2190,3 @@ void M_Init (void)
 
     opldev = M_CheckParm("-opldev") > 0;
 }
-

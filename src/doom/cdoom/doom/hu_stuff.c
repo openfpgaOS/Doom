@@ -333,6 +333,64 @@ const char *mapnames_commercial[] =
     ""
 };
 
+const char *HU_GetLevelName(void)
+{
+    const char *s = NULL;
+
+    switch (logical_gamemission)
+    {
+      case doom:
+        if (gameepisode >= 1 && gameepisode <= 5
+         && gamemap >= 1 && gamemap <= 9)
+        {
+            if (gameversion == exe_chex)
+            {
+                s = mapnames_chex[(gameepisode - 1) * 9 + gamemap - 1];
+            }
+            else
+            {
+                s = mapnames[(gameepisode - 1) * 9 + gamemap - 1];
+            }
+        }
+        break;
+
+      case doom2:
+        if (gamemap >= 1 && gamemap <= 35)
+        {
+            s = mapnames_commercial[gamemap - 1];
+            if (gameversion <= exe_doom_1_9 && gamemap >= 33)
+            {
+                s = "";
+            }
+        }
+        break;
+
+      case pack_plut:
+        if (gamemap >= 1 && gamemap <= 32)
+        {
+            s = mapnames_commercial[gamemap - 1 + 32];
+        }
+        break;
+
+      case pack_tnt:
+        if (gamemap >= 1 && gamemap <= 32)
+        {
+            s = mapnames_commercial[gamemap - 1 + 64];
+        }
+        break;
+
+      default:
+        break;
+    }
+
+    if (s == NULL)
+    {
+        s = "Unknown level";
+    }
+
+    return DEH_String(s);
+}
+
 void HU_Init(void)
 {
 
@@ -382,38 +440,7 @@ void HU_Start(void)
 		       hu_font,
 		       HU_FONTSTART);
     
-    switch ( logical_gamemission )
-    {
-      case doom:
-	s = HU_TITLE;
-	break;
-      case doom2:
-	 s = HU_TITLE2;
-         // Pre-Final Doom compatibility: map33-map35 names don't spill over
-         if (gameversion <= exe_doom_1_9 && gamemap >= 33)
-         {
-             s = "";
-         }
-	 break;
-      case pack_plut:
-	s = HU_TITLEP;
-	break;
-      case pack_tnt:
-	s = HU_TITLET;
-	break;
-      default:
-         s = "Unknown level";
-         break;
-    }
-
-    if (logical_gamemission == doom && gameversion == exe_chex)
-    {
-        s = HU_TITLE_CHEX;
-    }
-
-    // dehacked substitution to get modified level name
-
-    s = DEH_String(s);
+    s = HU_GetLevelName();
     
     while (*s)
 	HUlib_addCharToTextLine(&w_title, *(s++));

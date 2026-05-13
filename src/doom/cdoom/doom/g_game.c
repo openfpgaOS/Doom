@@ -77,6 +77,84 @@
 
 
 #define SAVEGAMESIZE	0x2c000
+#ifndef OF_PC
+#define OPENFPGA_SAVE_SLOT_SIZE 0x40000
+static byte openfpga_save_buffer[OPENFPGA_SAVE_SLOT_SIZE];
+
+static FILE *G_OpenBufferedSaveForRead(const char *name)
+{
+    FILE *slot;
+    size_t size;
+
+    slot = M_fopen(name, "rb");
+    if (slot == NULL)
+    {
+        return NULL;
+    }
+
+    size = fread(openfpga_save_buffer, 1,
+                 sizeof(openfpga_save_buffer), slot);
+    if (ferror(slot))
+    {
+        fclose(slot);
+        return NULL;
+    }
+    fclose(slot);
+
+    if (size == 0)
+    {
+        return NULL;
+    }
+
+    P_SaveBufferForRead(openfpga_save_buffer, size);
+    return (FILE *) openfpga_save_buffer;
+}
+
+static FILE *G_OpenBufferedSaveForWrite(void)
+{
+    memset(openfpga_save_buffer, 0, sizeof(openfpga_save_buffer));
+    P_SaveBufferForWrite(openfpga_save_buffer, sizeof(openfpga_save_buffer));
+    return (FILE *) openfpga_save_buffer;
+}
+
+static int G_FlushBufferedSave(const char *name)
+{
+    FILE *slot;
+    long size;
+
+    size = P_SaveBufferLength();
+    if (savegame_error
+     || size < 0
+     || size > (long) sizeof(openfpga_save_buffer))
+    {
+        P_SaveBufferClear();
+        return -1;
+    }
+
+    slot = M_fopen(name, "wb");
+    if (slot == NULL)
+    {
+        P_SaveBufferClear();
+        return -1;
+    }
+
+    if (fwrite(openfpga_save_buffer, 1, (size_t) size, slot) != (size_t) size)
+    {
+        fclose(slot);
+        P_SaveBufferClear();
+        return -1;
+    }
+
+    if (fclose(slot) != 0)
+    {
+        P_SaveBufferClear();
+        return -1;
+    }
+
+    P_SaveBufferClear();
+    return 0;
+}
+#endif
 
 void	G_ReadDemoTiccmd (ticcmd_t* cmd); 
 void	G_WriteDemoTiccmd (ticcmd_t* cmd); 
@@ -1647,7 +1725,11 @@ void G_DoLoadGame (void)
 	 
     gameaction = ga_nothing; 
 	 
+#ifndef OF_PC
+    save_stream = G_OpenBufferedSaveForRead(savename);
+#else
     save_stream = M_fopen(savename, "rb");
+#endif
 
     if (save_stream == NULL)
     {
@@ -1658,7 +1740,11 @@ void G_DoLoadGame (void)
 
     if (!P_ReadSaveGameHeader())
     {
+#ifndef OF_PC
+        P_SaveBufferClear();
+#else
         fclose(save_stream);
+#endif
         return;
     }
 
@@ -1678,7 +1764,11 @@ void G_DoLoadGame (void)
     if (!P_ReadSaveGameEOF())
 	I_Error ("Bad savegame");
 
+#ifndef OF_PC
+    P_SaveBufferClear();
+#else
     fclose(save_stream);
+#endif
     
     if (setsizeneeded)
 	R_ExecuteSetViewSize ();
@@ -1706,6 +1796,17 @@ G_SaveGame
 void G_DoSaveGame (void) 
 { 
     char *savegame_file;
+#ifndef OF_PC
+    savegame_file = P_SaveGameFile(savegameslot);
+
+    save_stream = G_OpenBufferedSaveForWrite();
+
+    if (save_stream == NULL)
+    {
+        I_Error("Failed to allocate savegame buffer for '%s'.",
+                savegame_file);
+    }
+#else
     char *temp_savegame_file;
     char *recovery_savegame_file;
 
@@ -1731,6 +1832,7 @@ void G_DoSaveGame (void)
                     temp_savegame_file, recovery_savegame_file);
         }
     }
+#endif
 
     savegame_error = false;
 
@@ -1746,13 +1848,26 @@ void G_DoSaveGame (void)
     // Enforce the same savegame size limit as in Vanilla Doom,
     // except if the vanilla_savegame_limit setting is turned off.
 
+#ifndef OF_PC
+    if (vanilla_savegame_limit && P_SaveBufferTell() > SAVEGAMESIZE)
+#else
     if (vanilla_savegame_limit && ftell(save_stream) > SAVEGAMESIZE)
+#endif
     {
+#ifndef OF_PC
+        P_SaveBufferClear();
+#endif
         I_Error("Savegame buffer overrun");
     }
 
     // Finish up, close the savegame file.
 
+#ifndef OF_PC
+    if (G_FlushBufferedSave(savegame_file) != 0)
+    {
+        I_Error("Failed to write savegame file '%s'.", savegame_file);
+    }
+#else
     fclose(save_stream);
 
     if (recovery_savegame_file != NULL)
@@ -1770,6 +1885,7 @@ void G_DoSaveGame (void)
 
     M_remove(savegame_file);
     M_rename(temp_savegame_file, savegame_file);
+#endif
 
     gameaction = ga_nothing;
     M_StringCopy(savedescription, "", sizeof(savedescription));

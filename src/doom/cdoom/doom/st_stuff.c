@@ -40,6 +40,7 @@
 #include "st_stuff.h"
 #include "st_lib.h"
 #include "r_local.h"
+#include "r_gpu.h"
 
 #include "p_local.h"
 #include "p_inter.h"
@@ -289,7 +290,77 @@ static st_number_t	w_ammo[4];
 // max ammo widgets
 static st_number_t	w_maxammo[4]; 
 
+typedef struct
+{
+    boolean valid;
+    boolean armsbg_oldval;
+    int ready_oldnum;
+    int frags_oldnum;
+    int health_oldnum;
+    int armor_oldnum;
+    int ammo_oldnum[4];
+    int maxammo_oldnum[4];
+    int arms_oldinum[6];
+    int face_oldinum;
+    int keybox_oldinum[3];
+} st_directfb_slot_t;
 
+static st_directfb_slot_t st_directfb_slots[3];
+
+static void ST_InvalidateDirectFBSlots(void)
+{
+    for (int i = 0; i < 3; i++)
+	st_directfb_slots[i].valid = false;
+}
+
+static void ST_SaveDirectFBSlot(int slot)
+{
+    st_directfb_slot_t *state = &st_directfb_slots[slot];
+
+    state->valid = true;
+    state->armsbg_oldval = w_armsbg.oldval;
+    state->ready_oldnum = w_ready.oldnum;
+    state->frags_oldnum = w_frags.oldnum;
+    state->health_oldnum = w_health.n.oldnum;
+    state->armor_oldnum = w_armor.n.oldnum;
+    state->face_oldinum = w_faces.oldinum;
+
+    for (int i = 0; i < 4; i++)
+    {
+	state->ammo_oldnum[i] = w_ammo[i].oldnum;
+	state->maxammo_oldnum[i] = w_maxammo[i].oldnum;
+    }
+
+    for (int i = 0; i < 6; i++)
+	state->arms_oldinum[i] = w_arms[i].oldinum;
+
+    for (int i = 0; i < 3; i++)
+	state->keybox_oldinum[i] = w_keyboxes[i].oldinum;
+}
+
+static void ST_RestoreDirectFBSlot(int slot)
+{
+    st_directfb_slot_t *state = &st_directfb_slots[slot];
+
+    w_armsbg.oldval = state->armsbg_oldval;
+    w_ready.oldnum = state->ready_oldnum;
+    w_frags.oldnum = state->frags_oldnum;
+    w_health.n.oldnum = state->health_oldnum;
+    w_armor.n.oldnum = state->armor_oldnum;
+    w_faces.oldinum = state->face_oldinum;
+
+    for (int i = 0; i < 4; i++)
+    {
+	w_ammo[i].oldnum = state->ammo_oldnum[i];
+	w_maxammo[i].oldnum = state->maxammo_oldnum[i];
+    }
+
+    for (int i = 0; i < 6; i++)
+	w_arms[i].oldinum = state->arms_oldinum[i];
+
+    for (int i = 0; i < 3; i++)
+	w_keyboxes[i].oldinum = state->keybox_oldinum[i];
+}
 
  // number of frags so far in deathmatch
 static int	st_fragscount;
@@ -1000,8 +1071,38 @@ void ST_diffDraw(void)
 
 void ST_Drawer (boolean fullscreen, boolean refresh)
 {
+    boolean directfb;
+    int slot;
+    boolean slot_refresh;
   
     st_statusbaron = (!fullscreen) || automapactive;
+
+    directfb = R_GPU_UsingDirectFramebuffer();
+    slot = directfb ? R_GPU_CurrentDrawSlot() : -1;
+
+    if (directfb && slot >= 0 && slot < 3)
+    {
+	slot_refresh = refresh || st_firsttime || !st_directfb_slots[slot].valid;
+
+	if (refresh || st_firsttime)
+	    ST_InvalidateDirectFBSlots();
+
+	if (!slot_refresh)
+	    ST_RestoreDirectFBSlot(slot);
+
+	st_firsttime = false;
+
+	ST_doPaletteStuff();
+
+	if (slot_refresh)
+	    ST_doRefresh();
+	else
+	    ST_diffDraw();
+
+	ST_SaveDirectFBSlot(slot);
+	return;
+    }
+
     st_firsttime = st_firsttime || refresh;
 
     // Do red-/gold-shifts from damage/items
@@ -1364,4 +1465,3 @@ void ST_Init (void)
     ST_loadData();
     st_backing_screen = (pixel_t *) Z_Malloc(ST_WIDTH * ST_HEIGHT * sizeof(*st_backing_screen), PU_STATIC, 0);
 }
-

@@ -37,6 +37,54 @@ FILE *save_stream;
 int savegamelength;
 boolean savegame_error;
 
+#ifndef OF_PC
+static byte *save_buffer;
+static size_t save_buffer_capacity;
+static size_t save_buffer_length;
+static size_t save_buffer_pos;
+static boolean save_buffer_writing;
+
+void P_SaveBufferForRead(byte *buffer, size_t length)
+{
+    save_buffer = buffer;
+    save_buffer_capacity = length;
+    save_buffer_length = length;
+    save_buffer_pos = 0;
+    save_buffer_writing = false;
+    save_stream = NULL;
+}
+
+void P_SaveBufferForWrite(byte *buffer, size_t capacity)
+{
+    save_buffer = buffer;
+    save_buffer_capacity = capacity;
+    save_buffer_length = 0;
+    save_buffer_pos = 0;
+    save_buffer_writing = true;
+    save_stream = NULL;
+}
+
+void P_SaveBufferClear(void)
+{
+    save_buffer = NULL;
+    save_buffer_capacity = 0;
+    save_buffer_length = 0;
+    save_buffer_pos = 0;
+    save_buffer_writing = false;
+    save_stream = NULL;
+}
+
+long P_SaveBufferTell(void)
+{
+    return (long) save_buffer_pos;
+}
+
+long P_SaveBufferLength(void)
+{
+    return (long) save_buffer_length;
+}
+#endif
+
 // Get the filename of a temporary file to write the savegame to.  After
 // the file has been successfully saved, it will be renamed to the 
 // real file.
@@ -57,6 +105,26 @@ char *P_TempSaveGameFile(void)
 
 char *P_SaveGameFile(int slot)
 {
+#ifndef OF_PC
+    static char filenames[10][16];
+
+    if (slot < 0)
+    {
+        slot = 0;
+    }
+    else if (slot >= 10)
+    {
+        slot = 9;
+    }
+
+    if (filenames[slot][0] == '\0')
+    {
+        DEH_snprintf(filenames[slot], sizeof(filenames[slot]),
+                     "doom_%d.sav", slot);
+    }
+
+    return filenames[slot];
+#else
     static char *filename = NULL;
     static size_t filename_size = 0;
     char basename[32];
@@ -71,6 +139,7 @@ char *P_SaveGameFile(int slot)
     M_snprintf(filename, filename_size, "%s%s", savegamedir, basename);
 
     return filename;
+#endif
 }
 
 // Endian-safe integer read/write functions
@@ -79,6 +148,20 @@ static byte saveg_read8(void)
 {
     byte result = -1;
 
+#ifndef OF_PC
+    if (save_buffer == NULL || save_buffer_writing
+     || save_buffer_pos >= save_buffer_length)
+    {
+        if (!savegame_error)
+        {
+            fprintf(stderr, "saveg_read8: Unexpected end of save buffer\n");
+            savegame_error = true;
+        }
+        return result;
+    }
+
+    return save_buffer[save_buffer_pos++];
+#else
     if (fread(&result, 1, 1, save_stream) < 1)
     {
         if (!savegame_error)
@@ -91,10 +174,29 @@ static byte saveg_read8(void)
     }
 
     return result;
+#endif
 }
 
 static void saveg_write8(byte value)
 {
+#ifndef OF_PC
+    if (save_buffer == NULL || !save_buffer_writing
+     || save_buffer_pos >= save_buffer_capacity)
+    {
+        if (!savegame_error)
+        {
+            fprintf(stderr, "saveg_write8: Save buffer overflow\n");
+            savegame_error = true;
+        }
+        return;
+    }
+
+    save_buffer[save_buffer_pos++] = value;
+    if (save_buffer_pos > save_buffer_length)
+    {
+        save_buffer_length = save_buffer_pos;
+    }
+#else
     if (fwrite(&value, 1, 1, save_stream) < 1)
     {
         if (!savegame_error)
@@ -104,6 +206,7 @@ static void saveg_write8(byte value)
             savegame_error = true;
         }
     }
+#endif
 }
 
 static short saveg_read16(void)
@@ -150,7 +253,11 @@ static void saveg_read_pad(void)
     int padding;
     int i;
 
+#ifndef OF_PC
+    pos = P_SaveBufferTell();
+#else
     pos = ftell(save_stream);
+#endif
 
     padding = (4 - (pos & 3)) & 3;
 
@@ -166,7 +273,11 @@ static void saveg_write_pad(void)
     int padding;
     int i;
 
+#ifndef OF_PC
+    pos = P_SaveBufferTell();
+#else
     pos = ftell(save_stream);
+#endif
 
     padding = (4 - (pos & 3)) & 3;
 
@@ -1897,4 +2008,3 @@ void P_UnArchiveSpecials (void)
     }
 
 }
-

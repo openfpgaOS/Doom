@@ -29,6 +29,7 @@
 #include "w_wad.h"
 
 #include "r_local.h"
+#include "r_gpu.h"
 
 // Needs access to LFB (guess what).
 #include "v_video.h"
@@ -118,6 +119,11 @@ void R_DrawColumn (void)
 	|| dc_yh >= SCREENHEIGHT) 
 	I_Error ("R_DrawColumn: %i to %i at %i", dc_yl, dc_yh, dc_x); 
 #endif 
+
+    if (R_GPU_DrawColumn())
+	return;
+
+    R_GPU_PrepareForCPUAccess();
 
     // Framebuffer destination address.
     // Use ylookup LUT to avoid multiply with ScreenWidth.
@@ -230,6 +236,9 @@ void R_DrawColumnLow (void)
     }
     //	dccount++; 
 #endif 
+
+    R_GPU_PrepareForCPUAccess();
+
     // Blocky mode, need to multiply by 2.
     x = dc_x << 1;
     
@@ -307,6 +316,8 @@ void R_DrawFuzzColumn (void)
 		 dc_yl, dc_yh, dc_x);
     }
 #endif
+
+    R_GPU_PrepareForCPUAccess();
     
     dest = ylookup[dc_yl] + columnofs[dc_x];
 
@@ -364,6 +375,8 @@ void R_DrawFuzzColumnLow (void)
 		 dc_yl, dc_yh, dc_x);
     }
 #endif
+
+    R_GPU_PrepareForCPUAccess();
     
     dest = ylookup[dc_yl] + columnofs[x];
     dest2 = ylookup[dc_yl] + columnofs[x+1];
@@ -427,6 +440,7 @@ void R_DrawTranslatedColumn (void)
     
 #endif 
 
+    R_GPU_PrepareForCPUAccess();
 
     dest = ylookup[dc_yl] + columnofs[dc_x]; 
 
@@ -476,6 +490,7 @@ void R_DrawTranslatedColumnLow (void)
     
 #endif 
 
+    R_GPU_PrepareForCPUAccess();
 
     dest = ylookup[dc_yl] + columnofs[x]; 
     dest2 = ylookup[dc_yl] + columnofs[x+1]; 
@@ -590,6 +605,11 @@ void R_DrawSpan (void)
     }
 //	dscount++;
 #endif
+
+    if (R_GPU_DrawSpan())
+	return;
+
+    R_GPU_PrepareForCPUAccess();
 
     // Pack position and step variables into a single 32-bit integer,
     // with x in the top 16 bits and y in the bottom 16 bits.  For
@@ -720,6 +740,8 @@ void R_DrawSpanLow (void)
 //	dscount++; 
 #endif
 
+    R_GPU_PrepareForCPUAccess();
+
     position = ((ds_xfrac << 10) & 0xffff0000)
              | ((ds_yfrac >> 6)  & 0x0000ffff);
     step = ((ds_xstep << 10) & 0xffff0000)
@@ -779,10 +801,19 @@ R_InitBuffer
     else 
 	viewwindowy = (SCREENHEIGHT-SBARHEIGHT-height) >> 1; 
 
-    // Preclaculate all row offsets.
-    for (i=0 ; i<height ; i++) 
-	ylookup[i] = I_VideoBuffer + (i+viewwindowy)*SCREENWIDTH; 
+    R_RetargetBuffer();
 } 
+
+void R_RetargetBuffer(void)
+{
+    int i;
+    pixel_t *row;
+
+    row = I_VideoBuffer + viewwindowy*SCREENWIDTH;
+
+    for (i=0 ; i<viewheight ; i++, row += SCREENWIDTH)
+	ylookup[i] = row;
+}
  
  
 
@@ -912,6 +943,7 @@ R_VideoErase
 
     if (background_buffer != NULL)
     {
+        R_GPU_PrepareForCPUAccess();
         memcpy(I_VideoBuffer + ofs, background_buffer + ofs, count * sizeof(*I_VideoBuffer));
     }
 } 

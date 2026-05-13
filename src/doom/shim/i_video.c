@@ -1,9 +1,9 @@
 /* i_video.c — chocolate-doom video backend over openfpgaOS SDK.
  *
- * Doom renders into a 320x200 indexed buffer (I_VideoBuffer).  The
- * openfpgaOS framebuffer is 320x240.  We blit the 200-line doom image
- * into the center of the 240-line output; the 20-pixel letterbox bars
- * are cleared once at init across all three back buffers.
+ * Doom renders into a 320x200 indexed buffer (I_VideoBuffer).  With GPU
+ * flip enabled, the GPU layer retargets that pointer at the centered
+ * 320x200 window inside the current rotating hardware framebuffer.  The
+ * static buffer below remains the CPU fallback when GPU flip is disabled.
  */
 
 #include "config.h"
@@ -16,6 +16,7 @@
 #include "m_argv.h"
 #include "m_config.h"
 #include "m_misc.h"
+#include "r_gpu.h"
 #include "z_zone.h"
 #include "m_controls.h"
 
@@ -63,8 +64,7 @@ static const byte gammatable[5][256] = {
 /* Palette storage (doom hands us 256 × RGB 0-255 triplets). */
 static uint32_t palette32[256];
 
-/* Stable backbuffer: doom renders here every frame.  Content persists
- * across frames (border, HUD, wipe state) as doom expects. */
+/* Stable fallback backbuffer used when GPU flip is disabled/unavailable. */
 static pixel_t video_buf[SCREENWIDTH * SCREENHEIGHT];
 
 /* Grab-mouse callback (ignored on this backend). */
@@ -85,10 +85,12 @@ void I_InitGraphics(void)
         uint8_t *fb = of_video_surface();
         memset(fb, 0, OF_SCREEN_W * OF_SCREEN_H);
         of_video_flip();
+        of_video_wait_flip();
     }
 
     I_VideoBuffer = video_buf;
     V_RestoreBuffer();
+    R_GPU_Init();
     screenvisible = true;
 
     key_fire = KEY_ENTER;
@@ -99,7 +101,7 @@ void I_InitGraphics(void)
 }
 
 void I_GraphicsCheckCommandLine(void) { }
-void I_ShutdownGraphics(void)          { I_VideoBuffer = NULL; }
+void I_ShutdownGraphics(void)          { R_GPU_Shutdown(); I_VideoBuffer = NULL; }
 
 void I_SetWindowTitle(const char *t)   { (void)t; }
 void I_InitWindowTitle(void)           { }
@@ -177,7 +179,7 @@ void I_UpdateNoBlit(void) { }
 
 void I_FinishUpdate(void)
 {
-    /* Pace the main loop to ~60 Hz.
+    /* Pace the fallback blit path to ~60 Hz.
      *
      * Before uncapped interpolation landed, TryRunTics() blocked ~28 ms
      * per iteration waiting for the next 35 Hz tic — that was the only
@@ -189,20 +191,27 @@ void I_FinishUpdate(void)
      * CPU speed, which starves audio/IRQ handling enough to appear as a
      * freeze with a stuck buzzing sound effect when the menu sfx fires.
      *
-     * We use usleep() (which on target is a syscall-based yield that
-     * lets interrupts run, unlike I_Sleep's busy spin) to throttle the
-     * loop before the blit so the frame is only produced at display
-     * rate.  Game logic is still wall-clock driven, so this doesn't
-     * slow gameplay — TryRunTics just runs a batch of tics per frame
-     * when needed. */
+     * Direct GPU flip already waits for the previous display swap in
+     * R_GPU_PresentFrame(), so sleeping here as well creates duplicate
+     * pacing and costs the frames we are trying to hit. */
     static unsigned int last_flip_us = 0;
-    const unsigned int  target_us    = 16667;  /* ~60 Hz */
-    unsigned int now = of_time_us();
-    unsigned int dt  = now - last_flip_us;
-    if (last_flip_us && dt < target_us) {
-        usleep(target_us - dt);
+    if (R_GPU_UsingDirectFramebuffer()) {
+        last_flip_us = 0;
+        if (R_GPU_PresentFrame())
+            return;
+
+        R_GPU_EndFrame();
+    } else {
+        R_GPU_EndFrame();
+
+        const unsigned int target_us = 16667;  /* ~60 Hz */
+        unsigned int now = of_time_us();
+        unsigned int dt  = now - last_flip_us;
+        if (last_flip_us && dt < target_us) {
+            usleep(target_us - dt);
+        }
+        last_flip_us = of_time_us();
     }
-    last_flip_us = of_time_us();
 
     uint8_t *fb = of_video_surface();
     memcpy(fb + OF_SCREEN_W * LETTERBOX_Y, I_VideoBuffer,

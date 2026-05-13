@@ -21,6 +21,7 @@
 #define __P_SAVEG__
 
 #include <stdio.h>
+#include <stddef.h>
 
 #define SAVEGAME_EOF 0x1d
 #define VERSIONSIZE 16
@@ -60,6 +61,14 @@ void P_UnArchiveSpecials (void);
 
 extern FILE *save_stream;
 extern boolean savegame_error;
+
+#ifndef OF_PC
+void P_SaveBufferForRead(byte *buffer, size_t length);
+void P_SaveBufferForWrite(byte *buffer, size_t capacity);
+void P_SaveBufferClear(void);
+long P_SaveBufferTell(void);
+long P_SaveBufferLength(void);
+#endif
 
 
 #endif

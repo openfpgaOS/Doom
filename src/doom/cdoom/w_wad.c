@@ -30,6 +30,7 @@
 #include "i_system.h"
 #include "i_video.h"
 #include "m_misc.h"
+#include "r_gpu.h"
 #include "v_diskicon.h"
 #include "z_zone.h"
 
@@ -415,8 +416,10 @@ void *W_CacheLumpNum(lumpindex_t lumpnum, int tag)
     {
         // Not yet loaded, so load it now
 
-        lump->cache = Z_Malloc(W_LumpLength(lumpnum), tag, &lump->cache);
+        int length = W_LumpLength(lumpnum);
+        lump->cache = Z_Malloc(length, tag, &lump->cache);
 	W_ReadLump (lumpnum, lump->cache);
+        R_GPU_TextureDataUpdated(lump->cache, (unsigned int)length);
         result = lump->cache;
     }
 	

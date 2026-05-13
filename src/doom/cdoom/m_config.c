@@ -25,6 +25,7 @@
 #include <errno.h>
 #include <assert.h>
 #include <locale.h>
+#include <stdarg.h>
 
 /* openfpgaOS port: SDL_GetPrefPath -> local shim */
 static char *of_pref_path(const char *org, const char *app) {
@@ -2086,6 +2087,12 @@ static default_collection_t extra_defaults =
     NULL,
 };
 
+#ifndef OF_PC
+#define OPENFPGA_CONFIG_FILENAME "doom.cfg"
+#define OPENFPGA_CONFIG_BUFFER_SIZE 65536
+static char openfpga_config_buffer[OPENFPGA_CONFIG_BUFFER_SIZE];
+#endif
+
 // Search a collection for a variable
 
 static default_t *SearchCollection(default_collection_t *collection, const char *name)
@@ -2134,15 +2141,65 @@ static const int scantokey[128] =
 };
 
 
-static void SaveDefaultCollection(default_collection_t *collection)
+typedef int (*config_write_func_t)(void *ctx, const char *fmt, ...);
+
+static int ConfigFileWrite(void *ctx, const char *fmt, ...)
+{
+    va_list args;
+    int result;
+
+    va_start(args, fmt);
+    result = vfprintf((FILE *) ctx, fmt, args);
+    va_end(args);
+
+    return result < 0 ? 0 : result;
+}
+
+#ifndef OF_PC
+typedef struct
+{
+    char *data;
+    size_t length;
+    size_t capacity;
+    boolean failed;
+} config_buffer_t;
+
+static int ConfigBufferWrite(void *ctx, const char *fmt, ...)
+{
+    config_buffer_t *buffer = (config_buffer_t *) ctx;
+    va_list args;
+    size_t available;
+    int result;
+
+    if (buffer->failed || buffer->length >= buffer->capacity)
+    {
+        buffer->failed = true;
+        return 0;
+    }
+
+    available = buffer->capacity - buffer->length;
+
+    va_start(args, fmt);
+    result = vsnprintf(buffer->data + buffer->length, available, fmt, args);
+    va_end(args);
+
+    if (result < 0 || (size_t) result >= available)
+    {
+        buffer->failed = true;
+        return 0;
+    }
+
+    buffer->length += (size_t) result;
+    return result;
+}
+#endif
+
+static void SaveDefaultCollectionWithWriter(default_collection_t *collection,
+                                            void *ctx,
+                                            config_write_func_t write)
 {
     default_t *defaults;
     int i, v;
-    FILE *f;
-	
-    f = M_fopen(collection->filename, "w");
-    if (!f)
-	return; // can't write the file, but don't complain
 
     defaults = collection->defaults;
 		
@@ -2159,10 +2216,10 @@ static void SaveDefaultCollection(default_collection_t *collection)
 
         // Print the name and line up all values at 30 characters
 
-        chars_written = fprintf(f, "%s ", defaults[i].name);
+        chars_written = write(ctx, "%s ", defaults[i].name);
 
         for (; chars_written < 30; ++chars_written)
-            fprintf(f, " ");
+            write(ctx, " ");
 
         // Print the value
 
@@ -2211,28 +2268,44 @@ static void SaveDefaultCollection(default_collection_t *collection)
                     }
                 }
 
-	        fprintf(f, "%i", v);
+	        write(ctx, "%i", v);
                 break;
 
             case DEFAULT_INT:
-	        fprintf(f, "%i", *defaults[i].location.i);
+	        write(ctx, "%i", *defaults[i].location.i);
                 break;
 
             case DEFAULT_INT_HEX:
-	        fprintf(f, "0x%x", *defaults[i].location.i);
+	        write(ctx, "0x%x", *defaults[i].location.i);
                 break;
 
             case DEFAULT_FLOAT:
-                fprintf(f, "%f", *defaults[i].location.f);
+                write(ctx, "%f", *defaults[i].location.f);
                 break;
 
             case DEFAULT_STRING:
-	        fprintf(f,"\"%s\"", *defaults[i].location.s);
+	        write(ctx, "\"%s\"", *defaults[i].location.s);
                 break;
         }
 
-        fprintf(f, "\n");
+        write(ctx, "\n");
     }
+}
+
+static void SaveDefaultCollectionToFile(default_collection_t *collection, FILE *f)
+{
+    SaveDefaultCollectionWithWriter(collection, f, ConfigFileWrite);
+}
+
+static void SaveDefaultCollection(default_collection_t *collection)
+{
+    FILE *f;
+
+    f = M_fopen(collection->filename, "wb");
+    if (!f)
+	return; // can't write the file, but don't complain
+
+    SaveDefaultCollectionToFile(collection, f);
 
     fclose (f);
 }
@@ -2332,11 +2405,12 @@ static void LoadDefaultCollection(default_collection_t *collection)
 {
     FILE *f;
     default_t *def;
+    char line[256];
     char defname[80];
     char strparm[100];
 
     // read the file in, overriding any set defaults
-    f = M_fopen(collection->filename, "r");
+    f = M_fopen(collection->filename, "rb");
 
     if (f == NULL)
     {
@@ -2346,9 +2420,9 @@ static void LoadDefaultCollection(default_collection_t *collection)
         return;
     }
 
-    while (!feof(f))
+    while (fgets(line, sizeof(line), f) != NULL)
     {
-        if (fscanf(f, "%79s %99[^\n]\n", defname, strparm) != 2)
+        if (sscanf(line, "%79s %99[^\r\n]", defname, strparm) != 2)
         {
             // This line doesn't match
 
@@ -2393,8 +2467,13 @@ static void LoadDefaultCollection(default_collection_t *collection)
 
 void M_SetConfigFilenames(const char *main_config, const char *extra_config)
 {
+#ifndef OF_PC
+    default_main_config = OPENFPGA_CONFIG_FILENAME;
+    default_extra_config = OPENFPGA_CONFIG_FILENAME;
+#else
     default_main_config = main_config;
     default_extra_config = extra_config;
+#endif
 }
 
 //
@@ -2403,6 +2482,57 @@ void M_SetConfigFilenames(const char *main_config, const char *extra_config)
 
 void M_SaveDefaults (void)
 {
+    if (doom_defaults.filename != NULL
+     && extra_defaults.filename != NULL
+     && !strcmp(doom_defaults.filename, extra_defaults.filename))
+    {
+#ifndef OF_PC
+        config_buffer_t buffer;
+        FILE *f;
+
+        memset(openfpga_config_buffer, 0, sizeof(openfpga_config_buffer));
+
+        buffer.data = openfpga_config_buffer;
+        buffer.length = 0;
+        buffer.capacity = sizeof(openfpga_config_buffer);
+        buffer.failed = false;
+
+        SaveDefaultCollectionWithWriter(&doom_defaults, &buffer,
+                                        ConfigBufferWrite);
+        SaveDefaultCollectionWithWriter(&extra_defaults, &buffer,
+                                        ConfigBufferWrite);
+
+        if (buffer.failed)
+        {
+            return;
+        }
+
+        f = M_fopen(doom_defaults.filename, "wb");
+        if (!f)
+            return;
+
+        if (fwrite(openfpga_config_buffer, 1, buffer.length, f)
+         != buffer.length)
+        {
+            fclose(f);
+            return;
+        }
+
+        fclose(f);
+#else
+        FILE *f;
+
+        f = M_fopen(doom_defaults.filename, "wb");
+        if (!f)
+            return;
+
+        SaveDefaultCollectionToFile(&doom_defaults, f);
+        SaveDefaultCollectionToFile(&extra_defaults, f);
+        fclose(f);
+#endif
+        return;
+    }
+
     SaveDefaultCollection(&doom_defaults);
     SaveDefaultCollection(&extra_defaults);
 }
@@ -2466,7 +2596,7 @@ void M_LoadDefaults (void)
             = M_StringJoin(configdir, default_main_config, NULL);
     }
 
-    printf("saving config in %s\n", doom_defaults.filename);
+    printf("config file: %s\n", doom_defaults.filename);
 
     //!
     // @arg <file>
@@ -2491,6 +2621,10 @@ void M_LoadDefaults (void)
 
     LoadDefaultCollection(&doom_defaults);
     LoadDefaultCollection(&extra_defaults);
+
+#ifndef OF_PC
+    M_SaveDefaults();
+#endif
 }
 
 // Get a configuration file variable by its name
@@ -2628,6 +2762,9 @@ float M_GetFloatVariable(const char *name)
 
 static char *GetDefaultConfigDir(void)
 {
+#ifndef OF_PC
+    return M_StringDuplicate("");
+#else
 #if !defined(_WIN32) || defined(_WIN32_WCE)
 
     // Configuration settings are stored in an OS-appropriate path
@@ -2647,6 +2784,7 @@ static char *GetDefaultConfigDir(void)
     }
 #endif /* #ifndef _WIN32 */
     return M_StringDuplicate(exedir);
+#endif
 }
 
 // 
@@ -2669,14 +2807,17 @@ void M_SetConfigDir(const char *dir)
         configdir = GetDefaultConfigDir();
     }
 
-    if (strcmp(configdir, exedir) != 0)
+    if (configdir[0] != '\0' && strcmp(configdir, exedir) != 0)
     {
         printf("Using %s for configuration and saves\n", configdir);
     }
 
     // Make the directory if it doesn't already exist:
 
-    M_MakeDirectory(configdir);
+    if (configdir[0] != '\0')
+    {
+        M_MakeDirectory(configdir);
+    }
 }
 
 #define MUSIC_PACK_README \
@@ -2733,6 +2874,10 @@ char *M_GetSaveGameDir(const char *iwadname)
     char *savegamedir;
     char *topdir;
     int p;
+
+#ifndef OF_PC
+    return M_StringDuplicate("");
+#endif
 
     //!
     // @arg <directory>

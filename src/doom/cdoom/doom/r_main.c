@@ -83,6 +83,7 @@ int			detailshift;
 // Uncapped framerate: render at display rate with interpolation between 35 Hz tics.
 // See r_main.h for description. Default on; disabled in d_loop when inappropriate.
 boolean		crispy_uncapped = true;
+boolean		r_interpolate = false;
 fixed_t		fractionaltic = 0;
 
 //
@@ -834,7 +835,7 @@ void R_SetupFrame (player_t* player)
     // display rate (60 Hz) instead of snapping to 35 Hz tic boundaries.
     // All mobjs in R_ProjectSprite use the same fractionaltic, so the
     // view and the world stay in sync at every sub-tic frame.
-    if (fractionaltic)
+    if (r_interpolate)
     {
         mobj_t *mo = player->mo;
         int32_t adiff;

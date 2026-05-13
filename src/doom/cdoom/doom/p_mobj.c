@@ -453,12 +453,15 @@ P_NightmareRespawn (mobj_t* mobj)
 void P_MobjThinker (mobj_t* mobj)
 {
     // Interpolation: snapshot the pre-tic state so the renderer can lerp
-    // from (old*, now) during sub-tic frames. Do this before any movement
-    // so oldx/oldy/oldz reflect the position at the end of the previous tic.
-    mobj->oldx     = mobj->x;
-    mobj->oldy     = mobj->y;
-    mobj->oldz     = mobj->z;
-    mobj->oldangle = mobj->angle;
+    // from (old*, now) during sub-tic frames. Player mobjs are snapshotted
+    // in P_PlayerThink(), which runs before thinkers and applies input.
+    if (mobj->player == NULL)
+    {
+        mobj->oldx     = mobj->x;
+        mobj->oldy     = mobj->y;
+        mobj->oldz     = mobj->z;
+        mobj->oldangle = mobj->angle;
+    }
 
     // momentum movement
     if (mobj->momx
@@ -1085,4 +1088,3 @@ P_SpawnPlayerMissile
 
     P_CheckMissileSpawn (th);
 }
-

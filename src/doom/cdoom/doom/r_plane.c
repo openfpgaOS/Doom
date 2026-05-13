@@ -30,6 +30,7 @@
 #include "doomstat.h"
 
 #include "r_local.h"
+#include "r_gpu.h"
 #include "r_sky.h"
 
 
@@ -444,6 +445,7 @@ void R_DrawPlanes (void)
 			pl->bottom[x]);
 	}
 	
-        W_ReleaseLumpNum(lumpnum);
+        if (!R_GPU_DeferLumpRelease(lumpnum))
+            W_ReleaseLumpNum(lumpnum);
     }
 }

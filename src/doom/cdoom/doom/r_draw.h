@@ -55,6 +55,9 @@ R_VideoErase
 ( unsigned	ofs,
   int		count );
 
+extern pixel_t*		ylookup[];
+extern int		columnofs[];
+
 extern int		ds_y;
 extern int		ds_x1;
 extern int		ds_x2;
@@ -85,6 +88,8 @@ void
 R_InitBuffer
 ( int		width,
   int		height );
+
+void R_RetargetBuffer(void);
 
 
 // Initialize color translation tables,

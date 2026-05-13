@@ -20,6 +20,7 @@
 
 #include "z_zone.h"
 #include "i_video.h"
+#include "r_gpu.h"
 #include "v_video.h"
 #include "m_random.h"
 
@@ -37,6 +38,23 @@ static boolean	go = 0;
 static pixel_t*	wipe_scr_start;
 static pixel_t*	wipe_scr_end;
 static pixel_t*	wipe_scr;
+static boolean  wipe_scr_allocated;
+
+static void wipe_freeScreens(void)
+{
+    if (wipe_scr_allocated)
+    {
+	Z_Free(wipe_scr);
+	wipe_scr_allocated = false;
+    }
+
+    wipe_scr = NULL;
+
+    Z_Free(wipe_scr_start);
+    Z_Free(wipe_scr_end);
+    wipe_scr_start = NULL;
+    wipe_scr_end = NULL;
+}
 
 
 void
@@ -123,6 +141,7 @@ wipe_exitColorXForm
   int	height,
   int	ticks )
 {
+    wipe_freeScreens();
     return 0;
 }
 
@@ -222,8 +241,8 @@ wipe_exitMelt
   int	ticks )
 {
     Z_Free(y);
-    Z_Free(wipe_scr_start);
-    Z_Free(wipe_scr_end);
+    y = NULL;
+    wipe_freeScreens();
     return 0;
 }
 
@@ -272,14 +291,24 @@ wipe_ScreenWipe
     if (!go)
     {
 	go = 1;
-	// wipe_scr = (pixel_t *) Z_Malloc(width*height, PU_STATIC, 0); // DEBUG
-	wipe_scr = I_VideoBuffer;
+	if (R_GPU_UsingDirectFramebuffer())
+	{
+	    wipe_scr = Z_Malloc(width*height*sizeof(*wipe_scr), PU_STATIC, 0);
+	    wipe_scr_allocated = true;
+	}
+	else
+	{
+	    wipe_scr = I_VideoBuffer;
+	    wipe_scr_allocated = false;
+	}
 	(*wipes[wipeno*3])(width, height, ticks);
     }
 
     // do a piece of wipe-in
     V_MarkRect(0, 0, width, height);
     rc = (*wipes[wipeno*3+1])(width, height, ticks);
+    if (wipe_scr != I_VideoBuffer)
+	memcpy(I_VideoBuffer, wipe_scr, width*height*sizeof(*wipe_scr));
     //  V_DrawBlock(x, y, 0, width, height, wipe_scr); // DEBUG
 
     // final stuff
@@ -291,4 +320,3 @@ wipe_ScreenWipe
 
     return !go;
 }
-

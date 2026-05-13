@@ -71,6 +71,7 @@
 
 #include "p_setup.h"
 #include "r_local.h"
+#include "r_gpu.h"
 #include "statdump.h"
 
 #include "d_main.h"
@@ -190,6 +191,8 @@ boolean D_Display (void)
     else
 	wipe = false;
 
+    R_GPU_BeginDisplayFrame();
+
     if (gamestate == GS_LEVEL && gametic)
 	HU_Erase();
     
@@ -227,7 +230,10 @@ boolean D_Display (void)
     
     // draw the view directly
     if (gamestate == GS_LEVEL && !automapactive && gametic)
+    {
+	R_GPU_BeginFrame ();
 	R_RenderPlayerView (&players[displayplayer]);
+    }
 
     if (gamestate == GS_LEVEL && gametic)
 	HU_Drawer ();
@@ -419,6 +425,7 @@ void D_RunFrame()
         } while (tics <= 0);
 
         wipestart = nowtime;
+        R_GPU_BeginDisplayFrame();
         wipe = !wipe_ScreenWipe(wipe_Melt
                                , 0, 0, SCREENWIDTH, SCREENHEIGHT, tics);
         I_UpdateNoBlit ();
@@ -433,14 +440,31 @@ void D_RunFrame()
     {
         static int last_gametic = -1;
         static int last_tic_ms  = 0;
+        static int nointerp = -1;
+        boolean    simulation_paused;
         boolean    uncapped_ok;
 
+        if (nointerp < 0)
+        {
+            nointerp = M_CheckParm("-nointerp") > 0
+                    || M_CheckParm("-capped") > 0;
+        }
+
+        simulation_paused = paused
+                            || (!netgame
+                                && menuactive
+                                && !demoplayback
+                                && players[consoleplayer].viewz != 1);
+
         uncapped_ok = crispy_uncapped
+                      && !nointerp
+                      && !simulation_paused
                       && !demoplayback
                       && !demorecording
                       && !netgame
                       && !singletics;
 
+        r_interpolate = uncapped_ok;
         tryruntics_nonblocking = uncapped_ok;
 
         TryRunTics ();
@@ -466,6 +490,7 @@ void D_RunFrame()
         }
         else
         {
+            r_interpolate = false;
             fractionaltic = 0;
         }
     }
@@ -2037,4 +2062,3 @@ void D_DoomMain (void)
 
     D_DoomLoop ();  // never returns
 }
-

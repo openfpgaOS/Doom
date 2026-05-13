@@ -88,14 +88,15 @@ extern	int		detailshift;
 
 
 // Uncapped / interpolated framerate support.
-// fractionaltic is the fraction [0, FRACUNIT] of a 35 Hz tic that has elapsed
-// since the last gametic was run. The renderer uses it to lerp mobj positions,
-// sector heights, player view, etc. so rendering can happen at display rate
-// (e.g. 60 Hz) while the simulation stays locked at 35 Hz.
+// r_interpolate enables rendering from the previous tic state toward the
+// current tic state.  fractionaltic is the fraction [0, FRACUNIT] between
+// those two states.  A zero fraction is valid while interpolating; it means
+// "draw the previous tic", not "fall back to current state".
 //
-// Forced to 0 and crispy_uncapped to false for demo playback/recording,
-// netgames, and -singletics to keep those bit-exact.
+// r_interpolate is disabled and fractionaltic is forced to 0 for demo
+// playback/recording, netgames, and -singletics to keep those bit-exact.
 extern boolean crispy_uncapped;
+extern boolean r_interpolate;
 extern fixed_t fractionaltic;
 
 

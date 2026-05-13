@@ -29,6 +29,7 @@
 
 #include "doomdef.h"
 #include "m_misc.h"
+#include "r_gpu.h"
 #include "r_local.h"
 #include "p_local.h"
 
@@ -281,6 +282,7 @@ void R_GenerateComposite (int texnum)
 
     // Now that the texture has been built in column cache,
     //  it is purgable from zone memory.
+    R_GPU_TextureDataUpdated(block, texturecompositesize[texnum]);
     Z_ChangeTag (block, PU_CACHE);
 }
 
@@ -898,7 +900,6 @@ void R_PrecacheLevel (void)
 
     Z_Free(spritepresent);
 }
-
 
 
 

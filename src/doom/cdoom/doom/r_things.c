@@ -471,16 +471,16 @@ void R_ProjectSprite (mobj_t* thing)
     angle_t		ang;
     fixed_t		iscale;
 
-    // Interpolated thing position/angle. When fractionaltic is 0 (capped
-    // mode or exactly on a tic boundary) these equal thing->x/y/z/angle
-    // and the code below is a no-op. Lerping here is what makes 60 Hz
-    // rendering of a 35 Hz simulation look smooth.
+    // Interpolated thing position/angle.  A zero fraction is still a valid
+    // interpolation point while uncapped rendering is active; use
+    // r_interpolate to distinguish that from capped/vanilla current-state
+    // rendering.
     fixed_t		interp_x;
     fixed_t		interp_y;
     fixed_t		interp_z;
     angle_t		interp_angle;
 
-    if (fractionaltic)
+    if (r_interpolate)
     {
         int32_t adiff;
 
@@ -1011,6 +1011,5 @@ void R_DrawMasked (void)
     if (!viewangleoffset)		
 	R_DrawPlayerSprites ();
 }
-
 
 
