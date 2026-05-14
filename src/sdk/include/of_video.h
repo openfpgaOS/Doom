@@ -154,7 +154,7 @@ static inline void of_video_set_vsync_callback(void (*cb)(void)) {
 
 /* Get surface as 16-bit for direct color modes */
 static inline uint16_t *of_video_surface16(void) {
-    return (uint16_t *)of_video_surface();
+    return (uint16_t *)(void *)of_video_surface();
 }
 
 #else /* OF_PC */

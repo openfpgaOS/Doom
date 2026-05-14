@@ -40,6 +40,11 @@ static pixel_t*	wipe_scr_end;
 static pixel_t*	wipe_scr;
 static boolean  wipe_scr_allocated;
 
+typedef struct
+{
+    pixel_t p[2];
+} wipe_pair_t;
+
 static void wipe_freeScreens(void)
 {
     if (wipe_scr_allocated)
@@ -59,15 +64,15 @@ static void wipe_freeScreens(void)
 
 void
 wipe_shittyColMajorXform
-( dpixel_t*	array,
+( wipe_pair_t*	array,
   int		width,
   int		height )
 {
     int		x;
     int		y;
-    dpixel_t*	dest;
+    wipe_pair_t* dest;
 
-    dest = (dpixel_t*) Z_Malloc(width*height*sizeof(*dest), PU_STATIC, 0);
+    dest = Z_Malloc(width*height*sizeof(*dest), PU_STATIC, 0);
 
     for(y=0;y<height;y++)
 	for(x=0;x<width;x++)
@@ -161,8 +166,8 @@ wipe_initMelt
     
     // makes this wipe faster (in theory)
     // to have stuff in column-major format
-    wipe_shittyColMajorXform((dpixel_t*)wipe_scr_start, width/2, height);
-    wipe_shittyColMajorXform((dpixel_t*)wipe_scr_end, width/2, height);
+    wipe_shittyColMajorXform((wipe_pair_t *) wipe_scr_start, width/2, height);
+    wipe_shittyColMajorXform((wipe_pair_t *) wipe_scr_end, width/2, height);
     
     // setup initial column positions
     // (y<0 => not ready to scroll yet)
@@ -190,8 +195,8 @@ wipe_doMelt
     int		dy;
     int		idx;
     
-    dpixel_t*	s;
-    dpixel_t*	d;
+    wipe_pair_t* s;
+    wipe_pair_t* d;
     boolean	done = true;
 
     width/=2;
@@ -208,8 +213,8 @@ wipe_doMelt
 	    {
 		dy = (y[i] < 16) ? y[i]+1 : 8;
 		if (y[i]+dy >= height) dy = height - y[i];
-		s = &((dpixel_t *)wipe_scr_end)[i*height+y[i]];
-		d = &((dpixel_t *)wipe_scr)[y[i]*width+i];
+		s = &((wipe_pair_t *) wipe_scr_end)[i*height+y[i]];
+		d = &((wipe_pair_t *) wipe_scr)[y[i]*width+i];
 		idx = 0;
 		for (j=dy;j;j--)
 		{
@@ -217,8 +222,8 @@ wipe_doMelt
 		    idx += width;
 		}
 		y[i] += dy;
-		s = &((dpixel_t *)wipe_scr_start)[i*height];
-		d = &((dpixel_t *)wipe_scr)[y[i]*width+i];
+		s = &((wipe_pair_t *) wipe_scr_start)[i*height];
+		d = &((wipe_pair_t *) wipe_scr)[y[i]*width+i];
 		idx = 0;
 		for (j=height-y[i];j;j--)
 		{

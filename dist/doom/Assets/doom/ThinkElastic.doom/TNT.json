@@ -1,0 +1,28 @@
+{
+    "instance": {
+        "magic": "APF_VER_1",
+        "variant_select": {
+            "id": 666,
+            "select": false
+        },
+        "data_slots": [
+            { "id": 1, "filename": "os.bin" },
+            { "id": 2, "filename": "doom.elf" },
+            { "id": 3, "filename": "tnt/TNT.WAD" },
+            { "id": 4, "filename": "tnt/TNT31.WAD" },
+            { "id": 7, "filename": "bank.ofsf" },
+            { "id": 9, "filename": "tnt/TNT.cfg" },
+            { "id": 10, "filename": "tnt/TNT_0.sav" },
+            { "id": 11, "filename": "tnt/TNT_1.sav" },
+            { "id": 12, "filename": "tnt/TNT_2.sav" },
+            { "id": 13, "filename": "tnt/TNT_3.sav" },
+            { "id": 14, "filename": "tnt/TNT_4.sav" },
+            { "id": 15, "filename": "tnt/TNT_5.sav" },
+            { "id": 16, "filename": "tnt/TNT_6.sav" },
+            { "id": 17, "filename": "tnt/TNT_7.sav" },
+            { "id": 18, "filename": "tnt/TNT_8.sav" },
+            { "id": 19, "filename": "tnt/TNT_9.sav" },
+            { "id": 20, "filename": "tnt/TNT.sav" }
+        ]
+    }
+}

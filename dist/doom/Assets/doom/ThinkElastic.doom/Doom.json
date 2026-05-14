@@ -1,0 +1,27 @@
+{
+    "instance": {
+        "magic": "APF_VER_1",
+        "variant_select": {
+            "id": 666,
+            "select": false
+        },
+        "data_slots": [
+            { "id": 1, "filename": "os.bin" },
+            { "id": 2, "filename": "doom.elf" },
+            { "id": 3, "filename": "doom/DOOM.WAD" },
+            { "id": 7, "filename": "bank.ofsf" },
+            { "id": 9, "filename": "doom/Doom.cfg" },
+            { "id": 10, "filename": "doom/Doom_0.sav" },
+            { "id": 11, "filename": "doom/Doom_1.sav" },
+            { "id": 12, "filename": "doom/Doom_2.sav" },
+            { "id": 13, "filename": "doom/Doom_3.sav" },
+            { "id": 14, "filename": "doom/Doom_4.sav" },
+            { "id": 15, "filename": "doom/Doom_5.sav" },
+            { "id": 16, "filename": "doom/Doom_6.sav" },
+            { "id": 17, "filename": "doom/Doom_7.sav" },
+            { "id": 18, "filename": "doom/Doom_8.sav" },
+            { "id": 19, "filename": "doom/Doom_9.sav" },
+            { "id": 20, "filename": "doom/Doom.sav" }
+        ]
+    }
+}

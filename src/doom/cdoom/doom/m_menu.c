@@ -32,6 +32,9 @@
 
 #include "i_input.h"
 #include "i_joystick.h"
+#ifndef OF_PC
+#include "i_save.h"
+#endif
 #include "i_swap.h"
 #include "i_system.h"
 #include "i_timer.h"
@@ -571,6 +574,10 @@ void M_ReadSaveStrings(void)
         byte header[SAVESTRINGSIZE + VERSIONSIZE];
         M_StringCopy(name, P_SaveGameFile(i), sizeof(name));
 
+#ifndef OF_PC
+        retval = I_OpenFPGASaveReadHeader(name, header, sizeof(header))
+               ? sizeof(header) : 0;
+#else
 	handle = M_fopen(name, "rb");
         if (handle == NULL)
         {
@@ -580,6 +587,7 @@ void M_ReadSaveStrings(void)
         }
         retval = fread(header, 1, sizeof(header), handle);
 	fclose(handle);
+#endif
         if (retval != sizeof(header) || !M_SaveGameHeaderValid(header))
         {
             M_StringCopy(savegamestrings[i], EMPTYSTRING, SAVESTRINGSIZE);

@@ -28,6 +28,8 @@
 
 #define ZONEID 0x1d4a11
 #define MINFRAGMENT 64
+#define ZONE_ALIGN 8
+#define ZONE_ALIGN_MASK (ZONE_ALIGN - 1)
 
 typedef struct memblock_s {
     int                size;    // including header
@@ -46,16 +48,43 @@ typedef struct {
 
 static memzone_t *mainzone;
 
+typedef char z_memblock_size_must_be_aligned[(sizeof(memblock_t) & ZONE_ALIGN_MASK) == 0 ? 1 : -1];
+typedef char z_memzone_size_must_be_aligned[(sizeof(memzone_t) & ZONE_ALIGN_MASK) == 0 ? 1 : -1];
+
+static int Z_IsAligned(const void *ptr)
+{
+    return (((uintptr_t) ptr) & ZONE_ALIGN_MASK) == 0;
+}
+
+static void Z_RequireAligned(const void *ptr, const char *what)
+{
+    if (!Z_IsAligned(ptr))
+        I_Error("%s: misaligned address %p", what, ptr);
+}
+
+static memzone_t *Z_MemzoneAt(void *ptr, const char *what)
+{
+    Z_RequireAligned(ptr, what);
+    return (memzone_t *)ptr;
+}
+
+static memblock_t *Z_MemblockAt(void *ptr, const char *what)
+{
+    Z_RequireAligned(ptr, what);
+    return (memblock_t *)ptr;
+}
+
 void Z_Init(void)
 {
     memblock_t *block;
     int        size;
 
-    mainzone       = (memzone_t *)I_ZoneBase(&size);
+    mainzone       = Z_MemzoneAt(I_ZoneBase(&size), "Z_Init: zone base");
     mainzone->size = size;
 
     // Set the entire zone to one free block.
-    mainzone->blocklist.next = block = (memblock_t *)((byte *)mainzone + sizeof(memzone_t));
+    mainzone->blocklist.next = block =
+        Z_MemblockAt((byte *)mainzone + sizeof(memzone_t), "Z_Init: first block");
     mainzone->blocklist.prev = block;
     mainzone->blocklist.user = (void **)mainzone;
     mainzone->blocklist.tag  = PU_STATIC;
@@ -142,8 +171,11 @@ static void Z_DumpFreeFailure(const void *ptr, const memblock_t *block,
 
 void Z_Free(void *ptr)
 {
-    memblock_t *block = (memblock_t *)((byte *)ptr - sizeof(memblock_t));
+    memblock_t *block;
     memblock_t *other;
+
+    Z_RequireAligned(ptr, "Z_Free: payload");
+    block = Z_MemblockAt((byte *)ptr - sizeof(memblock_t), "Z_Free: block header");
 
     if (block->id != ZONEID) {
         Z_DumpFreeFailure(ptr, block, __builtin_return_address(0));
@@ -189,8 +221,8 @@ void *Z_Malloc(int size, int tag, void *user)
     if (user == NULL && tag >= PU_PURGELEVEL)
         I_Error("Z_Malloc: an owner is required for purgable blocks");
 
-    // Round to 4-byte boundary and account for header.
-    size = (size + 3) & ~3;
+    // Round to the zone alignment and account for the block header.
+    size = (size + ZONE_ALIGN_MASK) & ~ZONE_ALIGN_MASK;
     size += sizeof(memblock_t);
 
     // Scan through the block list, looking for the first free block
@@ -227,7 +259,7 @@ void *Z_Malloc(int size, int tag, void *user)
     // Found a big enough free block. Split if the remainder is useful.
     extra = base->size - size;
     if (extra > MINFRAGMENT) {
-        newblock       = (memblock_t *)((byte *)base + size);
+        newblock       = Z_MemblockAt((byte *)base + size, "Z_Malloc: split block");
         newblock->size = extra;
         newblock->tag  = PU_FREE;
         newblock->user = NULL;
@@ -340,7 +372,10 @@ void Z_CheckHeap(void)
 
 void Z_ChangeTag2(void *ptr, int tag, const char *file, int line)
 {
-    memblock_t *block = (memblock_t *)((byte *)ptr - sizeof(memblock_t));
+    memblock_t *block;
+
+    Z_RequireAligned(ptr, "Z_ChangeTag: payload");
+    block = Z_MemblockAt((byte *)ptr - sizeof(memblock_t), "Z_ChangeTag: block header");
 
     if (block->id != ZONEID)
         I_Error("%s:%i: Z_ChangeTag: block without a ZONEID!", file, line);
@@ -352,7 +387,10 @@ void Z_ChangeTag2(void *ptr, int tag, const char *file, int line)
 
 void Z_ChangeUser(void *ptr, void **user)
 {
-    memblock_t *block = (memblock_t *)((byte *)ptr - sizeof(memblock_t));
+    memblock_t *block;
+
+    Z_RequireAligned(ptr, "Z_ChangeUser: payload");
+    block = Z_MemblockAt((byte *)ptr - sizeof(memblock_t), "Z_ChangeUser: block header");
 
     if (block->id != ZONEID)
         I_Error("Z_ChangeUser: Tried to change user for invalid block!");

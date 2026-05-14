@@ -393,11 +393,15 @@ R_DrawVisSprite
 {
     column_t*		column;
     int			texturecolumn;
+    int			patchwidth;
     fixed_t		frac;
     patch_t*		patch;
 	
 	
     patch = W_CacheLumpNum (vis->patch+firstspritelump, PU_CACHE);
+    patchwidth = SHORT(patch->width);
+    if (patchwidth <= 0)
+	return;
 
     dc_colormap = vis->colormap;
     
@@ -422,10 +426,8 @@ R_DrawVisSprite
     for (dc_x=vis->x1 ; dc_x<=vis->x2 ; dc_x++, frac += vis->xiscale)
     {
 	texturecolumn = frac>>FRACBITS;
-#ifdef RANGECHECK
-	if (texturecolumn < 0 || texturecolumn >= SHORT(patch->width))
-	    I_Error ("R_DrawSpriteRange: bad texturecolumn");
-#endif
+	if (texturecolumn < 0 || texturecolumn >= patchwidth)
+	    continue;
 	column = (column_t *) ((byte *)patch +
 			       LONG(patch->columnofs[texturecolumn]));
 	R_DrawMaskedColumn (column);
@@ -1011,5 +1013,4 @@ void R_DrawMasked (void)
     if (!viewangleoffset)		
 	R_DrawPlayerSprites ();
 }
-
 

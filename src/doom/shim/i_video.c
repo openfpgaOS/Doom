@@ -94,9 +94,12 @@ void I_InitGraphics(void)
     screenvisible = true;
 
     key_fire = KEY_ENTER;
-    key_use  = KEY_BACKSPACE;
-    key_prevweapon = ',';
-    key_nextweapon = '.';
+    key_use  = ' ';
+    key_speed = KEY_RSHIFT;
+    key_strafeleft = ',';
+    key_straferight = '.';
+    key_prevweapon = '[';
+    key_nextweapon = ']';
     key_message_refresh = 0;
 }
 
@@ -221,5 +224,6 @@ void I_FinishUpdate(void)
 
 void I_ReadScreen(pixel_t *scr)
 {
+    R_GPU_PrepareForCPUAccess();
     memcpy(scr, I_VideoBuffer, SCREENWIDTH * SCREENHEIGHT);
 }

@@ -141,7 +141,13 @@ wad_file_t *W_AddFile (const char *filename)
 	return NULL;
     }
 
-    if (strcasecmp(filename+strlen(filename)-3 , "wad" ) )
+    memset(&header, 0, sizeof(header));
+    W_Read(wad_file, 0, &header, sizeof(header));
+
+    if ((strlen(filename) < 3
+      || strcasecmp(filename+strlen(filename)-3 , "wad" ))
+     && strncmp(header.identification, "IWAD", 4)
+     && strncmp(header.identification, "PWAD", 4))
     {
 	// single lump file
 
@@ -163,7 +169,6 @@ wad_file_t *W_AddFile (const char *filename)
     else
     {
 	// WAD file
-        W_Read(wad_file, 0, &header, sizeof(header));
 
 	if (strncmp(header.identification,"IWAD",4))
 	{

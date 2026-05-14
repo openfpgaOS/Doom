@@ -30,6 +30,13 @@ extern "C" {
 #include "of_cache.h"
 #endif
 
+static inline uint32_t _gpu_load_le32_bytes(const uint8_t *p) {
+    return (uint32_t)p[0]
+        | ((uint32_t)p[1] << 8)
+        | ((uint32_t)p[2] << 16)
+        | ((uint32_t)p[3] << 24);
+}
+
 /* ================================================================
  * Constants
  * ================================================================ */
@@ -514,9 +521,9 @@ static inline void of_gpu_palookup_upload(uint8_t slot, const uint8_t *data,
                          + (uint32_t)slot * OF_GPU_PALOOKUP_STRIDE;
     volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)
         ((cached_base - caps->sdram_base) + caps->sdram_uncached_base);
-    const uint32_t *src = (const uint32_t *)data;
     uint32_t words = size >> 2;
-    for (uint32_t i = 0; i < words; i++) dst[i] = src[i];
+    for (uint32_t i = 0; i < words; i++)
+        dst[i] = _gpu_load_le32_bytes(data + (i << 2));
     /* Tail bytes (size not a multiple of 4) — fold into a final word
      * so we still write every byte the caller passed.  Pad the unused
      * lanes with zero rather than skipping, so the SDRAM word is
@@ -553,9 +560,8 @@ static inline void of_gpu_translucency_upload(const uint8_t *table, uint32_t siz
     GPU_TRANSLUC_ADDR = 0;
     for (int s7 = 0; s7 < 128; s7++) {
         const uint8_t *row = &table[(s7 << 1) << 8];
-        const uint32_t *row32 = (const uint32_t *)row;
         for (int w = 0; w < 64; w++)
-            GPU_TRANSLUC_DATA = row32[w];
+            GPU_TRANSLUC_DATA = _gpu_load_le32_bytes(row + (w << 2));
     }
 }
 

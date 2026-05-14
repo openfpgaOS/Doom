@@ -540,8 +540,8 @@ void R_Subsector (int num)
     }
 
     // check for solidsegs overflow - extremely unsatisfactory!
-    if(newend > &solidsegs[32])
-        I_Error("R_Subsector: solidsegs overflow (vanilla may crash here)\n");
+    if (newend > &solidsegs[MAXSEGS])
+        I_Error("R_Subsector: solidsegs overflow\n");
 }
 
 
@@ -579,5 +579,4 @@ void R_RenderBSPNode (int bspnum)
     if (R_CheckBBox (bsp->bbox[side^1]))	
 	R_RenderBSPNode (bsp->children[side^1]);
 }
-
 

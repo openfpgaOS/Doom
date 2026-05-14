@@ -163,6 +163,16 @@ fixed_t*	spritetopoffset;
 
 lighttable_t	*colormaps;
 
+static int ReadLE32Unaligned(const void *p)
+{
+    const byte *b = p;
+
+    return (int) ((uint32_t) b[0]
+               | ((uint32_t) b[1] << 8)
+               | ((uint32_t) b[2] << 16)
+               | ((uint32_t) b[3] << 24));
+}
+
 
 //
 // MAPTEXTURE_T CACHING
@@ -457,9 +467,8 @@ void R_InitTextures (void)
     int			i;
     int			j;
 
-    int*		maptex;
-    int*		maptex2;
-    int*		maptex1;
+    byte*		maptex;
+    byte*		maptex2;
     
     char		name[9];
     char*		names;
@@ -474,7 +483,7 @@ void R_InitTextures (void)
     int			numtextures1;
     int			numtextures2;
 
-    int*		directory;
+    byte*		directory;
     
     int			temp1;
     int			temp2;
@@ -484,7 +493,7 @@ void R_InitTextures (void)
     // Load the patch names from pnames.lmp.
     name[8] = 0;
     names = W_CacheLumpName (DEH_String("PNAMES"), PU_STATIC);
-    nummappatches = LONG ( *((int *)names) );
+    nummappatches = ReadLE32Unaligned(names);
     name_p = names + 4;
     patchlookup = Z_Malloc(nummappatches*sizeof(*patchlookup), PU_STATIC, NULL);
 
@@ -498,15 +507,15 @@ void R_InitTextures (void)
     // Load the map texture definitions from textures.lmp.
     // The data is contained in one or two lumps,
     //  TEXTURE1 for shareware, plus TEXTURE2 for commercial.
-    maptex = maptex1 = W_CacheLumpName (DEH_String("TEXTURE1"), PU_STATIC);
-    numtextures1 = LONG(*maptex);
+    maptex = W_CacheLumpName (DEH_String("TEXTURE1"), PU_STATIC);
+    numtextures1 = ReadLE32Unaligned(maptex);
     maxoff = W_LumpLength (W_GetNumForName (DEH_String("TEXTURE1")));
-    directory = maptex+1;
+    directory = maptex + 4;
 	
     if (W_CheckNumForName (DEH_String("TEXTURE2")) != -1)
     {
 	maptex2 = W_CacheLumpName (DEH_String("TEXTURE2"), PU_STATIC);
-	numtextures2 = LONG(*maptex2);
+	numtextures2 = ReadLE32Unaligned(maptex2);
 	maxoff2 = W_LumpLength (W_GetNumForName (DEH_String("TEXTURE2")));
     }
     else
@@ -544,7 +553,7 @@ void R_InitTextures (void)
             printf("\b");
     }
 	
-    for (i=0 ; i<numtextures ; i++, directory++)
+    for (i=0 ; i<numtextures ; i++, directory += 4)
     {
 	if (!(i&63))
 	    printf (".");
@@ -554,10 +563,10 @@ void R_InitTextures (void)
 	    // Start looking in second texture file.
 	    maptex = maptex2;
 	    maxoff = maxoff2;
-	    directory = maptex+1;
+	    directory = maptex + 4;
 	}
 		
-	offset = LONG(*directory);
+	offset = ReadLE32Unaligned(directory);
 
 	if (offset > maxoff)
 	    I_Error ("R_InitTextures: bad texture directory");
@@ -900,6 +909,4 @@ void R_PrecacheLevel (void)
 
     Z_Free(spritepresent);
 }
-
-
 

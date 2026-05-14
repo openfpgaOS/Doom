@@ -41,6 +41,9 @@
 #include "i_input.h"
 #include "i_swap.h"
 #include "i_video.h"
+#ifndef OF_PC
+#include "i_save.h"
+#endif
 
 #include "p_setup.h"
 #include "p_saveg.h"
@@ -83,25 +86,10 @@ static byte openfpga_save_buffer[OPENFPGA_SAVE_SLOT_SIZE];
 
 static FILE *G_OpenBufferedSaveForRead(const char *name)
 {
-    FILE *slot;
     size_t size;
 
-    slot = M_fopen(name, "rb");
-    if (slot == NULL)
-    {
-        return NULL;
-    }
-
-    size = fread(openfpga_save_buffer, 1,
-                 sizeof(openfpga_save_buffer), slot);
-    if (ferror(slot))
-    {
-        fclose(slot);
-        return NULL;
-    }
-    fclose(slot);
-
-    if (size == 0)
+    if (!I_OpenFPGASaveRead(name, openfpga_save_buffer,
+                            sizeof(openfpga_save_buffer), &size))
     {
         return NULL;
     }
@@ -119,7 +107,6 @@ static FILE *G_OpenBufferedSaveForWrite(void)
 
 static int G_FlushBufferedSave(const char *name)
 {
-    FILE *slot;
     long size;
 
     size = P_SaveBufferLength();
@@ -131,21 +118,7 @@ static int G_FlushBufferedSave(const char *name)
         return -1;
     }
 
-    slot = M_fopen(name, "wb");
-    if (slot == NULL)
-    {
-        P_SaveBufferClear();
-        return -1;
-    }
-
-    if (fwrite(openfpga_save_buffer, 1, (size_t) size, slot) != (size_t) size)
-    {
-        fclose(slot);
-        P_SaveBufferClear();
-        return -1;
-    }
-
-    if (fclose(slot) != 0)
+    if (!I_OpenFPGASaveWrite(name, openfpga_save_buffer, (size_t) size))
     {
         P_SaveBufferClear();
         return -1;
@@ -249,9 +222,49 @@ static int *weapon_keys[] = {
     &key_weapon8
 };
 
-// Set to -1 or +1 to switch to the previous or next weapon.
+// Queued -1/+1 steps for previous/next weapon selection.
 
-static int next_weapon = 0;
+#define WEAPON_QUEUE_SIZE 16
+
+static signed char weapon_queue[WEAPON_QUEUE_SIZE];
+static int weapon_queue_head;
+static int weapon_queue_count;
+
+static void ClearWeaponQueue(void)
+{
+    weapon_queue_head = 0;
+    weapon_queue_count = 0;
+}
+
+static void QueueWeaponStep(int direction)
+{
+    int tail;
+
+    if (direction == 0 || weapon_queue_count >= WEAPON_QUEUE_SIZE)
+    {
+        return;
+    }
+
+    tail = (weapon_queue_head + weapon_queue_count) % WEAPON_QUEUE_SIZE;
+    weapon_queue[tail] = direction < 0 ? -1 : 1;
+    ++weapon_queue_count;
+}
+
+static int PopWeaponStep(void)
+{
+    int direction;
+
+    if (weapon_queue_count <= 0)
+    {
+        return 0;
+    }
+
+    direction = weapon_queue[weapon_queue_head];
+    weapon_queue_head = (weapon_queue_head + 1) % WEAPON_QUEUE_SIZE;
+    --weapon_queue_count;
+
+    return direction;
+}
 
 // Used for prev/next weapon keys.
 
@@ -574,34 +587,38 @@ void G_BuildTiccmd (ticcmd_t* cmd, int maketic)
 	dclicks = 0;                   
     } 
 
-    // If the previous or next weapon button is pressed, the
-    // next_weapon variable is set to change weapons when
-    // we generate a ticcmd.  Choose a new weapon.
+    // Check weapon keys first. A direct weapon key should override any
+    // queued controller/scroll steps.
 
-    if (gamestate == GS_LEVEL && next_weapon != 0)
+    for (i=0; i<arrlen(weapon_keys); ++i)
     {
-        i = G_NextWeapon(next_weapon);
-        cmd->buttons |= BT_CHANGE;
-        cmd->buttons |= i << BT_WEAPONSHIFT;
-    }
-    else
-    {
-        // Check weapon keys.
+        int key = *weapon_keys[i];
 
-        for (i=0; i<arrlen(weapon_keys); ++i)
+        if (gamekeydown[key])
         {
-            int key = *weapon_keys[i];
-
-            if (gamekeydown[key])
-            {
-                cmd->buttons |= BT_CHANGE;
-                cmd->buttons |= i<<BT_WEAPONSHIFT;
-                break;
-            }
+            ClearWeaponQueue();
+            cmd->buttons |= BT_CHANGE;
+            cmd->buttons |= i << BT_WEAPONSHIFT;
+            break;
         }
     }
 
-    next_weapon = 0;
+    // Consume one queued previous/next weapon step per tic.  G_NextWeapon()
+    // starts from pendingweapon when a switch animation is already underway,
+    // so rapid taps advance predictably instead of being collapsed into one.
+
+    if (!(cmd->buttons & BT_CHANGE))
+    {
+        int weapon_step = gamestate == GS_LEVEL && !menuactive
+                        ? PopWeaponStep() : 0;
+
+        if (weapon_step != 0)
+        {
+            i = G_NextWeapon(weapon_step);
+            cmd->buttons |= BT_CHANGE;
+            cmd->buttons |= i << BT_WEAPONSHIFT;
+        }
+    }
 
     // mouse
     if (mousebuttons[mousebforward]) 
@@ -810,6 +827,7 @@ void G_DoLoadLevel (void)
     joyxmove = joyymove = joystrafemove = 0;
     mousex = mousey = 0;
     sendpause = sendsave = paused = false;
+    ClearWeaponQueue();
     memset(mousearray, 0, sizeof(mousearray));
     memset(joyarray, 0, sizeof(joyarray));
 
@@ -835,11 +853,11 @@ static void SetJoyButtons(unsigned int buttons_mask)
 
             if (i == joybprevweapon)
             {
-                next_weapon = -1;
+                QueueWeaponStep(-1);
             }
             else if (i == joybnextweapon)
             {
-                next_weapon = 1;
+                QueueWeaponStep(1);
             }
         }
 
@@ -861,11 +879,11 @@ static void SetMouseButtons(unsigned int buttons_mask)
         {
             if (i == mousebprevweapon)
             {
-                next_weapon = -1;
+                QueueWeaponStep(-1);
             }
             else if (i == mousebnextweapon)
             {
-                next_weapon = 1;
+                QueueWeaponStep(1);
             }
         }
 
@@ -942,16 +960,16 @@ boolean G_Responder (event_t* ev)
         testcontrols_mousespeed = abs(ev->data2);
     }
 
-    // If the next/previous weapon keys are pressed, set the next_weapon
-    // variable to change weapons when the next ticcmd is generated.
+    // If the next/previous weapon keys are pressed, queue the step so fast
+    // taps are consumed in order by future ticcmds.
 
     if (ev->type == ev_keydown && ev->data1 == key_prevweapon)
     {
-        next_weapon = -1;
+        QueueWeaponStep(-1);
     }
     else if (ev->type == ev_keydown && ev->data1 == key_nextweapon)
     {
-        next_weapon = 1;
+        QueueWeaponStep(1);
     }
 
     switch (ev->type) 

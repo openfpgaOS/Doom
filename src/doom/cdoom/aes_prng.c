@@ -645,6 +645,22 @@ static uint32_t aes_ror32(uint32_t word, unsigned int shift)
 #define cpu_to_le32(x) SDL_SwapLE32(x)
 #define le32_to_cpu(x) SDL_SwapLE32(x)
 
+static uint32_t aes_load_le32(const uint8_t *p)
+{
+    return (uint32_t) p[0]
+        | ((uint32_t) p[1] << 8)
+        | ((uint32_t) p[2] << 16)
+        | ((uint32_t) p[3] << 24);
+}
+
+static void aes_store_le32(uint8_t *p, uint32_t value)
+{
+    p[0] = (uint8_t) value;
+    p[1] = (uint8_t) (value >> 8);
+    p[2] = (uint8_t) (value >> 16);
+    p[3] = (uint8_t) (value >> 24);
+}
+
 #define star_x(x) (((x) & 0x7f7f7f7f) << 1) ^ ((((x) & 0x80808080) >> 7) * 0x1b)
 
 #define imix_col(y, x)  do {        \
@@ -736,7 +752,6 @@ static uint32_t aes_ror32(uint32_t word, unsigned int shift)
 static int AES_ExpandKey(aes_context_t *ctx, const uint8_t *in_key,
                          unsigned int key_len)
 {
-    const uint32_t *key = (const uint32_t *)in_key;
     uint32_t i, t, u, v, w, j;
 
     if (key_len != AES_KEYSIZE_128 && key_len != AES_KEYSIZE_192 &&
@@ -745,10 +760,10 @@ static int AES_ExpandKey(aes_context_t *ctx, const uint8_t *in_key,
 
     ctx->key_length = key_len;
 
-    ctx->key_dec[key_len + 24] = ctx->key_enc[0] = le32_to_cpu(key[0]);
-    ctx->key_dec[key_len + 25] = ctx->key_enc[1] = le32_to_cpu(key[1]);
-    ctx->key_dec[key_len + 26] = ctx->key_enc[2] = le32_to_cpu(key[2]);
-    ctx->key_dec[key_len + 27] = ctx->key_enc[3] = le32_to_cpu(key[3]);
+    ctx->key_dec[key_len + 24] = ctx->key_enc[0] = aes_load_le32(in_key);
+    ctx->key_dec[key_len + 25] = ctx->key_enc[1] = aes_load_le32(in_key + 4);
+    ctx->key_dec[key_len + 26] = ctx->key_enc[2] = aes_load_le32(in_key + 8);
+    ctx->key_dec[key_len + 27] = ctx->key_enc[3] = aes_load_le32(in_key + 12);
 
     switch (key_len) {
         case AES_KEYSIZE_128:
@@ -758,17 +773,17 @@ static int AES_ExpandKey(aes_context_t *ctx, const uint8_t *in_key,
             break;
 
         case AES_KEYSIZE_192:
-            ctx->key_enc[4] = le32_to_cpu(key[4]);
-            t = ctx->key_enc[5] = le32_to_cpu(key[5]);
+            ctx->key_enc[4] = aes_load_le32(in_key + 16);
+            t = ctx->key_enc[5] = aes_load_le32(in_key + 20);
             for (i = 0; i < 8; ++i)
                 loop6(i);
             break;
 
         case AES_KEYSIZE_256:
-            ctx->key_enc[4] = le32_to_cpu(key[4]);
-            ctx->key_enc[5] = le32_to_cpu(key[5]);
-            ctx->key_enc[6] = le32_to_cpu(key[6]);
-            t = ctx->key_enc[7] = le32_to_cpu(key[7]);
+            ctx->key_enc[4] = aes_load_le32(in_key + 16);
+            ctx->key_enc[5] = aes_load_le32(in_key + 20);
+            ctx->key_enc[6] = aes_load_le32(in_key + 24);
+            t = ctx->key_enc[7] = aes_load_le32(in_key + 28);
             for (i = 0; i < 6; ++i)
                 loop8(i);
             loop8tophalf(i);
@@ -842,16 +857,14 @@ static int AES_SetKey(aes_context_t *ctx, const uint8_t *in_key,
 static void AES_Encrypt(aes_context_t *ctx, uint8_t *out,
                         const uint8_t *in)
 {
-    const uint32_t *src = (const uint32_t *)in;
-    uint32_t *dst = (uint32_t *)out;
     uint32_t b0[4], b1[4];
     const uint32_t *kp = ctx->key_enc + 4;
     const int key_len = ctx->key_length;
 
-    b0[0] = le32_to_cpu(src[0]) ^ ctx->key_enc[0];
-    b0[1] = le32_to_cpu(src[1]) ^ ctx->key_enc[1];
-    b0[2] = le32_to_cpu(src[2]) ^ ctx->key_enc[2];
-    b0[3] = le32_to_cpu(src[3]) ^ ctx->key_enc[3];
+    b0[0] = aes_load_le32(in) ^ ctx->key_enc[0];
+    b0[1] = aes_load_le32(in + 4) ^ ctx->key_enc[1];
+    b0[2] = aes_load_le32(in + 8) ^ ctx->key_enc[2];
+    b0[3] = aes_load_le32(in + 12) ^ ctx->key_enc[3];
 
     if (key_len > 24) {
         f_nround(b1, b0, kp);
@@ -874,10 +887,10 @@ static void AES_Encrypt(aes_context_t *ctx, uint8_t *out,
     f_nround(b1, b0, kp);
     f_lround(b0, b1, kp);
 
-    dst[0] = cpu_to_le32(b0[0]);
-    dst[1] = cpu_to_le32(b0[1]);
-    dst[2] = cpu_to_le32(b0[2]);
-    dst[3] = cpu_to_le32(b0[3]);
+    aes_store_le32(out, b0[0]);
+    aes_store_le32(out + 4, b0[1]);
+    aes_store_le32(out + 8, b0[2]);
+    aes_store_le32(out + 12, b0[3]);
 }
 
 static boolean prng_enabled = false;
@@ -953,4 +966,3 @@ unsigned int PRNG_Random(void)
 
     return result;
 }
-

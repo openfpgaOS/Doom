@@ -9,6 +9,7 @@
 #include "doom_loading_logo.h"
 #endif
 #include "doomtype.h"
+#include "i_save.h"
 #include "i_system.h"
 #include "m_argv.h"
 #include "m_misc.h"
@@ -91,7 +92,37 @@ static void RegisterPersistentFiles(void)
         of_file_slot_register(10 + (uint32_t) i, save_slot_names[i]);
     }
 
+    of_file_slot_register(20, "legacy.sav");
+
     registered = true;
+}
+
+static boolean CanOpenFile(const char *filename)
+{
+    FILE *fp = fopen(filename, "rb");
+
+    if (fp == NULL)
+    {
+        return false;
+    }
+
+    fclose(fp);
+    return true;
+}
+
+static const char *FindReadableFile(const char *const *filenames,
+                                    size_t num_filenames,
+                                    const char *fallback)
+{
+    for (size_t i = 0; i < num_filenames; ++i)
+    {
+        if (CanOpenFile(filenames[i]))
+        {
+            return filenames[i];
+        }
+    }
+
+    return fallback;
 }
 #endif
 
@@ -125,15 +156,62 @@ int main(int argc, char **argv)
 #endif
 
     /* openfpgaOS port: the Pocket kernel has no mechanism to pass argv
-     * from instance.json, so we inject "-iwad DOOM.WAD" here. The
-     * instance JSON binds DOOM.WAD to data slot 3; the kernel file
-     * service resolves the filename via that binding. On the desktop
-     * build (OF_PC) the user can still override via the real command
-     * line -- anything they pass wins because M_CheckParmWithArgs()
-     * returns the first match. */
+     * from instance.json. Prefer the APF filenames used by our instance
+     * files so Chocolate Doom can identify IWADs by name; fall back to
+     * slot aliases for user/custom instances. */
 #ifndef OF_PC
+    static const char *const iwad_candidates[] =
+    {
+        "doom.wad",
+        "doom1.wad",
+        "doom/DOOM.WAD",
+        "doom2/DOOM2.WAD",
+        "plutonia/PLUTONIA.WAD",
+        "tnt/TNT.WAD",
+        "doomu/doomu.wad",
+        "DOOM.WAD",
+        "DOOM2.WAD",
+        "PLUTONIA.WAD",
+        "TNT.WAD",
+    };
+    static const char *const pwad_candidates[] =
+    {
+        "sigil/SIGIL_COMPAT_v1_23.wad",
+        "sigil/SIGIL_COMPAT_v1_21.wad",
+        "sigil/SIGIL_COMPAT_v1_2.wad",
+        "sigil/SIGIL_COMPAT.wad",
+        "sigil/sigil_compat.wad",
+        "earth/EARTH.WAD",
+        "revolution/TVR!.WAD",
+        "tnt/TNT31.WAD",
+    };
+
+    const char *iwad_file = FindReadableFile(iwad_candidates,
+                                             arrlen(iwad_candidates),
+                                             "slot:3");
+    const char *pwad_file = FindReadableFile(pwad_candidates,
+                                             arrlen(pwad_candidates),
+                                             NULL);
     int   injected = 3;
-    char *injected_argv[] = { "-iwad", "DOOM.WAD", "-noautoload" };
+    char *injected_argv[] =
+    {
+        "-iwad", (char *) iwad_file, "-noautoload",
+        "-merge", (char *) pwad_file
+    };
+
+    if (pwad_file == NULL && CanOpenFile("slot:4"))
+    {
+        pwad_file = "slot:4";
+        injected_argv[4] = (char *) pwad_file;
+    }
+
+    if (pwad_file != NULL)
+    {
+        injected = 5;
+    }
+
+    I_SetOpenFPGASaveIdentity(iwad_file, pwad_file);
+    I_MigratePocketDoomSaves();
 #else
     int   injected = 0;
     char *injected_argv[] = { 0 };

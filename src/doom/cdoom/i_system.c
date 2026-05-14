@@ -72,17 +72,25 @@
  * misaligned, which can only happen if zone headers were scribbled). */
 #define OF_ZONE_CANARY_BYTES 64
 #define OF_ZONE_CANARY_MAGIC 0xDEADC0DEu
-static byte of_zone_pool[OF_ZONE_CANARY_BYTES + OF_ZONE_BYTES + OF_ZONE_CANARY_BYTES]
-    __attribute__((aligned(8)));
+#define OF_ZONE_CANARY_WORDS (OF_ZONE_CANARY_BYTES / sizeof(uint32_t))
+
+typedef struct
+{
+    uint32_t pre[OF_ZONE_CANARY_WORDS];
+    byte     pool[OF_ZONE_BYTES];
+    uint32_t post[OF_ZONE_CANARY_WORDS];
+} of_zone_pool_t;
+
+static of_zone_pool_t of_zone_pool __attribute__((aligned(8)));
 
 static uint32_t *of_zone_canary_pre(void)
 {
-    return (uint32_t *)of_zone_pool;
+    return of_zone_pool.pre;
 }
 
 static uint32_t *of_zone_canary_post(void)
 {
-    return (uint32_t *)(of_zone_pool + OF_ZONE_CANARY_BYTES + OF_ZONE_BYTES);
+    return of_zone_pool.post;
 }
 
 int I_CheckZoneCanaries(void)
@@ -195,7 +203,7 @@ byte *I_ZoneBase (int *size)
         pre[i]  = OF_ZONE_CANARY_MAGIC;
         post[i] = OF_ZONE_CANARY_MAGIC;
     }
-    byte *inner = of_zone_pool + OF_ZONE_CANARY_BYTES;
+    byte *inner = of_zone_pool.pool;
     printf("zone memory: %p, %x allocated for zone (canaries %p / %p)\n",
            inner, *size, pre, post);
     return inner;
@@ -489,4 +497,3 @@ boolean I_GetMemoryValue(unsigned int offset, void *value, int size)
 
     return false;
 }
-
