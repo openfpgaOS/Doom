@@ -12,6 +12,7 @@
 #include "m_argv.h"
 #include "r_gpu.h"
 #include "r_local.h"
+#include "r_perf.h"
 #include "r_state.h"
 #include "w_wad.h"
 
@@ -71,6 +72,17 @@ static uintptr_t gpu_framebuffer_delta;
 static int gpu_deferred_lumps[GPU_DEFERRED_LUMPS];
 static int gpu_deferred_lump_count;
 
+static void gpu_record_debug_snapshot(void)
+{
+    of_gpu_debug_snapshot_t snap;
+
+    of_gpu_debug_snapshot(&snap, 1);
+    R_Perf_AddGpuDebug(snap.dma_waits, snap.dma_spin_iters,
+                       snap.ring_waits, snap.ring_spin_iters,
+                       snap.min_ring_free, snap.ring_free,
+                       snap.status);
+}
+
 static void gpu_release_deferred_lumps(void)
 {
     for (int i = 0; i < gpu_deferred_lump_count; i++)
@@ -80,17 +92,27 @@ static void gpu_release_deferred_lumps(void)
 
 static void gpu_finish_pending(void)
 {
+    unsigned int wait_start;
+
     if (!gpu_pending)
         return;
 
+    wait_start = R_Perf_BeginStage();
     of_gpu_finish();
+    R_Perf_EndStage(R_PERF_STAGE_GPU_WAIT, wait_start);
+    R_Perf_CountGpuFinish();
+    gpu_record_debug_snapshot();
     gpu_pending = 0;
 
     /* GPU writes bypass the CPU cache.  Flush+invalidate gives any dirty
      * CPU-only lines a chance to land and drops stale lines for GPU-written
      * pixels before the CPU renders overlays or copies the screen out. */
     if (I_VideoBuffer != NULL && !gpu_flip_enabled)
+    {
+        unsigned int cache_start = R_Perf_BeginStage();
         of_cache_flush_range(I_VideoBuffer, SCREENWIDTH * SCREENHEIGHT);
+        R_Perf_EndStage(R_PERF_STAGE_CACHE, cache_start);
+    }
 
     gpu_release_deferred_lumps();
 }
@@ -103,7 +125,11 @@ static void gpu_prepare_for_gpu_write(void)
     if (gpu_cpu_dirty)
     {
         if (!gpu_flip_enabled)
+        {
+            unsigned int cache_start = R_Perf_BeginStage();
             of_cache_flush_range(I_VideoBuffer, SCREENWIDTH * SCREENHEIGHT);
+            R_Perf_EndStage(R_PERF_STAGE_CACHE, cache_start);
+        }
         gpu_cpu_dirty = 0;
     }
 }
@@ -264,6 +290,8 @@ void R_GPU_BeginDisplayFrame(void)
 
 void R_GPU_BeginFrame(void)
 {
+    unsigned int cache_start;
+
     if (!gpu_present || I_VideoBuffer == NULL)
         return;
 
@@ -275,7 +303,11 @@ void R_GPU_BeginFrame(void)
      * hardware draw buffer.  Otherwise, Doom is rendering into the stable
      * fallback buffer and GPU reads/writes need cache handoff. */
     if (!gpu_flip_enabled)
+    {
+        cache_start = R_Perf_BeginStage();
         of_cache_flush_range(I_VideoBuffer, SCREENWIDTH * SCREENHEIGHT);
+        R_Perf_EndStage(R_PERF_STAGE_CACHE, cache_start);
+    }
     of_gpu_set_framebuffer((uint32_t)(uintptr_t)
                            (gpu_flip_enabled && gpu_draw_render_base != NULL
                             ? gpu_draw_render_base
@@ -299,12 +331,15 @@ void R_GPU_PrepareForCPUAccess(void)
     if (!gpu_present || !gpu_frame_active)
         return;
 
+    R_Perf_CountPrepareCPU();
     gpu_finish_pending();
     gpu_cpu_dirty = 1;
 }
 
 void R_GPU_TextureDataUpdated(void *ptr, unsigned int size)
 {
+    unsigned int cache_start;
+
     if (!gpu_present || ptr == NULL || size == 0)
         return;
 
@@ -312,24 +347,37 @@ void R_GPU_TextureDataUpdated(void *ptr, unsigned int size)
      * path is cold: it runs when Doom loads a lump or builds a composite
      * texture, not for every already-cached texel fetch. */
     gpu_finish_pending();
+    cache_start = R_Perf_BeginStage();
     of_cache_flush_range(ptr, size);
+    R_Perf_EndStage(R_PERF_STAGE_CACHE, cache_start);
     GPU_TEX_FLUSH = 1;
 }
 
 boolean R_GPU_PresentFrame(void)
 {
+    unsigned int present_start;
+    unsigned int stage_start;
+    uint32_t token;
+
     if (!gpu_present || !gpu_flip_enabled || I_VideoBuffer == NULL ||
         gpu_draw_idx < 0 || !gpu_display_frame_active)
         return false;
 
+    present_start = R_Perf_BeginStage();
+
     /* The previous display swap and current GPU spans are independent.
      * Wait for scanout availability first so current-frame GPU work can
      * overlap that wait, then drain before queuing this frame's flip. */
+    stage_start = R_Perf_BeginStage();
     of_video_wait_flip();
+    R_Perf_EndStage(R_PERF_STAGE_VSYNC_WAIT, stage_start);
     gpu_finish_pending();
 
-    uint32_t token = of_gpu_flip_to(gpu_draw_idx);
+    stage_start = R_Perf_BeginStage();
+    token = of_gpu_flip_to(gpu_draw_idx);
     of_gpu_kick();
+    R_Perf_EndStage(R_PERF_STAGE_GPU_FLIP, stage_start);
+    gpu_record_debug_snapshot();
 
     gpu_draw_idx = of_video_acquire_next(gpu_draw_idx, token);
     if (gpu_draw_idx < 0)
@@ -341,6 +389,7 @@ boolean R_GPU_PresentFrame(void)
     gpu_draw_fb = NULL;
     gpu_draw_render_base = NULL;
 
+    R_Perf_EndStage(R_PERF_STAGE_PRESENT, present_start);
     return true;
 }
 
@@ -378,6 +427,7 @@ boolean R_GPU_DrawColumn(void)
 
     of_gpu_draw_span(&span);
     gpu_pending = 1;
+    R_Perf_CountGpuColumn((unsigned int)count);
     return true;
 }
 
@@ -415,6 +465,7 @@ boolean R_GPU_DrawSpan(void)
 
     of_gpu_draw_span(&span);
     gpu_pending = 1;
+    R_Perf_CountGpuSpan((unsigned int)count);
     return true;
 }
 

@@ -17,6 +17,7 @@
 #include "m_config.h"
 #include "m_misc.h"
 #include "r_gpu.h"
+#include "r_perf.h"
 #include "z_zone.h"
 #include "m_controls.h"
 
@@ -201,7 +202,11 @@ void I_FinishUpdate(void)
     if (R_GPU_UsingDirectFramebuffer()) {
         last_flip_us = 0;
         if (R_GPU_PresentFrame())
+        {
+            R_Perf_CountPresentedFrame(1);
+            R_Perf_FrameEnd();
             return;
+        }
 
         R_GPU_EndFrame();
     } else {
@@ -211,15 +216,21 @@ void I_FinishUpdate(void)
         unsigned int now = of_time_us();
         unsigned int dt  = now - last_flip_us;
         if (last_flip_us && dt < target_us) {
+            unsigned int wait_start = R_Perf_BeginStage();
             usleep(target_us - dt);
+            R_Perf_EndStage(R_PERF_STAGE_VSYNC_WAIT, wait_start);
         }
         last_flip_us = of_time_us();
     }
 
+    unsigned int blit_start = R_Perf_BeginStage();
     uint8_t *fb = of_video_surface();
     memcpy(fb + OF_SCREEN_W * LETTERBOX_Y, I_VideoBuffer,
            SCREENWIDTH * SCREENHEIGHT);
     of_video_flip();
+    R_Perf_EndStage(R_PERF_STAGE_BLIT, blit_start);
+    R_Perf_CountPresentedFrame(0);
+    R_Perf_FrameEnd();
 }
 
 void I_ReadScreen(pixel_t *scr)

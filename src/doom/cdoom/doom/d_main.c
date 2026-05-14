@@ -72,6 +72,7 @@
 #include "p_setup.h"
 #include "r_local.h"
 #include "r_gpu.h"
+#include "r_perf.h"
 #include "statdump.h"
 
 #include "d_main.h"
@@ -171,7 +172,10 @@ boolean D_Display (void)
     int				y;
     boolean			wipe;
     boolean			redrawsbar;
+    unsigned int                display_start;
 
+    R_Perf_FrameStart();
+    display_start = R_Perf_BeginStage();
     redrawsbar = false;
 
     // change the view size if needed
@@ -290,6 +294,10 @@ boolean D_Display (void)
     M_Drawer ();          // menu is drawn even on top of everything
     NetUpdate ();         // send out any new accumulation
 
+    if (wipe)
+        R_Perf_FrameCancel();
+    else
+        R_Perf_EndStage(R_PERF_STAGE_DISPLAY, display_start);
     return wipe;
 }
 
@@ -417,6 +425,8 @@ void D_RunFrame()
 
     if (wipe)
     {
+        unsigned int display_start;
+
         do
         {
             nowtime = I_GetTime ();
@@ -425,11 +435,14 @@ void D_RunFrame()
         } while (tics <= 0);
 
         wipestart = nowtime;
+        R_Perf_FrameStart();
+        display_start = R_Perf_BeginStage();
         R_GPU_BeginDisplayFrame();
         wipe = !wipe_ScreenWipe(wipe_Melt
                                , 0, 0, SCREENWIDTH, SCREENHEIGHT, tics);
         I_UpdateNoBlit ();
         M_Drawer ();                            // menu is drawn even on top of wipes
+        R_Perf_EndStage(R_PERF_STAGE_DISPLAY, display_start);
         I_FinishUpdate ();                      // page flip or blit buffer
         return;
     }

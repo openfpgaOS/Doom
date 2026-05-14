@@ -30,6 +30,7 @@
 
 #include "r_local.h"
 #include "r_gpu.h"
+#include "r_perf.h"
 
 // Needs access to LFB (guess what).
 #include "v_video.h"
@@ -124,6 +125,7 @@ void R_DrawColumn (void)
 	return;
 
     R_GPU_PrepareForCPUAccess();
+    R_Perf_CountCpuColumn((unsigned int)(count + 1));
 
     // Framebuffer destination address.
     // Use ylookup LUT to avoid multiply with ScreenWidth.
@@ -610,6 +612,7 @@ void R_DrawSpan (void)
 	return;
 
     R_GPU_PrepareForCPUAccess();
+    R_Perf_CountCpuSpan((unsigned int)(ds_x2 - ds_x1 + 1));
 
     // Pack position and step variables into a single 32-bit integer,
     // with x in the top 16 bits and y in the bottom 16 bits.  For

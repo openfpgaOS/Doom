@@ -33,6 +33,7 @@
 #include "m_menu.h"
 
 #include "r_local.h"
+#include "r_perf.h"
 #include "r_sky.h"
 
 
@@ -890,6 +891,12 @@ void R_SetupFrame (player_t* player)
 //
 void R_RenderPlayerView (player_t* player)
 {	
+    unsigned int view_start;
+    unsigned int stage_start;
+
+    R_Perf_CountRenderedView();
+    view_start = R_Perf_BeginStage();
+
     R_SetupFrame (player);
 
     // Clear buffers.
@@ -902,18 +909,26 @@ void R_RenderPlayerView (player_t* player)
     NetUpdate ();
 
     // The head node is the last node output.
+    stage_start = R_Perf_BeginStage();
     R_RenderBSPNode (numnodes-1);
+    R_Perf_EndStage(R_PERF_STAGE_BSP, stage_start);
     
     // Check for new console commands.
     NetUpdate ();
     
+    stage_start = R_Perf_BeginStage();
     R_DrawPlanes ();
+    R_Perf_EndStage(R_PERF_STAGE_PLANES, stage_start);
     
     // Check for new console commands.
     NetUpdate ();
     
+    stage_start = R_Perf_BeginStage();
     R_DrawMasked ();
+    R_Perf_EndStage(R_PERF_STAGE_MASKED, stage_start);
 
     // Check for new console commands.
     NetUpdate ();				
+
+    R_Perf_EndStage(R_PERF_STAGE_VIEW, view_start);
 }
