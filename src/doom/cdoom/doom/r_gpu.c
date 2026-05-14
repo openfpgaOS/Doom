@@ -68,9 +68,12 @@ static uint8_t *gpu_draw_render_base;
 static uintptr_t gpu_framebuffer_delta;
 
 #define GPU_DEFERRED_LUMPS 64
+#define GPU_COLUMN_BATCH_LANES 8
 #define GPU_LETTERBOX_Y ((OF_SCREEN_H - SCREENHEIGHT) / 2)
 static int gpu_deferred_lumps[GPU_DEFERRED_LUMPS];
 static int gpu_deferred_lump_count;
+static of_gpu_span_group_t gpu_column_batch;
+static int gpu_column_batch_count;
 
 static void gpu_record_debug_snapshot(void)
 {
@@ -90,9 +93,70 @@ static void gpu_release_deferred_lumps(void)
     gpu_deferred_lump_count = 0;
 }
 
+static void gpu_emit_single_batched_column(void)
+{
+    of_gpu_span_t span;
+
+    span.fb_addr = gpu_column_batch.fb_addr;
+    span.tex_addr = gpu_column_batch.tex_addr[0];
+    span.s = 0;
+    span.t = gpu_column_batch.t[0];
+    span.sstep = 0;
+    span.tstep = gpu_column_batch.tstep[0];
+    span.count = gpu_column_batch.count;
+    span.light = gpu_column_batch.light[0];
+    span.flags = gpu_column_batch.flags;
+    span.colormap_id = gpu_column_batch.colormap_id;
+    span.fb_stride = gpu_column_batch.fb_stride;
+    span.tex_width = gpu_column_batch.tex_width;
+    span.tex_w_mask = gpu_column_batch.tex_w_mask;
+    span.tex_h_mask = gpu_column_batch.tex_h_mask;
+    span.sdivz = span.tdivz = span.zi_persp = 0;
+    span.sdivz_step = span.tdivz_step = span.zi_step = 0;
+
+    of_gpu_draw_span(&span);
+}
+
+static void gpu_flush_column_batch(void)
+{
+    int lanes = gpu_column_batch_count;
+
+    if (lanes <= 0)
+        return;
+
+    gpu_column_batch.lane_count = (uint8_t)lanes;
+
+    if (lanes == 1)
+        gpu_emit_single_batched_column();
+    else
+        of_gpu_draw_span_group(&gpu_column_batch);
+
+    R_Perf_CountGpuColumnBatch((unsigned int)lanes);
+    gpu_column_batch_count = 0;
+    gpu_pending = 1;
+}
+
+static int gpu_can_batch_column(uint32_t fb_addr, uint16_t count)
+{
+    uint32_t expected_fb;
+
+    if (gpu_column_batch_count <= 0)
+        return 1;
+    if (gpu_column_batch_count >= GPU_COLUMN_BATCH_LANES)
+        return 0;
+    if (gpu_column_batch.count != count)
+        return 0;
+
+    expected_fb = gpu_column_batch.fb_addr
+                + (uint32_t)gpu_column_batch_count;
+    return fb_addr == expected_fb;
+}
+
 static void gpu_finish_pending(void)
 {
     unsigned int wait_start;
+
+    gpu_flush_column_batch();
 
     if (!gpu_pending)
         return;
@@ -181,6 +245,7 @@ void R_GPU_Init(void)
     gpu_draw_render_base = NULL;
     gpu_framebuffer_delta = 0;
     gpu_deferred_lump_count = 0;
+    gpu_column_batch_count = 0;
 
     if (!r_gpu_enabled || M_CheckParm("-nogpu") > 0)
         return;
@@ -236,6 +301,7 @@ void R_GPU_Shutdown(void)
     gpu_draw_fb = NULL;
     gpu_draw_render_base = NULL;
     gpu_framebuffer_delta = 0;
+    gpu_column_batch_count = 0;
     gpu_present = 0;
 }
 
@@ -407,26 +473,35 @@ boolean R_GPU_DrawColumn(void)
 
     gpu_prepare_for_gpu_write();
 
-    of_gpu_span_t span;
-    span.fb_addr = gpu_framebuffer_addr(ylookup[dc_yl] + columnofs[dc_x]);
-    span.tex_addr = (uint32_t)(uintptr_t)dc_source;
-    span.s = 0;
-    span.t = gpu_column_t_start();
-    span.sstep = 0;
-    span.tstep = dc_iscale;
-    span.count = (uint16_t)count;
-    span.light = (uint8_t)light;
-    span.flags = OF_GPU_SPAN_COLORMAP;
-    span.colormap_id = 0;
-    span.fb_stride = SCREENWIDTH;
-    span.tex_width = 1;
-    span.tex_w_mask = 0;
-    span.tex_h_mask = 127;
-    span.sdivz = span.tdivz = span.zi_persp = 0;
-    span.sdivz_step = span.tdivz_step = span.zi_step = 0;
+    uint32_t fb_addr = gpu_framebuffer_addr(ylookup[dc_yl] + columnofs[dc_x]);
+    uint16_t gpu_count = (uint16_t)count;
 
-    of_gpu_draw_span(&span);
-    gpu_pending = 1;
+    if (!gpu_can_batch_column(fb_addr, gpu_count))
+        gpu_flush_column_batch();
+
+    if (gpu_column_batch_count == 0)
+    {
+        gpu_column_batch.fb_addr = fb_addr;
+        gpu_column_batch.count = gpu_count;
+        gpu_column_batch.flags = OF_GPU_SPAN_COLORMAP;
+        gpu_column_batch.colormap_id = 0;
+        gpu_column_batch.fb_stride = SCREENWIDTH;
+        gpu_column_batch.lane_delta = 1;
+        gpu_column_batch.tex_width = 1;
+        gpu_column_batch.tex_w_mask = 0;
+        gpu_column_batch.tex_h_mask = 127;
+    }
+
+    int lane = gpu_column_batch_count++;
+    gpu_column_batch.tex_addr[lane] = (uint32_t)(uintptr_t)dc_source;
+    gpu_column_batch.t[lane] = gpu_column_t_start();
+    gpu_column_batch.tstep[lane] = dc_iscale;
+    gpu_column_batch.light[lane] = (uint8_t)light;
+    gpu_column_batch.lane_count = (uint8_t)gpu_column_batch_count;
+
+    if (gpu_column_batch_count == GPU_COLUMN_BATCH_LANES)
+        gpu_flush_column_batch();
+
     R_Perf_CountGpuColumn((unsigned int)count);
     return true;
 }
@@ -444,6 +519,7 @@ boolean R_GPU_DrawSpan(void)
         return false;
 
     gpu_prepare_for_gpu_write();
+    gpu_flush_column_batch();
 
     of_gpu_span_t span;
     span.fb_addr = gpu_framebuffer_addr(ylookup[ds_y] + columnofs[ds_x1]);
@@ -471,7 +547,8 @@ boolean R_GPU_DrawSpan(void)
 
 boolean R_GPU_DeferLumpRelease(int lumpnum)
 {
-    if (!gpu_present || !gpu_frame_active || !gpu_pending)
+    if (!gpu_present || !gpu_frame_active ||
+        (!gpu_pending && gpu_column_batch_count == 0))
         return false;
 
     if (gpu_deferred_lump_count == GPU_DEFERRED_LUMPS)

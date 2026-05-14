@@ -35,6 +35,7 @@ void R_Perf_CountRenderedView(void);
 void R_Perf_CountPresentedFrame(int direct_gpu);
 
 void R_Perf_CountGpuColumn(unsigned int pixels);
+void R_Perf_CountGpuColumnBatch(unsigned int lanes);
 void R_Perf_CountGpuSpan(unsigned int pixels);
 void R_Perf_CountCpuColumn(unsigned int pixels);
 void R_Perf_CountCpuSpan(unsigned int pixels);

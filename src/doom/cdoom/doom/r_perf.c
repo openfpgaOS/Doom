@@ -23,6 +23,8 @@ typedef struct
 
     uint64_t gpu_columns;
     uint64_t gpu_column_pixels;
+    uint64_t gpu_column_batches;
+    uint64_t gpu_column_batch_lanes;
     uint64_t gpu_spans;
     uint64_t gpu_span_pixels;
     uint64_t cpu_columns;
@@ -149,6 +151,15 @@ static void R_Perf_PrintAndReset(unsigned int now_us)
     printf("[render_perf] draws:");
     R_Perf_PrintRate("gpu_col", perf.gpu_columns, elapsed_us);
     R_Perf_PrintRate("gpu_col_px", perf.gpu_column_pixels, elapsed_us);
+    R_Perf_PrintRate("gpu_colgrp", perf.gpu_column_batches, elapsed_us);
+    if (perf.gpu_column_batches != 0)
+    {
+        uint64_t lane_avg10 =
+            (perf.gpu_column_batch_lanes * 10ull) / perf.gpu_column_batches;
+        printf(" gpu_colgrp_lanes=%llu.%llu",
+               (unsigned long long)(lane_avg10 / 10u),
+               (unsigned long long)(lane_avg10 % 10u));
+    }
     R_Perf_PrintRate("gpu_span", perf.gpu_spans, elapsed_us);
     R_Perf_PrintRate("gpu_span_px", perf.gpu_span_pixels, elapsed_us);
     R_Perf_PrintRate("cpu_col", perf.cpu_columns, elapsed_us);
@@ -227,6 +238,12 @@ void R_Perf_CountGpuColumn(unsigned int pixels)
 {
     perf.gpu_columns++;
     perf.gpu_column_pixels += pixels;
+}
+
+void R_Perf_CountGpuColumnBatch(unsigned int lanes)
+{
+    perf.gpu_column_batches++;
+    perf.gpu_column_batch_lanes += lanes;
 }
 
 void R_Perf_CountGpuSpan(unsigned int pixels)
