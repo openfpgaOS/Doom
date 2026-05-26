@@ -546,6 +546,15 @@ static default_t	doom_defaults_list[] =
     CONFIG_VARIABLE_INT(detaillevel),
 
     //!
+    // @game doom
+    //
+    // Sub-tic frame interpolation.  0 = capped (one rendered frame per
+    // gametic, DOS cadence), 1 = uncapped (interpolated motion).
+    //
+
+    CONFIG_VARIABLE_INT(frame_interpolation),
+
+    //!
     // Number of sounds that will be played simultaneously.
     //
 

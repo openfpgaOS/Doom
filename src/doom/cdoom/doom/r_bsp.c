@@ -111,11 +111,6 @@ static void R_FillSegRenderData(void)
 	dst->angle = seg->angle;
 	dst->normalangle = seg->angle + ANG90;
 	dst->offset = seg->offset;
-	dst->textureoffset = side->textureoffset;
-	dst->rowoffset = side->rowoffset;
-	dst->toptexture = side->toptexture;
-	dst->bottomtexture = side->bottomtexture;
-	dst->midtexture = side->midtexture;
 	dst->pegflags = line->flags & (ML_DONTPEGTOP | ML_DONTPEGBOTTOM);
 
 	if (seg->v1->y == seg->v2->y)
@@ -724,7 +719,7 @@ OF_FASTTEXT void R_AddLine (seg_t*	line)
 	&& backsector->ceilingpic == frontsector->ceilingpic
 	&& backsector->floorpic == frontsector->floorpic
 	&& backsector->lightlevel == frontsector->lightlevel
-	&& cursegcache->midtexture == 0)
+	&& cursegcache->sidedef->midtexture == 0)
     {
 	goto done;
     }
@@ -802,7 +797,7 @@ OF_FASTTEXT void R_AddLine (seg_t*	line)
     if (backsector->ceilingpic == frontsector->ceilingpic
 	&& backsector->floorpic == frontsector->floorpic
 	&& backsector->lightlevel == frontsector->lightlevel
-	&& cursegcache->midtexture == 0)
+	&& cursegcache->sidedef->midtexture == 0)
     {
 	goto done;
     }

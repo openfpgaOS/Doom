@@ -66,6 +66,40 @@ typedef struct {
     size_t   midi_len;
 } of_song_t;
 
+static int opl_music_volume = 127;
+static int opl_game_paused;
+static int opl_zero_volume_suspended;
+
+static void opl_suspend_zero_volume(void)
+{
+    opl_zero_volume_suspended = 1;
+
+    if (!of_midi_playing())
+    {
+        return;
+    }
+
+    of_midi_pause();
+    of_timer_set_callback(NULL, 0);
+    smp_voice_all_off_global();
+}
+
+static void opl_resume_zero_volume(void)
+{
+    if (!opl_zero_volume_suspended)
+    {
+        return;
+    }
+
+    opl_zero_volume_suspended = 0;
+
+    if (of_midi_playing() && !opl_game_paused)
+    {
+        of_timer_set_callback(of_midi_pump, 50);
+        of_midi_resume();
+    }
+}
+
 static boolean opl_Init(void)
 {
     of_audio_init();
@@ -97,15 +131,54 @@ static boolean opl_Init(void)
     return rc == OF_MIDI_OK;
 }
 
-static void opl_Shutdown(void) { of_midi_stop(); }
+static void opl_Shutdown(void)
+{
+    of_midi_stop();
+    opl_game_paused = 0;
+    opl_zero_volume_suspended = 0;
+}
 
 static void opl_SetVolume(int vol)
 {
+    if (vol < 0)
+    {
+        vol = 0;
+    }
+    else if (vol > 127)
+    {
+        vol = 127;
+    }
+
+    opl_music_volume = vol;
     of_midi_set_volume((vol * 255) / 127);
+
+    if (vol == 0)
+    {
+        opl_suspend_zero_volume();
+    }
+    else
+    {
+        opl_resume_zero_volume();
+    }
 }
 
-static void opl_Pause(void)  { of_midi_pause(); }
-static void opl_Resume(void) { of_midi_resume(); }
+static void opl_Pause(void)
+{
+    opl_game_paused = 1;
+    of_midi_pause();
+}
+
+static void opl_Resume(void)
+{
+    opl_game_paused = 0;
+
+    if (opl_music_volume > 0 && of_midi_playing())
+    {
+        of_timer_set_callback(of_midi_pump, 50);
+        of_midi_resume();
+        opl_zero_volume_suspended = 0;
+    }
+}
 
 static void *opl_RegisterSong(void *data, int len)
 {
@@ -161,10 +234,26 @@ static void opl_PlaySong(void *handle, boolean looping)
 {
     of_song_t *song = handle;
     if (!song) return;
-    (void)of_midi_play(song->midi_data, song->midi_len, looping);
+
+    if (of_midi_play(song->midi_data, song->midi_len, looping) == OF_MIDI_OK)
+    {
+        if (opl_music_volume == 0)
+        {
+            opl_suspend_zero_volume();
+        }
+        else if (opl_game_paused)
+        {
+            of_midi_pause();
+        }
+    }
 }
 
-static void    opl_StopSong(void)    { of_midi_stop(); }
+static void opl_StopSong(void)
+{
+    of_midi_stop();
+    opl_zero_volume_suspended = opl_music_volume == 0;
+}
+
 static boolean opl_IsPlaying(void)   { return of_midi_playing(); }
 
 /* MIDI envelope/LFO advance is still pumped by the 1 kHz timer ISR
@@ -174,7 +263,13 @@ static boolean opl_IsPlaying(void)   { return of_midi_playing(); }
  * called once per game tic (35 Hz); each call catches the CRAM1 DMA
  * ring back up to ~42 ms of buffered audio.  of_mixer_pump loops
  * swmixer_tick internally with a sane cap. */
-static void    opl_Poll(void) { of_mixer_pump(); }
+static void    opl_Poll(void)
+{
+    if (opl_music_volume > 0)
+    {
+        of_mixer_pump();
+    }
+}
 
 static const snddevice_t opl_devs[] = { SNDDEVICE_SB, SNDDEVICE_PAS,
                                          SNDDEVICE_ADLIB };

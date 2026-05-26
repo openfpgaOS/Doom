@@ -46,4 +46,28 @@ void I_InitTimer(void);
 // Wait for vertical retrace or pause a bit.
 void I_WaitVBL(int count);
 
+// Vsync-locked tic clock.  When pocket pacing is on, I_GetTime returns
+// ticks accumulated from vsync edges (matched to the display period)
+// and I_GetTimeFrac returns the sub-tic interpolation phase.
+// I_StartFrame is expected to call I_PocketTicAdvance after each
+// vsync-bound wait.
+void     I_SetPocketPacing(int enabled);
+int      I_PocketPacingActive(void);
+void     I_PocketTicAdvance(uint64_t now_us);
+uint64_t I_PocketSmoothPeriodUS(void);
+
+// Returns FRACUNIT-scaled fraction within the current tic when pocket
+// pacing is on, or -1 when the caller should fall back to a wall-clock
+// computation.
+int  I_GetTimeFrac(void);
+
+// Called by I_StartFrame right after the vblank wait when VRR is on,
+// to advance the gametic counter once per rendered frame.
+void I_PocketAdvanceFrameTic(void);
+
+// Push the next-vblank period the hardware just latched (in µs) so
+// I_GetDisplayTimeUS predicts using the new V_TOTAL immediately rather
+// than waiting one frame for the measured average to catch up.
+void I_SetPredictedVblankPeriodUS(uint64_t period_us);
+
 #endif

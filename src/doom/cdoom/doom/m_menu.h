@@ -53,6 +53,7 @@ void M_StartControlPanel (void);
 
 
 extern int detailLevel;
+extern int frame_interpolation;
 extern int screenblocks;
 
 extern boolean inhelpscreens;

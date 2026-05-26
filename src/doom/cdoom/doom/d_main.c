@@ -418,6 +418,7 @@ void D_BindVariables(void)
     M_BindIntVariable("show_messages",          &showMessages);
     M_BindIntVariable("screenblocks",           &screenblocks);
     M_BindIntVariable("detaillevel",            &detailLevel);
+    M_BindIntVariable("frame_interpolation",    &frame_interpolation);
     M_BindIntVariable("snd_channels",           &snd_channels);
     M_BindIntVariable("vanilla_savegame_limit", &vanilla_savegame_limit);
     M_BindIntVariable("vanilla_demo_limit",     &vanilla_demo_limit);
@@ -473,6 +474,12 @@ void D_RunFrame()
     {
         unsigned int display_start;
 
+        /* Pocket pacing advances the frame tic from I_StartFrame() after the
+         * vblank wait.  Wipe frames still wait on I_GetTime(), so run the
+         * frame-start hook here too or the first active wipe frame can wait
+         * forever with the tic counter frozen. */
+        I_StartFrame ();
+
         do
         {
             nowtime = I_GetTime ();
@@ -499,20 +506,26 @@ void D_RunFrame()
     I_StartFrame ();
 
     {
-        static int nointerp = -1;
+        static int frame_interp_initialized = 0;
         boolean    simulation_paused;
         boolean    uncapped_ok;
 
-        if (nointerp < 0)
+        if (!frame_interp_initialized)
         {
-            // Interpolation is the default for the Pocket build. Keep
-            // -nointerp/-capped as explicit escape hatches for testing.
-            nointerp = M_CheckParm("-nointerp") > 0
-                    || M_CheckParm("-capped") > 0;
+            // Capped (one rendered frame per gametic, no sub-tic
+            // interpolation) is the default — matches DOS Doom's 35Hz
+            // discrete-step motion.  Pass -uncapped/-interp to opt into
+            // interpolated rendering, or toggle it live from the menu
+            // (Options → "Frame Interp").  Honors a config-saved value
+            // bound to "frame_interpolation".
+            if (M_CheckParm("-uncapped") > 0 || M_CheckParm("-interp") > 0)
+                frame_interpolation = 1;
+            else if (M_CheckParm("-capped") > 0
+                  || M_CheckParm("-nointerp") > 0)
+                frame_interpolation = 0;
+            frame_interp_initialized = 1;
         }
 
-        // Pocket builds always use interpolated uncapped rendering unless
-        // explicitly disabled from the command line.
         crispy_uncapped = true;
         simulation_paused = paused
                             || (!netgame
@@ -521,7 +534,7 @@ void D_RunFrame()
                                 && players[consoleplayer].viewz != 1);
 
         uncapped_ok = crispy_uncapped
-                      && !nointerp
+                      && frame_interpolation
                       && !simulation_paused
                       && !demorecording
                       && !netgame
@@ -534,24 +547,34 @@ void D_RunFrame()
 
         if (uncapped_ok)
         {
-            uint64_t now_us = I_GetDisplayTimeUS();
-            uint64_t base_us = D_GameLoopStartTimeUS();
-            uint64_t rel_us = now_us > base_us ? now_us - base_us : 0;
-            uint64_t tic_start_us = ((uint64_t)gametic * 1000000ULL) / TICRATE;
-            uint64_t dt_us = 0;
-
-            if (gametic > 0 && rel_us > tic_start_us)
+            int frac = I_GetTimeFrac();
+            if (frac >= 0)
             {
-                dt_us = rel_us - tic_start_us;
-            }
-
-            if (dt_us >= (1000000ULL + TICRATE - 1) / TICRATE)
-            {
-                fractionaltic = FRACUNIT;
+                /* Pocket pacing: fraction is the vsync-locked sub-tic
+                 * phase read directly out of the tic accumulator. */
+                fractionaltic = (fixed_t)frac;
             }
             else
             {
-                fractionaltic = (fixed_t)((dt_us * TICRATE * FRACUNIT) / 1000000ULL);
+                uint64_t now_us = I_GetDisplayTimeUS();
+                uint64_t base_us = D_GameLoopStartTimeUS();
+                uint64_t rel_us = now_us > base_us ? now_us - base_us : 0;
+                uint64_t tic_start_us = ((uint64_t)gametic * 1000000ULL) / TICRATE;
+                uint64_t dt_us = 0;
+
+                if (gametic > 0 && rel_us > tic_start_us)
+                {
+                    dt_us = rel_us - tic_start_us;
+                }
+
+                if (dt_us >= (1000000ULL + TICRATE - 1) / TICRATE)
+                {
+                    fractionaltic = FRACUNIT;
+                }
+                else
+                {
+                    fractionaltic = (fixed_t)((dt_us * TICRATE * FRACUNIT) / 1000000ULL);
+                }
             }
         }
         else

@@ -79,6 +79,11 @@ int			showMessages = 1;
 
 // Blocky mode, has default, 0 = high, 1 = normal
 int			detailLevel = 0;
+
+// Repurposed Graphic Detail menu slot — toggles sub-tic frame
+// interpolation instead.  0 = capped (one frame per gametic, DOS
+// cadence), 1 = uncapped (interpolated sub-tic motion).
+int			frame_interpolation = 0;
 int			screenblocks = 9;
 
 // temp for screenblocks (0-9)
@@ -365,7 +370,7 @@ menuitem_t OptionsMenu[]=
 {
     {1,"M_ENDGAM",	M_EndGame,'e'},
     {1,"M_MESSG",	M_ChangeMessages,'m'},
-    {1,"M_DETAIL",	M_ChangeDetail,'g'},
+    {1,"",		M_ChangeDetail,'v'},
     {2,"M_SCRNSZ",	M_SizeDisplay,'s'},
     {-1,"",0,'\0'},
     {2,"M_MSENS",	M_ChangeSensitivity,'m'},
@@ -1111,17 +1116,56 @@ void M_Episode(int choice)
 //
 // M_Options
 //
-static const char *detailNames[2] = {"M_GDHIGH","M_GDLOW"};
 static const char *msgNames[2] = {"M_MSGOFF","M_MSGON"};
 
 void M_DrawOptions(void)
 {
     V_DrawPatchDirect(108, 15, W_CacheLumpName(DEH_String("M_OPTTTL"),
                                                PU_CACHE));
-	
-    V_DrawPatchDirect(OptionsDef.x + 175, OptionsDef.y + LINEHEIGHT * detail,
-		      W_CacheLumpName(DEH_String(detailNames[detailLevel]),
-			              PU_CACHE));
+
+    // Repurposed Graphic Detail slot — draw "VRR:" by pixel-doubling
+    // hu_font characters next to the M_MSGON/M_MSGOFF indicator (same
+    // patches as the Messages line) for a compact "VRR:On"/"VRR:Off"
+    // layout.  Vertical position is computed from the M_MSG patch's
+    // own visual top so the doubled letters share a baseline with it
+    // regardless of the patch's leftoffset/topoffset.
+    {
+        patch_t *msg;
+        int msg_x;
+        int msg_y;
+        int visual_top;
+        int hu_h;
+        int doubled_y;
+        const char *label = "VRR:";
+        const char *p;
+        int lx;
+
+        msg = (patch_t *)W_CacheLumpName(
+            DEH_String(msgNames[frame_interpolation]), PU_CACHE);
+        msg_y = OptionsDef.y + LINEHEIGHT * detail;
+        visual_top = msg_y - SHORT(msg->topoffset);
+
+        /* Center doubled hu_font vertically against the M_MSG patch
+         * (heights are close but not identical). */
+        hu_h = SHORT(hu_font[0]->height);
+        doubled_y = visual_top + (SHORT(msg->height) - hu_h * 2) / 2;
+
+        lx = OptionsDef.x;
+        for (p = label; *p; ++p)
+        {
+            int c = *p - HU_FONTSTART;
+            if (c < 0 || c >= HU_FONTSIZE)
+            {
+                lx += 8;
+                continue;
+            }
+            V_DrawPatchDoubled(lx, doubled_y, hu_font[c]);
+            lx += SHORT(hu_font[c]->width) * 2;
+        }
+
+        msg_x = lx + 4 + SHORT(msg->leftoffset);
+        V_DrawPatchDirect(msg_x, msg_y, msg);
+    }
 
     V_DrawPatchDirect(OptionsDef.x + 120, OptionsDef.y + LINEHEIGHT * messages,
                       W_CacheLumpName(DEH_String(msgNames[showMessages]),
@@ -1316,14 +1360,12 @@ void M_ChangeSensitivity(int choice)
 void M_ChangeDetail(int choice)
 {
     (void) choice;
-    detailLevel = 1 - detailLevel;
+    frame_interpolation = 1 - frame_interpolation;
 
-    R_SetViewSize (screenblocks, detailLevel);
-
-    if (!detailLevel)
-	players[consoleplayer].message = DEH_String(DETAILHI);
+    if (frame_interpolation)
+	players[consoleplayer].message = "Frame Interpolation On";
     else
-	players[consoleplayer].message = DEH_String(DETAILLO);
+	players[consoleplayer].message = "Frame Interpolation Off";
 
     M_SaveSettingsIfNeeded();
 }

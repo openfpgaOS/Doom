@@ -812,7 +812,7 @@ byte *R_GetFlatData(int flatnum, boolean permanent)
     if (flatnum < 0 || flatnum >= numflats)
         I_Error("R_GetFlatData: bad flat %i", flatnum);
 
-    if (permanent && flatlumpdata[flatnum] != NULL)
+    if (flatlumpdata[flatnum] != NULL)
         return flatlumpdata[flatnum];
 
     lump = firstflat + flatnum;
@@ -934,16 +934,9 @@ void R_PrecacheLevel (void)
 
 	    lump = firstflat + i;
 	    flatmemory += lumpinfo[lump]->size;
-	    if (P_IsAnimatedFlat(i))
-	    {
-		data = W_CacheLumpNum(lump, PU_LEVEL);
-		flatlumpdata[i] = data;
-		R_GPU_TextureDataUpdated(data, lumpinfo[lump]->size);
-	    }
-	    else
-	    {
-		W_CacheLumpNum(lump, PU_CACHE);
-	    }
+	    data = W_CacheLumpNum(lump, PU_LEVEL);
+	    flatlumpdata[i] = data;
+	    R_GPU_TextureDataUpdated(data, lumpinfo[lump]->size);
 	}
     }
 
@@ -1031,7 +1024,7 @@ void R_PrecacheLevel (void)
 	    {
 		lump = firstspritelump + sf->lump[k];
 		spritememory += lumpinfo[lump]->size;
-		W_CacheLumpNum(lump , PU_CACHE);
+		W_CacheLumpNum(lump , PU_LEVEL);
 	    }
 	}
     }

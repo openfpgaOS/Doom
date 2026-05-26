@@ -303,6 +303,60 @@ void V_DrawPatch(int x, int y, patch_t *patch)
 }
 
 //
+// V_DrawPatchDoubled
+// Draws a patch at 2x scale (each source pixel becomes a 2x2 block).
+// Used by the options menu to compose a big-text label out of small
+// hu_font letters, matching the visual size of the M_* string
+// patches like M_DETAIL or M_MESSG.
+//
+
+void V_DrawPatchDoubled(int x, int y, patch_t *patch)
+{
+    int col;
+    int w;
+    int h;
+
+    y -= SHORT(patch->topoffset) * 2;
+    x -= SHORT(patch->leftoffset) * 2;
+
+    w = SHORT(patch->width);
+    h = SHORT(patch->height);
+
+    if (x < 0 || x + w * 2 > SCREENWIDTH
+     || y < 0 || y + h * 2 > SCREENHEIGHT)
+        return;
+
+    V_MarkRect(x, y, w * 2, h * 2);
+
+    for (col = 0; col < w; ++col)
+    {
+        column_t *column;
+
+        column = (column_t *)((byte *)patch + LONG(patch->columnofs[col]));
+
+        while (column->topdelta != 0xff)
+        {
+            int count = column->length;
+            byte *source = (byte *)column + 3;
+            pixel_t *dest = dest_screen
+                          + (y + column->topdelta * 2) * SCREENWIDTH
+                          + (x + col * 2);
+
+            while (count--)
+            {
+                byte c = *source++;
+                dest[0] = c;
+                dest[1] = c;
+                dest[SCREENWIDTH] = c;
+                dest[SCREENWIDTH + 1] = c;
+                dest += SCREENWIDTH * 2;
+            }
+            column = (column_t *)((byte *)column + column->length + 4);
+        }
+    }
+}
+
+//
 // V_DrawPatchFlipped
 // Masks a column based masked pic to the screen.
 // Flips horizontally, e.g. to mirror face.

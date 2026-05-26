@@ -9,6 +9,8 @@
 #include "config.h"
 #include "of.h"
 #include "i_video.h"
+#include "i_timer.h"
+#include "m_menu.h"
 #include "v_video.h"
 #include "d_event.h"
 #include "doomkeys.h"
@@ -87,6 +89,8 @@ static grabmouse_callback_t grabmouse_cb;
 #define GPU_PACE_VTOTAL_RAISE_STEP 24u
 #define GPU_PACE_VTOTAL_LOWER_STEP 24u
 #define GPU_PACE_VTOTAL_UPDATE_US 500000u
+#define GPU_PACE_POCKET_VTOTAL_UPDATE_US 100000u
+#define GPU_PACE_POCKET_VTOTAL_STEP 12u
 
 typedef struct
 {
@@ -104,6 +108,8 @@ typedef struct
     int options_checked;
     int enabled;
     int fine_vrr_enabled;
+    int pocket_vrr_enabled;
+    int pocket_pacing_enabled;
 } gpu_adaptive_pace_t;
 
 static gpu_adaptive_pace_t gpu_pace;
@@ -114,9 +120,19 @@ static void I_CheckAdaptivePacingOptions(void)
         return;
 
     gpu_pace.enabled = M_CheckParm("-noadaptivepacing") <= 0;
+    gpu_pace.pocket_pacing_enabled = M_CheckParm("-nopocketpacing") <= 0
+                                   && M_CheckParm("-fixed60") <= 0;
+    /* Pocket pacing implies pocket VRR (sample comes from I_StartFrame
+     * instead of I_AdaptiveGpuPaceBeforeFlip; the two are coupled). */
+    gpu_pace.pocket_vrr_enabled = (gpu_pace.enabled
+                                   && M_CheckParm("-pocketvrr") > 0
+                                   && M_CheckParm("-fixed60") <= 0)
+                                || gpu_pace.pocket_pacing_enabled;
     gpu_pace.fine_vrr_enabled = gpu_pace.enabled
+                              && !gpu_pace.pocket_vrr_enabled
                               && M_CheckParm("-nofinevrr") <= 0
                               && M_CheckParm("-fixed60") <= 0;
+    I_SetPocketPacing(gpu_pace.pocket_pacing_enabled);
     gpu_pace.options_checked = 1;
 }
 
@@ -202,6 +218,82 @@ static unsigned int I_PaceTargetToVTotal(unsigned int target_us)
         vtotal = GPU_PACE_VTOTAL_MAX;
 
     return (unsigned int)vtotal;
+}
+
+/* Hybrid VRR control law:
+ *   - sample is directly measured renderer prep time (Doom's signal)
+ *   - asymmetric EMA: quick attack on heavier samples, alpha=1/64 decay
+ *     when load eases.  Do not let a single door/open-area spike yank
+ *     the panel refresh all the way down.
+ *   - desired = render + 10% headroom
+ *   - vtotal comes from the measured period ratio, clamped to [60Hz, 42Hz]
+ *   - drops samples > 50ms (level loads, pauses) before they pollute
+ *     the EMA */
+static void I_UpdatePocketVRR(unsigned int sample_us)
+{
+    unsigned int now_us;
+    unsigned int current_vtotal;
+    unsigned int desired_us;
+    unsigned int desired_vtotal;
+    unsigned int delta;
+    unsigned int next_vtotal;
+
+    I_UpdateMeasuredRefreshPeriod();
+
+    if (sample_us == 0 || sample_us > GPU_PACE_SPIKE_US)
+        return;
+
+    if (gpu_pace.vrr_target_us == 0)
+        gpu_pace.vrr_target_us = sample_us;
+    else if (sample_us > gpu_pace.vrr_target_us)
+        gpu_pace.vrr_target_us =
+            (gpu_pace.vrr_target_us * 3u + sample_us + 2u) / 4u;
+    else
+        gpu_pace.vrr_target_us +=
+            ((int)sample_us - (int)gpu_pace.vrr_target_us) / 64;
+
+    now_us = of_time_us();
+    if (gpu_pace.last_vtotal_update_us != 0 &&
+        now_us - gpu_pace.last_vtotal_update_us < GPU_PACE_POCKET_VTOTAL_UPDATE_US)
+        return;
+
+    current_vtotal = gpu_pace.current_vtotal != 0
+                   ? gpu_pace.current_vtotal
+                   : OF_VIDEO_VTOTAL_60HZ;
+    if (gpu_pace.refresh_period_us == 0)
+        return;
+
+    desired_us = gpu_pace.vrr_target_us + gpu_pace.vrr_target_us / 10;
+    desired_vtotal = I_PaceTargetToVTotal(desired_us);
+    delta = desired_vtotal > current_vtotal
+          ? desired_vtotal - current_vtotal
+          : current_vtotal - desired_vtotal;
+    if (delta < GPU_PACE_VTOTAL_HYSTERESIS)
+        return;
+
+    next_vtotal = desired_vtotal;
+    if (desired_vtotal > current_vtotal &&
+        desired_vtotal - current_vtotal > GPU_PACE_POCKET_VTOTAL_STEP)
+    {
+        next_vtotal = current_vtotal + GPU_PACE_POCKET_VTOTAL_STEP;
+    }
+    else if (current_vtotal > desired_vtotal &&
+             current_vtotal - desired_vtotal > GPU_PACE_POCKET_VTOTAL_STEP)
+    {
+        next_vtotal = current_vtotal - GPU_PACE_POCKET_VTOTAL_STEP;
+    }
+
+    of_video_set_refresh_vtotal(next_vtotal);
+    gpu_pace.current_vtotal = next_vtotal;
+    gpu_pace.last_vtotal_update_us = now_us;
+    R_Perf_PacingSetVTotal(next_vtotal);
+
+    /* Push the implied next-vblank period into the predictor so the
+     * interpolation phase in d_main.c uses the new V_TOTAL on the very
+     * next frame, instead of waiting one frame for the measured
+     * vblank-interval average to catch up. */
+    I_SetPredictedVblankPeriodUS(((uint64_t)gpu_pace.refresh_period_us
+                                  * next_vtotal) / current_vtotal);
 }
 
 static void I_UpdateFineVRR(unsigned int target_us)
@@ -297,7 +389,8 @@ static unsigned int I_UpdateAdaptivePaceTarget(unsigned int sample_us)
     }
 
     R_Perf_PacingSetTargetUS(gpu_pace.target_us);
-    I_UpdateFineVRR(gpu_pace.target_us);
+    if (!gpu_pace.pocket_vrr_enabled)
+        I_UpdateFineVRR(gpu_pace.target_us);
     return gpu_pace.target_us;
 }
 
@@ -328,6 +421,9 @@ static void I_AdaptiveGpuPaceBeforeFlip(void)
      * present interval feeds back into the target and can lock us at the
      * slowest refresh even after the renderer has recovered. */
     sample_us = prepare_us;
+
+    if (gpu_pace.pocket_vrr_enabled)
+        I_UpdatePocketVRR(sample_us);
 
     target_us = I_UpdateAdaptivePaceTarget(sample_us);
 
@@ -366,6 +462,8 @@ static void I_AdaptiveGpuPaceQueued(void)
 static void I_AdaptiveGpuPaceReset(void)
 {
     gpu_pace.last_queue_us = 0;
+    /* Clear EMA state so re-entry into VRR is clean. */
+    gpu_pace.vrr_target_us = 0;
 }
 
 /* ---- Init / shutdown ------------------------------------------------- */
@@ -373,6 +471,11 @@ static void I_AdaptiveGpuPaceReset(void)
 void I_InitGraphics(void)
 {
     of_video_init();
+    /* Parse pacing flags before the first frame so pocket_pacing /
+     * pocket_vrr_enabled are set when I_StartFrame and I_FinishUpdate
+     * first run.  Without this, the pocket short-circuit fires with
+     * pocket_vrr_enabled=0 on every frame and VRR never engages. */
+    I_CheckAdaptivePacingOptions();
     of_video_set_refresh_vtotal(OF_VIDEO_VTOTAL_60HZ);
     gpu_pace.current_vtotal = OF_VIDEO_VTOTAL_60HZ;
     gpu_pace.last_vtotal_update_us = of_time_us();
@@ -417,7 +520,40 @@ void I_SetGrabMouseCallback(grabmouse_callback_t func) { grabmouse_cb = func; (v
 void I_DisplayFPSDots(boolean dots_on) { (void)dots_on; }
 void I_EnableLoadingDisk(int xoffs, int yoffs) { (void)xoffs; (void)yoffs; }
 void I_BeginRead(void)                 { }
-void I_StartFrame(void)                { }
+
+void I_StartFrame(void)
+{
+    /* Wait for the next vsync at frame start so the renderer has the
+     * full vsync period as its budget.  Poll on vblank_count rather
+     * than of_video_wait_flip() because the GPU triggered-flip path
+     * queues CMD_FLIPs that of_video_wait_flip() does not track. */
+    if (!I_PocketPacingActive())
+        return;
+
+    static uint32_t last_seen_vblank = 0;
+    of_video_timing_t timing;
+    for (;;) {
+        of_video_get_timing(&timing);
+        if (timing.vblank_count != last_seen_vblank)
+            break;
+    }
+    last_seen_vblank = timing.vblank_count;
+
+    /* VRR off (capped): lock V_TOTAL to a constant 60Hz and let the
+     * wall-clock 35Hz tic clock run as-is.  Cadence beat (12/7) is
+     * unavoidable on this panel but a fixed V_TOTAL avoids per-frame
+     * brightness flashes from a varying refresh. */
+    if (!frame_interpolation
+        && gpu_pace.current_vtotal != OF_VIDEO_VTOTAL_60HZ) {
+        of_video_set_refresh_vtotal(OF_VIDEO_VTOTAL_60HZ);
+        gpu_pace.current_vtotal = OF_VIDEO_VTOTAL_60HZ;
+        R_Perf_PacingSetVTotal(OF_VIDEO_VTOTAL_60HZ);
+    }
+
+    /* VRR on: one gametic per rendered frame, advanced right at the
+     * start of this frame so TryRunTics sees the new tic value. */
+    I_PocketAdvanceFrameTic();
+}
 extern void I_PollInput(void);
 void I_StartTic(void)                  { I_PollInput(); }
 
@@ -503,6 +639,46 @@ void I_FinishUpdate(void)
      * pending swap slot clears. */
     static unsigned int last_flip_us = 0;
     const unsigned int target_us = 16667;  /* ~60 Hz */
+
+    /* Pocket pacing path: I_StartFrame already waited for the previous
+     * flip and advanced the tic clock.  Skip the percentile pacing,
+     * skip the explicit busy-wait in I_AdaptiveGpuPaceBeforeFlip, skip
+     * the usleep in the CPU-fb branch — just submit the present and
+     * record perf state.  CMD_FLIP backpressure / the next frame's
+     * of_video_wait_flip() provide the only stall.
+     *
+     * Sample the renderer prep time before PacingFrameQueued() clears
+     * frame_active — that's the directly-measured render cost we feed
+     * into VRR. */
+    if (I_PocketPacingActive()) {
+        last_flip_us = 0;
+        /* Dynamic VRR only when interpolating; capped mode drives
+         * V_TOTAL from the fixed 6-vsync cadence in I_StartFrame. */
+        if (gpu_pace.pocket_vrr_enabled && frame_interpolation) {
+            unsigned int prepare_us = R_Perf_PacingCurrentPrepareUS();
+            if (prepare_us > 0)
+                I_UpdatePocketVRR(prepare_us);
+        }
+        if (R_GPU_UsingDirectFramebuffer()) {
+            if (R_GPU_PresentFrame()) {
+                R_Perf_CountPresentedFrame(1);
+                R_Perf_PacingFrameQueued();
+                R_Perf_FrameEnd();
+                return;
+            }
+            R_GPU_EndFrame();
+        } else {
+            R_GPU_EndFrame();
+        }
+        uint8_t *fb = of_video_surface();
+        memcpy(fb + OF_SCREEN_W * LETTERBOX_Y, I_VideoBuffer,
+               SCREENWIDTH * SCREENHEIGHT);
+        of_video_flip();
+        R_Perf_CountPresentedFrame(0);
+        R_Perf_PacingFrameQueued();
+        R_Perf_FrameEnd();
+        return;
+    }
 
     if (R_GPU_UsingDirectFramebuffer()) {
         last_flip_us = 0;

@@ -107,6 +107,7 @@ R_RenderMaskedSegRange
     int		lightnum;
     int		texnum;
     rendersegcache_t *cache;
+    side_t      *side;
     byte**	column_table;
     int		widthmask;
     
@@ -116,9 +117,10 @@ R_RenderMaskedSegRange
     // OPTIMIZE: get rid of LIGHTSEGSHIFT globally
     curline = ds->curline;
     cache = &rendersegcache[curline - segs];
+    side = cache->sidedef;
     frontsector = cache->frontsector;
     backsector = cache->backsector;
-    texnum = texturetranslation[cache->midtexture];
+    texnum = texturetranslation[side->midtexture];
     column_table = R_GetColumnTable(texnum);
     widthmask = R_GetTextureWidthMask(texnum);
 	
@@ -161,7 +163,7 @@ R_RenderMaskedSegRange
 	    ? frontsector->ceilingheight : backsector->ceilingheight;
 	dc_texturemid = dc_texturemid - viewz;
     }
-    dc_texturemid += cache->rowoffset;
+    dc_texturemid += side->rowoffset;
 			
     if (fixedcolormap)
     {
@@ -780,11 +782,11 @@ R_StoreWallRange
 
     sidedef = cache->sidedef;
     linedef = cache->linedef;
-    side_textureoffset = cache->textureoffset;
-    side_rowoffset = cache->rowoffset;
-    side_toptexture = cache->toptexture;
-    side_bottomtexture = cache->bottomtexture;
-    side_midtexture = cache->midtexture;
+    side_textureoffset = sidedef->textureoffset;
+    side_rowoffset = sidedef->rowoffset;
+    side_toptexture = sidedef->toptexture;
+    side_bottomtexture = sidedef->bottomtexture;
+    side_midtexture = sidedef->midtexture;
     line_pegflags = cache->pegflags;
     line_lightbias = cache->lightbias;
     seg_v1 = cache->v1;

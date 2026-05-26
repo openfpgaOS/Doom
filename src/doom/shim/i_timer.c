@@ -16,6 +16,29 @@ static uint64_t display_vblank_period_us = 16667;
 static uint64_t display_last_vblank_raw_us = 0;
 static uint32_t display_last_vblank_count = 0;
 
+/* When pocket VRR writes a new V_TOTAL it pushes the implied period
+ * here so I_GetDisplayTimeUS predicts the next vblank using the value
+ * the hardware just latched, rather than the one-frame-stale average
+ * of past vblank intervals. */
+static uint64_t predicted_vblank_period_us = 0;
+
+/* I_StartFrame in i_video.c waits for the next vblank so the renderer
+ * gets the full vsync period.
+ *
+ * Two tic-clock modes:
+ *  - frame_interpolation off (capped, no VRR): wall-clock derivation,
+ *    35 tics/sec constant — demo/netplay safe.
+ *  - frame_interpolation on (VRR active): one tic per rendered frame,
+ *    advanced at the start of every frame by I_PocketAdvanceFrameTic
+ *    (called from I_StartFrame after the vblank wait).  Game speed
+ *    becomes (vsync rate) tics/sec: 60 tics/sec at default 60Hz,
+ *    slowing in lockstep when VRR stretches V_TOTAL toward 42Hz.
+ *    Each rendered frame shows a fresh gametic — no interpolation
+ *    needed between frames. */
+static int pocket_pacing = 0;
+extern int frame_interpolation;
+static uint32_t pocket_tic_count = 0;
+
 static uint64_t I_RawTimeUS(void)
 {
     unsigned int raw_us = of_time_us();
@@ -67,16 +90,72 @@ uint64_t I_GetDisplayTimeUS(void)
     display_last_vblank_raw_us = timing.last_vblank_us;
     display_last_vblank_count = timing.vblank_count;
 
-    sample_raw_us = timing.last_vblank_us + display_vblank_period_us;
+    {
+        uint64_t period = predicted_vblank_period_us != 0
+                        ? predicted_vblank_period_us
+                        : display_vblank_period_us;
+        sample_raw_us = timing.last_vblank_us + period;
+    }
     if (sample_raw_us <= (uint64_t)base_us)
         return raw_now - base_us;
 
     return sample_raw_us - base_us;
 }
 
+void I_SetPredictedVblankPeriodUS(uint64_t period_us)
+{
+    if (period_us >= 10000 && period_us <= 30000)
+        predicted_vblank_period_us = period_us;
+}
+
+void I_PocketTicAdvance(uint64_t now_us)
+{
+    (void)now_us;
+}
+
+uint64_t I_PocketSmoothPeriodUS(void)
+{
+    return 0;
+}
+
+void I_SetPocketPacing(int enabled)
+{
+    pocket_pacing = enabled ? 1 : 0;
+}
+
+int I_PocketPacingActive(void)
+{
+    return pocket_pacing;
+}
+
+void I_PocketAdvanceFrameTic(void)
+{
+    if (frame_interpolation && pocket_pacing)
+        pocket_tic_count++;
+}
+
 int I_GetTime(void)
 {
-    return (int)((I_GetTimeUS() * TICRATE) / 1000000ULL);
+    int wall_tic = (int)((I_GetTimeUS() * TICRATE) / 1000000ULL);
+
+    if (frame_interpolation && pocket_pacing)
+        return (int)pocket_tic_count;
+
+    /* Keep the per-frame counter in sync with wall-clock when interp
+     * is off so toggling on starts at a sensible tic value. */
+    pocket_tic_count = (uint32_t)wall_tic;
+    return wall_tic;
+}
+
+int I_GetTimeFrac(void)
+{
+    /* In interp mode each rendered frame already shows a fresh gametic
+     * (one tic per frame), so sub-tic interpolation isn't needed —
+     * fractionaltic stays at 0.  In capped mode, fall back to Doom's
+     * I_GetDisplayTimeUS-based interp in d_main.c (returns -1). */
+    if (frame_interpolation && pocket_pacing)
+        return 0;
+    return -1;
 }
 
 int I_GetTimeMS(void)
@@ -116,4 +195,5 @@ void I_InitTimer(void)
     display_vblank_period_us = 16667;
     display_last_vblank_raw_us = 0;
     display_last_vblank_count = 0;
+    predicted_vblank_period_us = 0;
 }

@@ -58,14 +58,9 @@ typedef struct
     angle_t     angle;
     angle_t     normalangle;
     fixed_t     offset;
-    fixed_t     textureoffset;
-    fixed_t     rowoffset;
-    short       toptexture;
-    short       bottomtexture;
-    short       midtexture;
     short       pegflags;
     signed char lightbias;
-    byte        pad[3];
+    byte        pad[1];
 } rendersegcache_t;
 
 extern rendersegcache_t* rendersegcache;

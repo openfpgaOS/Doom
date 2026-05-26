@@ -1,5 +1,7 @@
 //
-// Doom renderer hooks for the openfpgaOS span GPU.
+// Doom renderer hooks for the openfpgaOS span GPU. Doom submits through
+// the SDK's high-level affine span-group helper; current openfpgaOS lowers
+// those groups to the unified GPU_CMD_DRAW_PARAM_SPAN_LIST command.
 //
 // The SDK GPU header owns static mutable ring state, so this is the only
 // Doom translation unit that includes of_gpu.h.
@@ -1132,6 +1134,9 @@ boolean R_GPU_BeginFuzzSpans(void)
 
 void R_GPU_EndFuzzSpans(void)
 {
+    if (gpu_fuzz_batch_active)
+        gpu_flush_draw_batches();
+
     gpu_fuzz_batch_active = 0;
 }
 

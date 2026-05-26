@@ -10,10 +10,6 @@
  *            using SPAN_PERSP horizontal scanlines for the inner loop —
  *            the GPU does the 1/z reciprocal + multiply per 16-pixel
  *            sub-segment in hardware)
- *
- * The old hardware triangle demo is left in the file for FULL GPU targets,
- * but the Pocket LITE build does not expose that path in the mode cycle.
- *
  * Controls:
  *   A button — cycle through demo modes
  */
@@ -544,89 +540,6 @@ static void draw_maze_demo(int frame) {
 }
 
 /* ================================================================
- * Triangle Demo: Rotating 3D cube
- * ================================================================ */
-
-/* Cube: 8 vertices, 12 triangles (2 per face) */
-static const int8_t cube_verts[8][3] = {
-    {-1,-1,-1}, { 1,-1,-1}, { 1, 1,-1}, {-1, 1,-1},
-    {-1,-1, 1}, { 1,-1, 1}, { 1, 1, 1}, {-1, 1, 1},
-};
-static const uint8_t cube_faces[12][3] = {
-    {0,1,2},{0,2,3}, {4,6,5},{4,7,6},  /* front, back */
-    {0,4,5},{0,5,1}, {2,6,7},{2,7,3},  /* bottom, top */
-    {0,3,7},{0,7,4}, {1,5,6},{1,6,2},  /* left, right */
-};
-static const uint8_t face_colors[6] = { 0xC0, 0xA0, 0x80, 0xE0, 0x60, 0xB0 };
-
-/* Per-face 1-texel textures — avoids race between CPU write and GPU read.
- * Heap-allocated (in SDRAM) at startup, just like the other textures. */
-static uint8_t *face_tex;
-
-static void __attribute__((unused)) draw_triangle_demo(int frame) {
-    uint8_t *fb = of_video_surface();
-
-    prepare_fb(fb, 0x08);
-
-    /* Initialise per-face texels and flush to SDRAM before GPU draws */
-    for (int i = 0; i < 6; i++)
-        face_tex[i] = face_colors[i];
-    OF_SVC->cache_clean_range(face_tex, 6);
-
-    int angle_y = frame * 2;
-    int angle_x = frame;
-    int sy = sin_lut[angle_y & 255], cy = cos_lut[angle_y & 255];
-    int sx = sin_lut[angle_x & 255], cx = cos_lut[angle_x & 255];
-
-    /* Transform and project vertices */
-    int16_t proj_x[8], proj_y[8];
-    for (int i = 0; i < 8; i++) {
-        int x = cube_verts[i][0] * 80;
-        int y = cube_verts[i][1] * 80;
-        int z = cube_verts[i][2] * 80;
-        /* Rotate Y */
-        int rx = (x * cy - z * sy) >> 8;
-        int rz = (x * sy + z * cy) >> 8;
-        /* Rotate X */
-        int ry = (y * cx - rz * sx) >> 8;
-        rz = (y * sx + rz * cx) >> 8;
-        /* Perspective projection */
-        int d = 300 + rz;
-        if (d < 50) d = 50;
-        proj_x[i] = (int16_t)(SCREEN_W / 2 + (rx * 200) / d);
-        proj_y[i] = (int16_t)(SCREEN_H / 2 + (ry * 200) / d);
-    }
-
-    /* Draw each face as 2 triangles */
-    for (int f = 0; f < 12; f++) {
-        int i0 = cube_faces[f][0];
-        int i1 = cube_faces[f][1];
-        int i2 = cube_faces[f][2];
-
-        /* Simple backface cull via cross product */
-        int dx1 = proj_x[i1] - proj_x[i0], dy1 = proj_y[i1] - proj_y[i0];
-        int dx2 = proj_x[i2] - proj_x[i0], dy2 = proj_y[i2] - proj_y[i0];
-        if (dx1 * dy2 - dx2 * dy1 <= 0) continue;
-
-        /* Bind per-face 1-texel texture (no race: each face has its own) */
-        of_gpu_texture_t solid_tex = {
-            .addr = (uint32_t)(uintptr_t)&face_tex[f / 2],
-            .width = 1, .height = 1,
-        };
-        of_gpu_bind_texture(&solid_tex);
-
-        of_gpu_vertex_t tri[3] = {
-            { .x = proj_x[i0] * 16, .y = proj_y[i0] * 16, .r = 0 },
-            { .x = proj_x[i1] * 16, .y = proj_y[i1] * 16, .r = 0 },
-            { .x = proj_x[i2] * 16, .y = proj_y[i2] * 16, .r = 0 },
-        };
-        of_gpu_draw_triangles(tri, 3);
-    }
-
-    of_gpu_finish();
-}
-
-/* ================================================================
  * Perspective Span Demo: rotating textured triangle, software rasterised
  * with hardware perspective-correct spans (SPAN_PERSP)
  * ================================================================
@@ -798,10 +711,9 @@ int main(void) {
     wall_tex         = malloc(64 * 64);
     sprite_tex       = malloc(16 * 16);
     persp_tex        = malloc(64 * 64);
-    face_tex         = malloc(8);  /* 6 bytes rounded up for alignment */
-    printf("[gpudemo] malloc: cb=%p wall=%p sprite=%p persp=%p face=%p\n",
-           checkerboard_tex, wall_tex, sprite_tex, persp_tex, face_tex);
-    if (!checkerboard_tex || !wall_tex || !sprite_tex || !persp_tex || !face_tex) {
+    printf("[gpudemo] malloc: cb=%p wall=%p sprite=%p persp=%p\n",
+           checkerboard_tex, wall_tex, sprite_tex, persp_tex);
+    if (!checkerboard_tex || !wall_tex || !sprite_tex || !persp_tex) {
         printf("[gpudemo] FATAL: out of heap for textures\n");
         return 1;
     }
@@ -820,7 +732,6 @@ int main(void) {
     OF_SVC->cache_clean_range(wall_tex,         64 * 64);
     OF_SVC->cache_clean_range(sprite_tex,       16 * 16);
     OF_SVC->cache_clean_range(persp_tex,        64 * 64);
-    OF_SVC->cache_clean_range(face_tex,         8);
     printf("[gpudemo] cache_clean done\n");
 
     /* The stock of_gpu_init() only pulses ring_reset (GPU_CTRL=4). On real
@@ -845,13 +756,8 @@ int main(void) {
 
     printf("[gpudemo] entering main loop — A = cycle mode\n");
 
-    /* Mode 0 = Auto-walking raycaster maze (LITE supported)
-     * Mode 1 = Perspective-correct triangle (SPAN_PERSP, LITE supported)
-     *
-     * The Pocket ships GPU_VARIANT_LITE, which has the pipelined
-     * fragment processor and the perspective span path but NOT the
-     * triangle rasteriser (GPU_FEAT_TRIANGLE is FULL-only). So the
-     * rotating cube in draw_triangle_demo() is skipped on this target. */
+    /* Mode 0 = Auto-walking raycaster maze.
+     * Mode 1 = Perspective-correct triangle via param-span lowering. */
     int mode = 0;
     int frame = 0;
     /* CPU% vs GPU% is computed from _stat_cpu_us / _stat_gpu_us, which
