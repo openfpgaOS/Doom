@@ -192,7 +192,6 @@ static uintptr_t gpu_framebuffer_delta;
 #define GPU_DEFERRED_LUMPS 64
 #define GPU_COLUMN_BATCH_LANES 8
 #define GPU_AFFINE_BATCH_LANES OF_GPU_AFFINE_SPAN_GROUP_MAX_LANES
-#define GPU_LETTERBOX_Y ((OF_SCREEN_H - SCREENHEIGHT) / 2)
 #define GPU_FB_CACHE_LINE_BYTES 64u
 #define GPU_FB_CACHE_LINES \
     ((SCREENWIDTH * SCREENHEIGHT + GPU_FB_CACHE_LINE_BYTES - 1u) \
@@ -898,7 +897,7 @@ void R_GPU_BeginDisplayFrame(void)
         return;
     }
 
-    gpu_draw_render_base = gpu_draw_fb + GPU_LETTERBOX_Y * OF_SCREEN_W;
+    gpu_draw_render_base = gpu_draw_fb;
     pixel_t *video_buffer = (pixel_t *)gpu_draw_render_base;
     gpu_framebuffer_delta = 0;
     gpu_reset_cpu_cache_tracking();
@@ -914,9 +913,8 @@ void R_GPU_BeginDisplayFrame(void)
     gpu_display_frame_active = 1;
     gpu_framebuffer_cpu_ready = 1;
 
-    /* All three hardware buffers are cleared during video init.  Doom only
-     * renders into the centered 320x200 window, so the bars stay black and
-     * do not need per-frame GPU clears. */
+    /* All three 320x200 hardware buffers are cleared during video init, so
+     * the framebuffer does not need per-frame GPU clears. */
 }
 
 void R_GPU_BeginFrame(void)

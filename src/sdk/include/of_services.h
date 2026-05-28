@@ -54,6 +54,22 @@ typedef struct of_video_mode {
 } of_video_mode_t;
 #endif
 
+#ifndef OF_VIDEO_CAPS_T_DEFINED
+#define OF_VIDEO_CAPS_T_DEFINED
+typedef struct of_video_caps {
+    uint16_t max_width;
+    uint16_t max_height;
+    uint16_t max_stride;
+    uint16_t physical_width;
+    uint16_t physical_height;
+    uint16_t default_width;
+    uint16_t default_height;
+    uint16_t default_stride;
+    uint32_t max_frame_bytes;
+    uint32_t color_mode_mask;
+} of_video_caps_t;
+#endif
+
 /* Forward declare AWE per-voice config -- full definition in of_awe.h.
  * Kept opaque here so this header doesn't pull the AWE-specific types
  * into every TU that just wants the services table. */
@@ -172,9 +188,8 @@ struct of_services_table {
     /* -- SoundFont preload (append-only, ABI-stable) --
      *    The kernel auto-loads the first .ofsf file it finds in a data
      *    slot during boot. Apps should check smp_bank_preload_base and,
-     *    when non-NULL, skip of_smp_bank_load() / of_mixer_alloc_samples
-     *    and reuse the preloaded CRAM1 buffer directly. Older firmware
-     *    leaves these as NULL/0. */
+     *    when non-NULL, skip of_smp_bank_load() and reuse the preloaded
+     *    SDRAM buffer directly. Older firmware leaves these as NULL/0. */
     const void *smp_bank_preload_base;
     uint32_t    smp_bank_preload_size;
 
@@ -327,6 +342,9 @@ struct of_services_table {
     void      (*video_get_mode)(of_video_mode_t *out);
     int       (*video_get_mode_count)(void);
     int       (*video_get_mode_info)(int index, of_video_mode_t *out);
+    void      (*video_get_caps)(of_video_caps_t *out);
+    int       (*video_check_mode)(const of_video_mode_t *mode,
+                                  of_video_mode_t *normalized);
 };
 
 #ifndef OF_PC

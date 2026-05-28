@@ -26,11 +26,17 @@
 static SDL_Window   *g_window;
 static SDL_Renderer *g_renderer;
 static SDL_Texture  *g_texture;
+static int           g_texture_w;
+static int           g_texture_h;
 
-/* Double-buffered 320x240 framebuffers, sized for the largest color mode. */
-static uint8_t  g_fb[2][OF_FB_SIZE_16BPP];
+/* Double-buffered framebuffers sized for the largest supported app mode. */
+static uint8_t  g_fb[2][OF_VIDEO_MAX_FRAME_BYTES];
 static int      g_draw_buf;    /* index of current draw buffer */
 static int      g_color_mode;
+static of_video_mode_t g_mode = {
+    OF_SCREEN_W, OF_SCREEN_H, OF_SCREEN_W, OF_VIDEO_MODE_8BIT, 0
+};
+static size_t   g_frame_bytes = OF_FB_SIZE_8BIT;
 static uint32_t g_present_count;
 static uint64_t g_last_present_us;
 
@@ -38,7 +44,23 @@ static uint64_t g_last_present_us;
 static uint32_t g_palette[256];
 
 /* Composited ARGB output (uploaded to texture) */
-static uint32_t g_pixels[OF_SCREEN_W * OF_SCREEN_H];
+static uint32_t g_pixels[OF_VIDEO_MAX_WIDTH * OF_VIDEO_MAX_HEIGHT];
+
+static const of_video_mode_t g_video_modes[] = {
+    {256, 224, 0, OF_VIDEO_MODE_8BIT, 0},
+    {256, 240, 0, OF_VIDEO_MODE_8BIT, 0},
+    {320, 200, 0, OF_VIDEO_MODE_8BIT, 0},
+    {320, 224, 0, OF_VIDEO_MODE_8BIT, 0},
+    {320, 240, 0, OF_VIDEO_MODE_8BIT, 0},
+    {320, 256, 0, OF_VIDEO_MODE_8BIT, 0},
+    {320, 288, 0, OF_VIDEO_MODE_8BIT, 0},
+    {400, 300, 0, OF_VIDEO_MODE_8BIT, 0},
+    {512, 384, 0, OF_VIDEO_MODE_8BIT, 0},
+    {640, 360, 0, OF_VIDEO_MODE_8BIT, 0},
+    {640, 400, 0, OF_VIDEO_MODE_8BIT, 0},
+    {640, 480, 0, OF_VIDEO_MODE_8BIT, 0},
+    {800, 600, 0, OF_VIDEO_MODE_8BIT, 0},
+};
 
 /* ---- Tile engine state ---- */
 static int      g_tile_enabled;
@@ -110,13 +132,85 @@ int of_has_feature(uint32_t feature) {
  * Video
  * ====================================================================== */
 
+static uint32_t video_line_bytes(uint16_t width, uint8_t color_mode) {
+    switch (color_mode) {
+    case OF_VIDEO_MODE_4BIT:
+        return ((uint32_t)width + 1u) >> 1;
+    case OF_VIDEO_MODE_2BIT:
+        return ((uint32_t)width + 3u) >> 2;
+    case OF_VIDEO_MODE_RGB565:
+    case OF_VIDEO_MODE_RGB555:
+    case OF_VIDEO_MODE_RGBA5551:
+        return (uint32_t)width * 2u;
+    default:
+        return width;
+    }
+}
+
+static int normalize_mode(const of_video_mode_t *in, of_video_mode_t *out,
+                          size_t *frame_bytes_out) {
+    if (!in || in->width == 0 || in->height == 0)
+        return -1;
+    if (in->width > OF_VIDEO_MAX_WIDTH || in->height > OF_VIDEO_MAX_HEIGHT)
+        return -1;
+    if (in->color_mode > OF_VIDEO_MODE_RGBA5551)
+        return -1;
+
+    uint32_t line = (video_line_bytes(in->width, in->color_mode) + 1u) & ~1u;
+    uint32_t stride = in->stride ? ((uint32_t)in->stride + 1u) & ~1u : line;
+    if (stride < line || stride > OF_VIDEO_MAX_STRIDE)
+        return -1;
+
+    uint32_t frame_bytes = stride * (uint32_t)in->height;
+    if (frame_bytes == 0 || frame_bytes > OF_VIDEO_MAX_FRAME_BYTES)
+        return -1;
+
+    if (out) {
+        *out = *in;
+        out->stride = (uint16_t)stride;
+        out->reserved = 0;
+    }
+    if (frame_bytes_out)
+        *frame_bytes_out = frame_bytes;
+    return 0;
+}
+
+static int window_scale_for_mode(int w, int h) {
+    if (w <= 400 && h <= 300)
+        return 3;
+    if (w <= 640 && h <= 480)
+        return 2;
+    return 1;
+}
+
+static void ensure_texture_for_mode(void) {
+    if (!g_renderer)
+        return;
+    if (g_texture && g_texture_w == g_mode.width && g_texture_h == g_mode.height)
+        return;
+
+    if (g_texture)
+        SDL_DestroyTexture(g_texture);
+    g_texture = SDL_CreateTexture(g_renderer,
+        SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+        g_mode.width, g_mode.height);
+    g_texture_w = g_mode.width;
+    g_texture_h = g_mode.height;
+    SDL_RenderSetLogicalSize(g_renderer, g_mode.width, g_mode.height);
+
+    if (g_window) {
+        int scale = window_scale_for_mode(g_mode.width, g_mode.height);
+        SDL_SetWindowSize(g_window, g_mode.width * scale, g_mode.height * scale);
+    }
+}
+
 /* Render tile layer into a scanline buffer (palette indices) */
 static void render_tile_scanline(uint8_t *line, int y) {
     int sy = (y + g_tile_scroll_y) & 0xFF;  /* 256 pixel wrap (32 tiles * 8) */
     int tile_row = sy >> 3;
     int fine_y   = sy & 7;
 
-    for (int x = 0; x < OF_SCREEN_W; x++) {
+    for (int x = 0; x < (int)g_mode.width; x++) {
         int sx = (x + g_tile_scroll_x) & 0x1FF;  /* 512 pixel wrap (64 * 8) */
         int tile_col = sx >> 3;
         int fine_x   = sx & 7;
@@ -139,7 +233,7 @@ static void render_tile_scanline(uint8_t *line, int y) {
 
 /* Render all sprites into a scanline buffer (palette indices) */
 static void render_sprite_scanline(uint8_t *line, int y) {
-    memset(line, 0, OF_SCREEN_W);
+    memset(line, 0, g_mode.width);
 
     /* Back to front for correct priority (sprite 0 = highest) */
     for (int i = MAX_SPRITES - 1; i >= 0; i--) {
@@ -158,7 +252,7 @@ static void render_sprite_scanline(uint8_t *line, int y) {
             if (nibble == 0) continue;
 
             int screen_x = s->x + px;
-            if (screen_x < 0 || screen_x >= OF_SCREEN_W) continue;
+            if (screen_x < 0 || screen_x >= (int)g_mode.width) continue;
 
             line[screen_x] = (s->palette << 4) | nibble;
         }
@@ -199,15 +293,15 @@ static uint32_t rgba5551_to_argb(uint16_t v) {
 static uint8_t framebuffer_index_at(const uint8_t *fb, int x, int y) {
     switch (g_color_mode) {
     case OF_VIDEO_MODE_4BIT: {
-        uint8_t packed = fb[y * (OF_SCREEN_W / 2) + (x >> 1)];
+        uint8_t packed = fb[(uint32_t)y * g_mode.stride + (x >> 1)];
         return (x & 1) ? (packed >> 4) : (packed & 0x0F);
     }
     case OF_VIDEO_MODE_2BIT: {
-        uint8_t packed = fb[y * (OF_SCREEN_W / 4) + (x >> 2)];
+        uint8_t packed = fb[(uint32_t)y * g_mode.stride + (x >> 2)];
         return (packed >> ((x & 3) * 2)) & 0x03;
     }
     default:
-        return fb[y * OF_SCREEN_W + x];
+        return fb[(uint32_t)y * g_mode.stride + x];
     }
 }
 
@@ -216,24 +310,29 @@ static void composite_and_present(void) {
     int disp = g_draw_buf ^ 1;  /* display buffer is the one we just flipped from */
     const uint8_t *fb = g_fb[disp];
     const uint16_t *fb16 = (const uint16_t *)fb;
-    uint8_t tile_line[OF_SCREEN_W];
-    uint8_t sprite_line[OF_SCREEN_W];
+    uint8_t tile_line[OF_VIDEO_MAX_WIDTH];
+    uint8_t sprite_line[OF_VIDEO_MAX_WIDTH];
+    int w = (int)g_mode.width;
+    int h = (int)g_mode.height;
+    int stride = (int)g_mode.stride;
 
-    for (int y = 0; y < OF_SCREEN_H; y++) {
+    ensure_texture_for_mode();
+
+    for (int y = 0; y < h; y++) {
         if (g_tile_enabled)
             render_tile_scanline(tile_line, y);
         if (g_sprite_enabled)
             render_sprite_scanline(sprite_line, y);
 
-        for (int x = 0; x < OF_SCREEN_W; x++) {
+        for (int x = 0; x < w; x++) {
             uint32_t color = 0xFF000000;  /* opaque black */
 
             if (g_color_mode == OF_VIDEO_MODE_RGB565) {
-                color = rgb565_to_argb(fb16[y * OF_SCREEN_W + x]);
+                color = rgb565_to_argb(fb16[(uint32_t)y * (stride >> 1) + x]);
             } else if (g_color_mode == OF_VIDEO_MODE_RGB555) {
-                color = rgb555_to_argb(fb16[y * OF_SCREEN_W + x]);
+                color = rgb555_to_argb(fb16[(uint32_t)y * (stride >> 1) + x]);
             } else if (g_color_mode == OF_VIDEO_MODE_RGBA5551) {
-                color = rgba5551_to_argb(fb16[y * OF_SCREEN_W + x]);
+                color = rgba5551_to_argb(fb16[(uint32_t)y * (stride >> 1) + x]);
             } else {
                 uint8_t fb_idx = framebuffer_index_at(fb, x, y);
                 if (fb_idx && g_palette[fb_idx])
@@ -249,11 +348,11 @@ static void composite_and_present(void) {
                 color = g_palette[tile_line[x]] | 0xFF000000;
             }
 
-            g_pixels[y * OF_SCREEN_W + x] = color;
+            g_pixels[(uint32_t)y * w + x] = color;
         }
     }
 
-    SDL_UpdateTexture(g_texture, NULL, g_pixels, OF_SCREEN_W * 4);
+    SDL_UpdateTexture(g_texture, NULL, g_pixels, w * 4);
     SDL_RenderClear(g_renderer);
     SDL_RenderCopy(g_renderer, g_texture, NULL, NULL);
     SDL_RenderPresent(g_renderer);
@@ -275,13 +374,16 @@ void of_video_init(void) {
             SDL_WINDOW_RESIZABLE);
         g_renderer = SDL_CreateRenderer(g_window, -1,
             SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-        SDL_RenderSetLogicalSize(g_renderer, OF_SCREEN_W, OF_SCREEN_H);
-        g_texture = SDL_CreateTexture(g_renderer,
-            SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
-            OF_SCREEN_W, OF_SCREEN_H);
     }
 
-    memset(g_fb, 0, sizeof(g_fb));
+    of_video_mode_t default_mode = {
+        OF_SCREEN_W, OF_SCREEN_H, 0, OF_VIDEO_MODE_8BIT, 0
+    };
+    normalize_mode(&default_mode, &g_mode, &g_frame_bytes);
+    ensure_texture_for_mode();
+
+    memset(g_fb[0], 0, g_frame_bytes);
+    memset(g_fb[1], 0, g_frame_bytes);
     g_draw_buf = 0;
     g_color_mode = OF_VIDEO_MODE_8BIT;
     memset(g_palette, 0, sizeof(g_palette));
@@ -312,15 +414,52 @@ uint8_t *of_video_buffer_addr(int idx) {
     return g_fb[idx & 1];
 }
 
+int of_video_set_mode(const of_video_mode_t *mode) {
+    of_video_mode_t normalized;
+    size_t frame_bytes;
+    if (normalize_mode(mode, &normalized, &frame_bytes) < 0)
+        return -1;
+
+    if (!g_window)
+        of_video_init();
+
+    g_mode = normalized;
+    g_color_mode = normalized.color_mode;
+    g_frame_bytes = frame_bytes;
+    g_draw_buf = 0;
+    memset(g_fb[0], 0, g_frame_bytes);
+    memset(g_fb[1], 0, g_frame_bytes);
+    ensure_texture_for_mode();
+    return 0;
+}
+
+void of_video_get_mode(of_video_mode_t *out) {
+    if (out)
+        *out = g_mode;
+}
+
+int of_video_get_mode_count(void) {
+    return (int)(sizeof(g_video_modes) / sizeof(g_video_modes[0]));
+}
+
+int of_video_get_mode_info(int index, of_video_mode_t *out) {
+    if (!out || index < 0 || index >= of_video_get_mode_count())
+        return -1;
+    return normalize_mode(&g_video_modes[index], out, NULL);
+}
+
+void of_video_get_caps(of_video_caps_t *out) {
+    __of_video_default_caps(out);
+}
+
+int of_video_check_mode(const of_video_mode_t *mode,
+                        of_video_mode_t *normalized) {
+    return normalize_mode(mode, normalized, NULL);
+}
+
 void of_video_clear(uint8_t color) {
-    size_t size = OF_FB_SIZE_8BIT;
-    if (g_color_mode == OF_VIDEO_MODE_4BIT)
-        size = OF_FB_SIZE_4BIT;
-    else if (g_color_mode == OF_VIDEO_MODE_2BIT)
-        size = OF_FB_SIZE_2BIT;
-    else if (g_color_mode >= OF_VIDEO_MODE_RGB565)
-        size = OF_FB_SIZE_16BPP;
-    memset(g_fb[g_draw_buf], color, size);
+    memset(g_fb[0], color, g_frame_bytes);
+    memset(g_fb[1], color, g_frame_bytes);
 }
 
 void of_video_palette(uint8_t index, uint32_t rgb) {
@@ -343,7 +482,10 @@ void of_video_set_display_mode(int mode) {
 void of_video_set_color_mode(int mode) {
     if (mode < OF_VIDEO_MODE_8BIT || mode > OF_VIDEO_MODE_RGBA5551)
         mode = OF_VIDEO_MODE_8BIT;
-    g_color_mode = mode;
+    of_video_mode_t next = g_mode;
+    next.color_mode = (uint8_t)mode;
+    next.stride = 0;
+    (void)of_video_set_mode(&next);
 }
 
 void of_video_get_timing(of_video_timing_t *out) {

@@ -106,6 +106,8 @@ enum of_video_fid {
     OF_VIDEO_FID_GET_MODE            = 14,
     OF_VIDEO_FID_GET_MODE_COUNT      = 15,
     OF_VIDEO_FID_GET_MODE_INFO       = 16,
+    OF_VIDEO_FID_GET_CAPS            = 17,
+    OF_VIDEO_FID_CHECK_MODE          = 18,
 };
 
 /* -- OF_EID_AUDIO -- */

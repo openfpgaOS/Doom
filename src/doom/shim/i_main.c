@@ -146,7 +146,6 @@ int main(int argc, char **argv)
     /* Boot the SDK. Audio/mixer init is deferred to I_SDL_InitSound
      * (i_sdlsound.c) so the sound module owns the channel count. */
     of_video_init();
-    of_video_set_refresh_vtotal(OF_VIDEO_VTOTAL_60HZ);
 
 #ifndef OF_PC
     ShowLoadingLogo();

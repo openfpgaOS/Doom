@@ -5,7 +5,7 @@
  * launching the application. Apps read it to discover the platform,
  * available hardware, memory layout, and OS services.
  *
- * This replaces hardcoded addresses (framebuffer base, sample pool,
+ * This replaces hardcoded addresses (framebuffer base, audio reserve,
  * GPU MMIO window, ...) and enables the same app binary to run on
  * different targets (Pocket, MiSTer) and core variants (full, lite, 3d).
  *
@@ -74,8 +74,8 @@ struct of_capabilities {
     uint32_t fb_width;          /* Framebuffer width in pixels */
     uint32_t fb_height;         /* Framebuffer height in pixels */
     uint32_t fb_stride;         /* Bytes per row */
-    uint32_t sample_base;       /* Audio sample pool base address */
-    uint32_t sample_size;       /* Audio sample pool size in bytes */
+    uint32_t sample_base;       /* Persistent audio reservation base */
+    uint32_t sample_size;       /* Persistent audio reservation bytes */
 
     /* Hardware features */
     uint32_t hw_features;       /* OF_HW_* bitmask */

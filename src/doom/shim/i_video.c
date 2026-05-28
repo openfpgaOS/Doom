@@ -1,13 +1,14 @@
 /* i_video.c — chocolate-doom video backend over openfpgaOS SDK.
  *
  * Doom renders into a 320x200 indexed buffer (I_VideoBuffer).  With GPU
- * flip enabled, the GPU layer retargets that pointer at the centered
- * 320x200 window inside the current rotating hardware framebuffer.  The
- * static buffer below remains the CPU fallback when GPU flip is disabled.
+ * flip enabled, the GPU layer retargets that pointer at the rotating
+ * 320x200 hardware framebuffer.  The static buffer below remains the CPU
+ * fallback when GPU flip is disabled.
  */
 
 #include "config.h"
 #include "of.h"
+#include "i_system.h"
 #include "i_video.h"
 #include "i_timer.h"
 #include "m_menu.h"
@@ -74,9 +75,9 @@ static pixel_t video_buf[SCREENWIDTH * SCREENHEIGHT];
 /* Grab-mouse callback (ignored on this backend). */
 static grabmouse_callback_t grabmouse_cb;
 
-#define LETTERBOX_Y  ((OF_SCREEN_H - SCREENHEIGHT) / 2)
 #define GPU_PACE_SAMPLES 32
 #define GPU_PACE_WARMUP_SAMPLES 8
+#define DOOM_CAPPED_VTOTAL OF_VIDEO_VTOTAL_61_25HZ
 #define GPU_PACE_MIN_US 16667u
 #define GPU_PACE_MAX_US 23800u
 #define GPU_PACE_MARGIN_US 1000u
@@ -113,6 +114,8 @@ typedef struct
 } gpu_adaptive_pace_t;
 
 static gpu_adaptive_pace_t gpu_pace;
+
+static void I_ApplyCappedRefresh(void);
 
 static void I_CheckAdaptivePacingOptions(void)
 {
@@ -389,7 +392,7 @@ static unsigned int I_UpdateAdaptivePaceTarget(unsigned int sample_us)
     }
 
     R_Perf_PacingSetTargetUS(gpu_pace.target_us);
-    if (!gpu_pace.pocket_vrr_enabled)
+    if (frame_interpolation && !gpu_pace.pocket_vrr_enabled)
         I_UpdateFineVRR(gpu_pace.target_us);
     return gpu_pace.target_us;
 }
@@ -410,6 +413,12 @@ static void I_AdaptiveGpuPaceBeforeFlip(void)
 
     if (!gpu_pace.enabled)
         return;
+
+    if (!frame_interpolation)
+    {
+        I_ApplyCappedRefresh();
+        return;
+    }
 
     now_us = of_time_us();
     prepare_us = R_Perf_PacingCurrentPrepareUS();
@@ -468,27 +477,61 @@ static void I_AdaptiveGpuPaceReset(void)
 
 /* ---- Init / shutdown ------------------------------------------------- */
 
+static void I_SetDoomVideoMode(void)
+{
+    of_video_mode_t mode = {
+        SCREENWIDTH,
+        SCREENHEIGHT,
+        SCREENWIDTH,
+        OF_VIDEO_MODE_8BIT,
+        0
+    };
+    of_video_mode_t actual;
+
+    if (of_video_set_mode(&mode) < 0)
+        I_Error("Failed to set openfpgaOS 320x200 video mode");
+
+    of_video_get_mode(&actual);
+    if (actual.width != SCREENWIDTH ||
+        actual.height != SCREENHEIGHT ||
+        actual.stride != SCREENWIDTH ||
+        actual.color_mode != OF_VIDEO_MODE_8BIT)
+    {
+        I_Error("Unexpected openfpgaOS video mode %ux%u stride %u color %u",
+                (unsigned int)actual.width,
+                (unsigned int)actual.height,
+                (unsigned int)actual.stride,
+                (unsigned int)actual.color_mode);
+    }
+}
+
+static void I_ApplyCappedRefresh(void)
+{
+    of_video_set_refresh_vtotal(DOOM_CAPPED_VTOTAL);
+    gpu_pace.current_vtotal = DOOM_CAPPED_VTOTAL;
+    R_Perf_PacingSetVTotal(DOOM_CAPPED_VTOTAL);
+}
+
 void I_InitGraphics(void)
 {
     of_video_init();
+    I_SetDoomVideoMode();
+
     /* Parse pacing flags before the first frame so pocket_pacing /
      * pocket_vrr_enabled are set when I_StartFrame and I_FinishUpdate
      * first run.  Without this, the pocket short-circuit fires with
      * pocket_vrr_enabled=0 on every frame and VRR never engages. */
     I_CheckAdaptivePacingOptions();
-    of_video_set_refresh_vtotal(OF_VIDEO_VTOTAL_60HZ);
-    gpu_pace.current_vtotal = OF_VIDEO_VTOTAL_60HZ;
     gpu_pace.last_vtotal_update_us = of_time_us();
     gpu_pace.refresh_period_us = GPU_PACE_MIN_US;
     gpu_pace.vrr_target_us = 0;
-    R_Perf_PacingSetVTotal(gpu_pace.current_vtotal);
     of_video_set_display_mode(OF_DISPLAY_FRAMEBUFFER);
-    of_video_set_color_mode(OF_VIDEO_MODE_8BIT);
+    I_ApplyCappedRefresh();
 
-    /* Clear letterbox bars on all three back buffers once. */
+    /* Clear all three 320x200 back buffers once. */
     for (int buf = 0; buf < 3; buf++) {
         uint8_t *fb = of_video_surface();
-        memset(fb, 0, OF_SCREEN_W * OF_SCREEN_H);
+        memset(fb, 0, SCREENWIDTH * SCREENHEIGHT);
         of_video_flip();
         of_video_wait_flip();
     }
@@ -523,15 +566,29 @@ void I_BeginRead(void)                 { }
 
 void I_StartFrame(void)
 {
+    static uint32_t last_seen_vblank = 0;
+    static int last_frame_interpolation = -1;
+    of_video_timing_t timing;
+
+    /* VRR off (capped): request ~61.25Hz and let the wall-clock 35Hz tic
+     * clock run as-is.  61.25/35 = 7/4, giving a stable 2/2/2/1 refresh
+     * hold cadence instead of the 60Hz 12/7 beat. */
+    if (!frame_interpolation)
+    {
+        I_ApplyCappedRefresh();
+        last_frame_interpolation = 0;
+        if (!I_PocketPacingActive())
+            return;
+    }
+    else if (!I_PocketPacingActive())
+    {
+        return;
+    }
+
     /* Wait for the next vsync at frame start so the renderer has the
      * full vsync period as its budget.  Poll on vblank_count rather
      * than of_video_wait_flip() because the GPU triggered-flip path
      * queues CMD_FLIPs that of_video_wait_flip() does not track. */
-    if (!I_PocketPacingActive())
-        return;
-
-    static uint32_t last_seen_vblank = 0;
-    of_video_timing_t timing;
     for (;;) {
         of_video_get_timing(&timing);
         if (timing.vblank_count != last_seen_vblank)
@@ -539,16 +596,15 @@ void I_StartFrame(void)
     }
     last_seen_vblank = timing.vblank_count;
 
-    /* VRR off (capped): lock V_TOTAL to a constant 60Hz and let the
-     * wall-clock 35Hz tic clock run as-is.  Cadence beat (12/7) is
-     * unavoidable on this panel but a fixed V_TOTAL avoids per-frame
-     * brightness flashes from a varying refresh. */
-    if (!frame_interpolation
-        && gpu_pace.current_vtotal != OF_VIDEO_VTOTAL_60HZ) {
+    if (frame_interpolation
+               && last_frame_interpolation == 0
+               && gpu_pace.current_vtotal != OF_VIDEO_VTOTAL_60HZ) {
         of_video_set_refresh_vtotal(OF_VIDEO_VTOTAL_60HZ);
         gpu_pace.current_vtotal = OF_VIDEO_VTOTAL_60HZ;
+        gpu_pace.refresh_period_us = GPU_PACE_MIN_US;
         R_Perf_PacingSetVTotal(OF_VIDEO_VTOTAL_60HZ);
     }
+    last_frame_interpolation = frame_interpolation ? 1 : 0;
 
     /* VRR on: one gametic per rendered frame, advanced right at the
      * start of this frame so TryRunTics sees the new tic value. */
@@ -652,8 +708,8 @@ void I_FinishUpdate(void)
      * into VRR. */
     if (I_PocketPacingActive()) {
         last_flip_us = 0;
-        /* Dynamic VRR only when interpolating; capped mode drives
-         * V_TOTAL from the fixed 6-vsync cadence in I_StartFrame. */
+        /* Dynamic VRR only when interpolating; capped mode holds the
+         * fixed 61.25Hz target in I_StartFrame. */
         if (gpu_pace.pocket_vrr_enabled && frame_interpolation) {
             unsigned int prepare_us = R_Perf_PacingCurrentPrepareUS();
             if (prepare_us > 0)
@@ -671,8 +727,7 @@ void I_FinishUpdate(void)
             R_GPU_EndFrame();
         }
         uint8_t *fb = of_video_surface();
-        memcpy(fb + OF_SCREEN_W * LETTERBOX_Y, I_VideoBuffer,
-               SCREENWIDTH * SCREENHEIGHT);
+        memcpy(fb, I_VideoBuffer, SCREENWIDTH * SCREENHEIGHT);
         of_video_flip();
         R_Perf_CountPresentedFrame(0);
         R_Perf_PacingFrameQueued();
@@ -710,8 +765,7 @@ void I_FinishUpdate(void)
 
     unsigned int blit_start = R_Perf_BeginStage();
     uint8_t *fb = of_video_surface();
-    memcpy(fb + OF_SCREEN_W * LETTERBOX_Y, I_VideoBuffer,
-           SCREENWIDTH * SCREENHEIGHT);
+    memcpy(fb, I_VideoBuffer, SCREENWIDTH * SCREENHEIGHT);
     of_video_flip();
     R_Perf_EndStage(R_PERF_STAGE_BLIT, blit_start);
     R_Perf_CountPresentedFrame(0);

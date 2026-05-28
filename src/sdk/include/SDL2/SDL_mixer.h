@@ -130,7 +130,7 @@ static inline Mix_Chunk *__mix_chunk_from_audio(const SDL_AudioSpec *spec,
     if (num_samples == 0) return NULL;
     Mix_Chunk *chunk = (Mix_Chunk *)calloc(1, sizeof(Mix_Chunk));
     if (!chunk) return NULL;
-    int16_t *pcm_s16 = (int16_t *)of_mixer_alloc_samples(num_samples * sizeof(int16_t));
+    int16_t *pcm_s16 = (int16_t *)malloc(num_samples * sizeof(int16_t));
     if (!pcm_s16) { free(chunk); return NULL; }
     if (spec->format == AUDIO_U8) {
         int step = channels;
@@ -141,7 +141,7 @@ static inline Mix_Chunk *__mix_chunk_from_audio(const SDL_AudioSpec *spec,
         for (uint32_t i = 0; i < num_samples; i++)
             pcm_s16[i] = __mix_read_s16le(audio + (i * step));
     }
-    chunk->allocated = 0; /* sample-pool allocations are freed as a pool */
+    chunk->allocated = 1;
     chunk->abuf = (Uint8 *)pcm_s16;
     chunk->alen = (Uint32)(num_samples * sizeof(int16_t));
     chunk->volume = MIX_MAX_VOLUME;

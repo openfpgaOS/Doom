@@ -2,7 +2,7 @@
 
 Chocolate Doom port for the Analogue Pocket using openfpgaOS.
 
-Current release: `1.1.6` (`2026-05-26`).
+Current release: `1.1.7` (`2026-05-26`).
 
 This repository contains the Doom custom core, the openfpgaOS SDK subset it
 builds against, instance files, runtime binaries, and the Doom-specific shims

@@ -116,14 +116,6 @@
 #define SDL_BIG_ENDIAN  4321
 #define SDL_BYTEORDER   SDL_LIL_ENDIAN
 
-static inline uint16_t SDL_Swap16(uint16_t x) { return __builtin_bswap16(x); }
-static inline uint32_t SDL_Swap32(uint32_t x) { return __builtin_bswap32(x); }
-
-#define SDL_SwapLE16(x) ((uint16_t)(x))
-#define SDL_SwapLE32(x) ((uint32_t)(x))
-#define SDL_SwapBE16(x) SDL_Swap16(x)
-#define SDL_SwapBE32(x) SDL_Swap32(x)
-
 #ifndef SDL_bool
 #define SDL_bool int
 #define SDL_FALSE 0
@@ -473,6 +465,8 @@ static inline int __sdl_try_hw_fb_mode(int w, int h) {
     mode.stride = 0;
     mode.color_mode = OF_VIDEO_MODE_8BIT;
     mode.reserved = 0;
+    if (of_video_check_mode(&mode, NULL) < 0)
+        return 0;
     return of_video_set_mode(&mode) == 0;
 }
 
@@ -616,6 +610,28 @@ static inline int SDL_GetCurrentDisplayMode(int displayIndex,
 static inline int SDL_GetDesktopDisplayMode(int displayIndex,
                                              SDL_DisplayMode *mode) {
     return SDL_GetCurrentDisplayMode(displayIndex, mode);
+}
+static inline int SDL_VideoModeOK(int width, int height, int bpp,
+                                   uint32_t flags) {
+    (void)flags;
+    if (width <= 0) width = OF_SCREEN_W;
+    if (height <= 0) height = OF_SCREEN_H;
+    if (bpp != 0 && bpp != 8)
+        return 0;
+    if (width > OF_VIDEO_MAX_WIDTH || height > OF_VIDEO_MAX_HEIGHT)
+        return 0;
+
+    of_video_mode_t mode = {
+        (uint16_t)width, (uint16_t)height, 0, OF_VIDEO_MODE_8BIT, 0
+    };
+    return of_video_check_mode(&mode, NULL) == 0 ? 8 : 0;
+}
+static inline SDL_Rect **SDL_ListModes(SDL_PixelFormat *format,
+                                        uint32_t flags) {
+    (void)flags;
+    if (format && format->BitsPerPixel != 0 && format->BitsPerPixel != 8)
+        return NULL;
+    return (SDL_Rect **)-1;
 }
 static inline int SDL_SetWindowDisplayMode(SDL_Window *w,
                                             const SDL_DisplayMode *mode) {
