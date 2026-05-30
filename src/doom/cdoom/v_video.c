@@ -356,6 +356,81 @@ void V_DrawPatchDoubled(int x, int y, patch_t *patch)
     }
 }
 
+void V_DrawPatchScaled(int x, int y, patch_t *patch, int scale_num,
+                       int scale_den)
+{
+    int col;
+    int w;
+    int h;
+    int out_w;
+    int out_h;
+
+    if (scale_num <= 0 || scale_den <= 0)
+        return;
+
+    y -= (SHORT(patch->topoffset) * scale_num) / scale_den;
+    x -= (SHORT(patch->leftoffset) * scale_num) / scale_den;
+
+    w = SHORT(patch->width);
+    h = SHORT(patch->height);
+    out_w = (w * scale_num) / scale_den;
+    out_h = (h * scale_num) / scale_den;
+
+    if (out_w <= 0 || out_h <= 0
+     || x < 0 || x + out_w > SCREENWIDTH
+     || y < 0 || y + out_h > SCREENHEIGHT)
+        return;
+
+    V_MarkRect(x, y, out_w, out_h);
+
+    for (col = 0; col < w; ++col)
+    {
+        column_t *column;
+        int dx0 = (col * scale_num) / scale_den;
+        int dx1 = ((col + 1) * scale_num) / scale_den;
+
+        if (dx1 <= dx0)
+            dx1 = dx0 + 1;
+        if (dx1 > out_w)
+            dx1 = out_w;
+
+        column = (column_t *)((byte *)patch + LONG(patch->columnofs[col]));
+
+        while (column->topdelta != 0xff)
+        {
+            int count = column->length;
+            byte *source = (byte *)column + 3;
+
+            for (int row = 0; row < count; ++row)
+            {
+                byte c = source[row];
+                int sy = column->topdelta + row;
+                int dy0 = (sy * scale_num) / scale_den;
+                int dy1 = ((sy + 1) * scale_num) / scale_den;
+
+                if (dy1 <= dy0)
+                    dy1 = dy0 + 1;
+                if (dy1 > out_h)
+                    dy1 = out_h;
+
+                for (int dy = dy0; dy < dy1; ++dy)
+                {
+                    pixel_t *dest = dest_screen
+                                  + (y + dy) * SCREENWIDTH
+                                  + x + dx0;
+
+                    for (int dx = dx0; dx < dx1; ++dx)
+                    {
+                        *dest++ = c;
+                    }
+                }
+            }
+
+            column = (column_t *)((byte *)column + column->length + 4);
+        }
+    }
+}
+
 //
 // V_DrawPatchFlipped
 // Masks a column based masked pic to the screen.

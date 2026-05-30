@@ -7,9 +7,10 @@
         },
         "data_slots": [
             { "id": 1, "filename": "os.bin" },
-            { "id": 2, "filename": "doom.elf" },
-            { "id": 3, "filename": "DOOM2.WAD" },
-            { "id": 4, "filename": "OHM_Dehacked.wad" },
+            { "id": 2, "filename": "ohmdoom2.ini" },
+            { "id": 3, "filename": "doom.elf" },
+            { "id": 4, "filename": "DOOM2.WAD" },
+            { "id": 5, "filename": "OHM_Dehacked.wad" },
             { "id": 7, "filename": "bank.ofsf" },
             { "id": 9, "filename": "OHMDoom2.cfg" },
             { "id": 10, "filename": "OHMDoom2_0.sav" },
@@ -21,8 +22,7 @@
             { "id": 16, "filename": "OHMDoom2_6.sav" },
             { "id": 17, "filename": "OHMDoom2_7.sav" },
             { "id": 18, "filename": "OHMDoom2_8.sav" },
-            { "id": 19, "filename": "OHMDoom2_9.sav" },
-            { "id": 20, "filename": "OHMDoom2.sav" }
+            { "id": 19, "filename": "OHMDoom2_9.sav" }
         ]
     }
 }

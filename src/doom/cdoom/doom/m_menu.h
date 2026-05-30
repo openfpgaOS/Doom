@@ -54,7 +54,21 @@ void M_StartControlPanel (void);
 
 extern int detailLevel;
 extern int frame_interpolation;
+extern int refresh_mode;
 extern int screenblocks;
+
+enum
+{
+    /* Keep the old fixed/VRR numeric values so saved configs migrate
+     * cleanly: old fixed values become 52.25, old VRR stays VRR. */
+    REFRESH_MODE_PAL = 1,
+    REFRESH_MODE_52_25 = 2,
+    REFRESH_MODE_NTSC = 4,
+    REFRESH_MODE_VRR = 6
+};
+
+int M_EffectiveRefreshMode(void);
+const char *M_RefreshModeName(int mode);
 
 extern boolean inhelpscreens;
 extern int showMessages;

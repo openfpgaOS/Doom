@@ -419,6 +419,7 @@ void D_BindVariables(void)
     M_BindIntVariable("screenblocks",           &screenblocks);
     M_BindIntVariable("detaillevel",            &detailLevel);
     M_BindIntVariable("frame_interpolation",    &frame_interpolation);
+    M_BindIntVariable("refresh_mode",           &refresh_mode);
     M_BindIntVariable("snd_channels",           &snd_channels);
     M_BindIntVariable("vanilla_savegame_limit", &vanilla_savegame_limit);
     M_BindIntVariable("vanilla_demo_limit",     &vanilla_demo_limit);
@@ -514,15 +515,17 @@ void D_RunFrame()
         {
             // Capped (one rendered frame per gametic, no sub-tic
             // interpolation) is the default — matches DOS Doom's 35Hz
-            // discrete-step motion.  Pass -uncapped/-interp to opt into
-            // interpolated rendering, or toggle it live from the menu
-            // (Options → "Frame Interp").  Honors a config-saved value
-            // bound to "frame_interpolation".
+            // discrete-step motion.  The refresh selector controls whether
+            // fixed refresh or VRR is active; frame_interpolation is derived
+            // from that effective mode for the renderer/timer code.
             if (M_CheckParm("-uncapped") > 0 || M_CheckParm("-interp") > 0)
-                frame_interpolation = 1;
+                refresh_mode = REFRESH_MODE_VRR;
+            else if (M_CheckParm("-fixed60") > 0)
+                refresh_mode = REFRESH_MODE_52_25;
             else if (M_CheckParm("-capped") > 0
                   || M_CheckParm("-nointerp") > 0)
-                frame_interpolation = 0;
+                refresh_mode = REFRESH_MODE_52_25;
+            frame_interpolation = M_EffectiveRefreshMode() == REFRESH_MODE_VRR;
             frame_interp_initialized = 1;
         }
 

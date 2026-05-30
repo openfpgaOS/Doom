@@ -7,9 +7,10 @@
         },
         "data_slots": [
             { "id": 1, "filename": "os.bin" },
-            { "id": 2, "filename": "doom.elf" },
-            { "id": 3, "filename": "DOOM2.WAD" },
-            { "id": 4, "filename": "HBOUND.WAD" },
+            { "id": 2, "filename": "hellbound.ini" },
+            { "id": 3, "filename": "doom.elf" },
+            { "id": 4, "filename": "DOOM2.WAD" },
+            { "id": 5, "filename": "HBOUND.WAD" },
             { "id": 7, "filename": "bank.ofsf" },
             { "id": 9, "filename": "hellbound/Hellbound.cfg" },
             { "id": 10, "filename": "hellbound/Hellbound_0.sav" },
@@ -21,8 +22,7 @@
             { "id": 16, "filename": "hellbound/Hellbound_6.sav" },
             { "id": 17, "filename": "hellbound/Hellbound_7.sav" },
             { "id": 18, "filename": "hellbound/Hellbound_8.sav" },
-            { "id": 19, "filename": "hellbound/Hellbound_9.sav" },
-            { "id": 20, "filename": "hellbound/Hellbound.sav" }
+            { "id": 19, "filename": "hellbound/Hellbound_9.sav" }
         ]
     }
 }

@@ -7,9 +7,10 @@
         },
         "data_slots": [
             { "id": 1, "filename": "os.bin" },
-            { "id": 2, "filename": "doom.elf" },
-            { "id": 3, "filename": "PLUTONIA.WAD" },
-            { "id": 4, "filename": "dehacked_gibs.wad" },
+            { "id": 2, "filename": "gorenuggetsplutonia.ini" },
+            { "id": 3, "filename": "doom.elf" },
+            { "id": 4, "filename": "PLUTONIA.WAD" },
+            { "id": 5, "filename": "dehacked_gibs.wad" },
             { "id": 7, "filename": "bank.ofsf" },
             { "id": 9, "filename": "GorenuggetsPlutonia.cfg" },
             { "id": 10, "filename": "GorenuggetsPlutonia_0.sav" },
@@ -21,8 +22,7 @@
             { "id": 16, "filename": "GorenuggetsPlutonia_6.sav" },
             { "id": 17, "filename": "GorenuggetsPlutonia_7.sav" },
             { "id": 18, "filename": "GorenuggetsPlutonia_8.sav" },
-            { "id": 19, "filename": "GorenuggetsPlutonia_9.sav" },
-            { "id": 20, "filename": "GorenuggetsPlutonia.sav" }
+            { "id": 19, "filename": "GorenuggetsPlutonia_9.sav" }
         ]
     }
 }

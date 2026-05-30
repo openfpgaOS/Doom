@@ -18,6 +18,7 @@
 #include "r_state.h"
 #include "w_wad.h"
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -215,6 +216,22 @@ static void gpu_flush_draw_batches(void);
 static void gpu_release_deferred_lumps(void);
 static void gpu_prepare_for_gpu_write(void);
 static void gpu_set_framebuffer_base(uint8_t *base);
+
+#define GPU_SVC_INDEX(field) \
+    ((unsigned int)((offsetof(struct of_services_table, field) - \
+                     offsetof(struct of_services_table, video_init)) / \
+                    sizeof(void *)))
+
+static int gpu_service_has_cache_flush_range(void)
+{
+    const struct of_services_table *svc = OF_SVC;
+    unsigned int index = GPU_SVC_INDEX(cache_flush_range);
+
+    return svc != NULL
+        && svc->magic == OF_SVC_MAGIC
+        && svc->count > index
+        && svc->cache_flush_range != NULL;
+}
 
 static int gpu_has_pending_draw_batches(void)
 {
@@ -803,12 +820,22 @@ void R_GPU_Init(void)
     gpu_reset_cpu_cache_tracking();
 
     if (!r_gpu_enabled || M_CheckParm("-nogpu") > 0)
+    {
+        printf("Doom GPU: renderer disabled; using software renderer\n");
         return;
+    }
 
     const struct of_capabilities *caps = of_get_caps();
     if (caps == NULL || caps->gpu_base == 0 ||
         (caps->hw_features & OF_HW_GPU_SPAN) == 0)
     {
+        return;
+    }
+
+    if (!gpu_service_has_cache_flush_range())
+    {
+        printf("Doom GPU: cache_flush_range service missing; "
+               "disabling GPU for this openfpgaOS runtime.\n");
         return;
     }
 
@@ -838,6 +865,8 @@ void R_GPU_Init(void)
 
     gpu_draw_idx = of_video_acquire_next(-1, 0);
     gpu_flip_enabled = gpu_draw_idx >= 0;
+    printf("Doom GPU: direct framebuffer flip %s\n",
+           gpu_flip_enabled ? "enabled" : "unavailable");
 
 }
 

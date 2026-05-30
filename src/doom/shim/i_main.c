@@ -4,7 +4,6 @@
 #include "of.h"
 #include "of_caps.h"
 #ifndef OF_PC
-#include "of_file.h"
 #include "of_video.h"
 #include "doom_loading_logo.h"
 #endif
@@ -13,6 +12,9 @@
 #include "i_system.h"
 #include "m_argv.h"
 #include "m_misc.h"
+#ifndef OF_PC
+#include "p_saveg.h"
+#endif
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,34 +25,66 @@ void D_DoomMain(void);
 #ifndef OF_PC
 static void ShowLoadingLogo(void)
 {
+    of_video_mode_t logo_mode = {
+        OF_SCREEN_W,
+        OF_SCREEN_H,
+        OF_SCREEN_W,
+        OF_VIDEO_MODE_8BIT,
+        0
+    };
+    of_video_mode_t actual;
+    unsigned int dst_w;
+    unsigned int dst_h;
+    unsigned int dst_stride;
+    size_t surface_bytes;
+
+    of_video_set_refresh_vtotal(OF_VIDEO_VTOTAL_60HZ);
+    of_video_get_mode(&actual);
+    if (actual.width != OF_SCREEN_W ||
+        actual.height != OF_SCREEN_H ||
+        actual.stride != OF_SCREEN_W ||
+        actual.color_mode != OF_VIDEO_MODE_8BIT)
+    {
+        (void) of_video_set_mode(&logo_mode);
+    }
     of_video_set_display_mode(OF_DISPLAY_FRAMEBUFFER);
-    of_video_set_color_mode(OF_VIDEO_MODE_8BIT);
+    of_video_get_mode(&actual);
+
+    dst_w = actual.width != 0 ? actual.width : OF_SCREEN_W;
+    dst_h = actual.height != 0 ? actual.height : OF_SCREEN_H;
+    dst_stride = actual.stride != 0 ? actual.stride : dst_w;
+    surface_bytes = (size_t) dst_stride * dst_h;
+
+    printf("Doom logo video: mode %ux%u stride %u color %u\n",
+           dst_w, dst_h, dst_stride, (unsigned int)actual.color_mode);
     of_video_palette_bulk(doom_loading_logo_palette, 256);
 
     for (int frame = 0; frame < 3; ++frame)
     {
         uint8_t *fb = of_video_surface();
-        memset(fb, 0, OF_SCREEN_W * OF_SCREEN_H);
+        memset(fb, 0, surface_bytes);
 
-        if (doom_loading_logo_w == OF_SCREEN_W
-         && doom_loading_logo_h == OF_SCREEN_H)
+        if (actual.color_mode == OF_VIDEO_MODE_8BIT
+         && doom_loading_logo_w == (int) dst_w
+         && doom_loading_logo_h == (int) dst_h
+         && dst_stride == dst_w)
         {
             memcpy(fb, doom_loading_logo_pixels, sizeof(doom_loading_logo_pixels));
         }
-        else
+        else if (actual.color_mode == OF_VIDEO_MODE_8BIT)
         {
-            int copy_w = doom_loading_logo_w < OF_SCREEN_W
-                       ? doom_loading_logo_w : OF_SCREEN_W;
-            int copy_h = doom_loading_logo_h < OF_SCREEN_H
-                       ? doom_loading_logo_h : OF_SCREEN_H;
+            int copy_w = doom_loading_logo_w < (int) dst_w
+                       ? doom_loading_logo_w : (int) dst_w;
+            int copy_h = doom_loading_logo_h < (int) dst_h
+                       ? doom_loading_logo_h : (int) dst_h;
             int src_x = (doom_loading_logo_w - copy_w) / 2;
             int src_y = (doom_loading_logo_h - copy_h) / 2;
-            int dst_x = (OF_SCREEN_W - copy_w) / 2;
-            int dst_y = (OF_SCREEN_H - copy_h) / 2;
+            int dst_x = ((int) dst_w - copy_w) / 2;
+            int dst_y = ((int) dst_h - copy_h) / 2;
 
             for (int y = 0; y < copy_h; ++y)
             {
-                memcpy(fb + (dst_y + y) * OF_SCREEN_W + dst_x,
+                memcpy(fb + (dst_y + y) * dst_stride + dst_x,
                        doom_loading_logo_pixels
                        + (src_y + y) * doom_loading_logo_w + src_x,
                        (size_t) copy_w);
@@ -60,73 +94,45 @@ static void ShowLoadingLogo(void)
         of_video_flip();
         of_video_wait_flip();
     }
+
+    {
+        of_video_timing_t timing;
+
+        of_video_get_timing(&timing);
+        printf("Doom logo video: vblank=%u present=%u last=%u\n",
+               timing.vblank_count,
+               timing.present_count,
+               timing.last_presented_idx);
+    }
 }
 
-static const char *save_slot_names[] =
+static const char *FindArgValue(int argc, char **argv, const char *name)
 {
-    "doom_0.sav",
-    "doom_1.sav",
-    "doom_2.sav",
-    "doom_3.sav",
-    "doom_4.sav",
-    "doom_5.sav",
-    "doom_6.sav",
-    "doom_7.sav",
-    "doom_8.sav",
-    "doom_9.sav",
-};
-
-static void RegisterPersistentFiles(void)
-{
-    static boolean registered = false;
-
-    if (registered)
+    for (int i = 1; i + 1 < argc; ++i)
     {
-        return;
+        if (!strcmp(argv[i], name))
+        {
+            return argv[i + 1];
+        }
     }
 
-    of_file_slot_register(9, "doom.cfg");
-
-    for (int i = 0; i < 10; ++i)
-    {
-        of_file_slot_register(10 + (uint32_t) i, save_slot_names[i]);
-    }
-
-    of_file_slot_register(20, "legacy.sav");
-
-    registered = true;
+    return NULL;
 }
 
-static boolean CanOpenFile(const char *filename)
+static void ConfigureDoomInstanceFromArgs(int argc, char **argv)
 {
-    FILE *fp = fopen(filename, "rb");
+    const char *iwad = FindArgValue(argc, argv, "-iwad");
+    const char *pwad = FindArgValue(argc, argv, "-merge");
+    const char *save_prefix = FindArgValue(argc, argv, "-saveprefix");
 
-    if (fp == NULL)
+    if (pwad == NULL)
     {
-        return false;
+        pwad = FindArgValue(argc, argv, "-file");
     }
 
-    fclose(fp);
-    return true;
-}
-
-/* Only inject -deh for real DeHackEd text files. This also protects
- * against user/custom instances that put a non-DEH file in slot 5. */
-static boolean LooksLikeDehFile(const char *filename)
-{
-    static const char magic[] = "Patch File for DeHackEd";
-    char buf[sizeof(magic) - 1];
-    FILE *fp = fopen(filename, "rb");
-
-    if (fp == NULL)
-    {
-        return false;
-    }
-
-    size_t got = fread(buf, 1, sizeof(buf), fp);
-    fclose(fp);
-
-    return got == sizeof(buf) && memcmp(buf, magic, sizeof(buf)) == 0;
+    P_SetOpenFPGASavePrefix(save_prefix);
+    I_SetOpenFPGASaveIdentity(iwad, pwad);
+    I_MigratePocketDoomSaves();
 }
 
 #endif
@@ -149,57 +155,14 @@ int main(int argc, char **argv)
 
 #ifndef OF_PC
     ShowLoadingLogo();
-
-    RegisterPersistentFiles();
+    ConfigureDoomInstanceFromArgs(argc, argv);
 #endif
 
-    /* openfpgaOS port: the Pocket kernel has no mechanism to pass argv
-     * from instance.json, so use the fixed data-slot contract.  Do not
-     * probe filenames in common: multiple instances can legitimately keep
-     * doom.wad, DOOM.WAD, DOOM2.WAD, etc. side by side. */
-#ifndef OF_PC
-    const char *iwad_file = "slot:3";
-    const char *pwad_file = CanOpenFile("slot:4") ? "slot:4" : NULL;
-    const char *deh_file = NULL;
-    int injected = 0;
-    char *injected_argv[10];
-
-    injected_argv[injected++] = "-iwad";
-    injected_argv[injected++] = (char *) iwad_file;
-    injected_argv[injected++] = "-noautoload";
-
-    if (pwad_file != NULL)
-    {
-        injected_argv[injected++] = "-merge";
-        injected_argv[injected++] = (char *) pwad_file;
-        injected_argv[injected++] = "-dehlump";
-    }
-
-    if (pwad_file != NULL && LooksLikeDehFile("slot:5"))
-    {
-        deh_file = "slot:5";
-    }
-
-    if (deh_file != NULL)
-    {
-        injected_argv[injected++] = "-deh";
-        injected_argv[injected++] = (char *) deh_file;
-    }
-
-    I_SetOpenFPGASaveIdentity(iwad_file, pwad_file);
-    I_MigratePocketDoomSaves();
-#else
-    int   injected = 0;
-    char *injected_argv[] = { 0 };
-#endif
-
-    myargc = argc + injected;
+    myargc = argc;
     myargv = malloc(myargc * sizeof(char *));
     assert(myargv != NULL);
     for (int i = 0; i < argc; i++)
         myargv[i] = M_StringDuplicate(argv[i]);
-    for (int i = 0; i < injected; i++)
-        myargv[argc + i] = M_StringDuplicate(injected_argv[i]);
 
     if (M_ParmExists("-version") || M_ParmExists("--version")) {
         puts(PACKAGE_STRING);

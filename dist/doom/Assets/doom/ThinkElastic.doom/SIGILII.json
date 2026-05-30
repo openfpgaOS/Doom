@@ -7,9 +7,10 @@
         },
         "data_slots": [
             { "id": 1, "filename": "os.bin" },
-            { "id": 2, "filename": "doom.elf" },
-            { "id": 3, "filename": "doomu.wad" },
-            { "id": 4, "filename": "SIGIL_II_V1_0.WAD" },
+            { "id": 2, "filename": "sigilii.ini" },
+            { "id": 3, "filename": "doom.elf" },
+            { "id": 4, "filename": "doomu.wad" },
+            { "id": 5, "filename": "SIGIL_II_V1_0.WAD" },
             { "id": 7, "filename": "bank.ofsf" },
             { "id": 9, "filename": "sigil2/SIGILII.cfg" },
             { "id": 10, "filename": "sigil2/SIGILII_0.sav" },
@@ -21,8 +22,7 @@
             { "id": 16, "filename": "sigil2/SIGILII_6.sav" },
             { "id": 17, "filename": "sigil2/SIGILII_7.sav" },
             { "id": 18, "filename": "sigil2/SIGILII_8.sav" },
-            { "id": 19, "filename": "sigil2/SIGILII_9.sav" },
-            { "id": 20, "filename": "sigil2/SIGILII.sav" }
+            { "id": 19, "filename": "sigil2/SIGILII_9.sav" }
         ]
     }
 }

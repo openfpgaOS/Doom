@@ -71,6 +71,7 @@ extern "C" {
 #include "of_midi.h"
 #include "of_caps.h"
 #include "of_services.h"
+#include "of_config.h"
 /* Note: of_gpu.h is intentionally NOT included here -- it has per-app
  * static state (ring buffer pointers) and must be included from exactly
  * one TU. Standard C library functions come from upstream musl headers

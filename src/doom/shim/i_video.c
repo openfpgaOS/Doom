@@ -7,6 +7,7 @@
  */
 
 #include "config.h"
+#include "deh_str.h"
 #include "of.h"
 #include "i_system.h"
 #include "i_video.h"
@@ -21,6 +22,7 @@
 #include "m_misc.h"
 #include "r_gpu.h"
 #include "r_perf.h"
+#include "w_wad.h"
 #include "z_zone.h"
 #include "m_controls.h"
 
@@ -77,7 +79,7 @@ static grabmouse_callback_t grabmouse_cb;
 
 #define GPU_PACE_SAMPLES 32
 #define GPU_PACE_WARMUP_SAMPLES 8
-#define DOOM_CAPPED_VTOTAL OF_VIDEO_VTOTAL_61_25HZ
+#define DOOM_VTOTAL_52_25HZ 302u
 #define GPU_PACE_MIN_US 16667u
 #define GPU_PACE_MAX_US 23800u
 #define GPU_PACE_MARGIN_US 1000u
@@ -114,6 +116,9 @@ typedef struct
 } gpu_adaptive_pace_t;
 
 static gpu_adaptive_pace_t gpu_pace;
+static int failed_refresh_mode = -1;
+static unsigned int video_present_count;
+static int startup_refresh_hold_logged;
 
 static void I_ApplyCappedRefresh(void);
 
@@ -122,6 +127,7 @@ static void I_CheckAdaptivePacingOptions(void)
     if (gpu_pace.options_checked)
         return;
 
+    frame_interpolation = M_EffectiveRefreshMode() == REFRESH_MODE_VRR;
     gpu_pace.enabled = M_CheckParm("-noadaptivepacing") <= 0;
     gpu_pace.pocket_pacing_enabled = M_CheckParm("-nopocketpacing") <= 0
                                    && M_CheckParm("-fixed60") <= 0;
@@ -137,6 +143,58 @@ static void I_CheckAdaptivePacingOptions(void)
                               && M_CheckParm("-fixed60") <= 0;
     I_SetPocketPacing(gpu_pace.pocket_pacing_enabled);
     gpu_pace.options_checked = 1;
+}
+
+static unsigned int I_RefreshModeVTotal(int mode)
+{
+    switch (mode)
+    {
+        case REFRESH_MODE_PAL:
+            return OF_VIDEO_VTOTAL_50HZ;
+        case REFRESH_MODE_NTSC:
+            return OF_VIDEO_VTOTAL_60HZ;
+        case REFRESH_MODE_52_25:
+        default:
+            return DOOM_VTOTAL_52_25HZ;
+    }
+}
+
+static void I_RestoreFallbackRefresh(int failed_mode, const char *reason)
+{
+    if (failed_refresh_mode != failed_mode)
+    {
+        printf("Doom video: refresh %s failed (%s); falling back to 60\n",
+               M_RefreshModeName(failed_mode), reason);
+        failed_refresh_mode = failed_mode;
+    }
+
+    if (gpu_pace.current_vtotal != OF_VIDEO_VTOTAL_60HZ)
+    {
+        of_video_set_refresh_vtotal(OF_VIDEO_VTOTAL_60HZ);
+        gpu_pace.current_vtotal = OF_VIDEO_VTOTAL_60HZ;
+        gpu_pace.last_vtotal_update_us = of_time_us();
+        R_Perf_PacingSetVTotal(OF_VIDEO_VTOTAL_60HZ);
+    }
+}
+
+static int I_WaitForNextVBlank(uint32_t *last_seen_vblank,
+                               unsigned int timeout_us)
+{
+    unsigned int start_us = of_time_us();
+    of_video_timing_t timing;
+
+    for (;;)
+    {
+        of_video_get_timing(&timing);
+        if (timing.vblank_count != *last_seen_vblank)
+        {
+            *last_seen_vblank = timing.vblank_count;
+            return 1;
+        }
+
+        if ((unsigned int)(of_time_us() - start_us) >= timeout_us)
+            return 0;
+    }
 }
 
 static unsigned int I_AdaptivePacePercentile(void)
@@ -507,9 +565,36 @@ static void I_SetDoomVideoMode(void)
 
 static void I_ApplyCappedRefresh(void)
 {
-    of_video_set_refresh_vtotal(DOOM_CAPPED_VTOTAL);
-    gpu_pace.current_vtotal = DOOM_CAPPED_VTOTAL;
-    R_Perf_PacingSetVTotal(DOOM_CAPPED_VTOTAL);
+    int mode = M_EffectiveRefreshMode();
+    unsigned int vtotal = mode == failed_refresh_mode
+                         ? OF_VIDEO_VTOTAL_60HZ
+                         : I_RefreshModeVTotal(mode);
+
+    if (video_present_count < 2)
+    {
+        if (!startup_refresh_hold_logged)
+        {
+            printf("Doom video: holding 60Hz until first app presents\n");
+            startup_refresh_hold_logged = 1;
+        }
+        vtotal = OF_VIDEO_VTOTAL_60HZ;
+    }
+
+    if (gpu_pace.current_vtotal == vtotal)
+        return;
+
+    if (video_present_count < 2)
+        printf("Doom video: startup V_TOTAL=%u\n", vtotal);
+    else if (mode == failed_refresh_mode)
+        printf("Doom video: refresh %s using fallback V_TOTAL=%u\n",
+               M_RefreshModeName(mode), vtotal);
+    else
+        printf("Doom video: refresh %s V_TOTAL=%u\n",
+               M_RefreshModeName(mode), vtotal);
+    of_video_set_refresh_vtotal(vtotal);
+    gpu_pace.current_vtotal = vtotal;
+    gpu_pace.last_vtotal_update_us = of_time_us();
+    R_Perf_PacingSetVTotal(vtotal);
 }
 
 void I_InitGraphics(void)
@@ -526,7 +611,8 @@ void I_InitGraphics(void)
     gpu_pace.refresh_period_us = GPU_PACE_MIN_US;
     gpu_pace.vrr_target_us = 0;
     of_video_set_display_mode(OF_DISPLAY_FRAMEBUFFER);
-    I_ApplyCappedRefresh();
+    video_present_count = 0;
+    startup_refresh_hold_logged = 0;
 
     /* Clear all three 320x200 back buffers once. */
     for (int buf = 0; buf < 3; buf++) {
@@ -538,6 +624,8 @@ void I_InitGraphics(void)
 
     I_VideoBuffer = video_buf;
     V_RestoreBuffer();
+    I_SetPalette(W_CacheLumpName(DEH_String("PLAYPAL"), PU_CACHE));
+    printf("Doom video: restored PLAYPAL after graphics init\n");
     R_GPU_Init();
     screenvisible = true;
 
@@ -568,17 +656,20 @@ void I_StartFrame(void)
 {
     static uint32_t last_seen_vblank = 0;
     static int last_frame_interpolation = -1;
-    of_video_timing_t timing;
+    int effective_refresh_mode = M_EffectiveRefreshMode();
 
-    /* VRR off (capped): request ~61.25Hz and let the wall-clock 35Hz tic
-     * clock run as-is.  61.25/35 = 7/4, giving a stable 2/2/2/1 refresh
-     * hold cadence instead of the 60Hz 12/7 beat. */
+    frame_interpolation = effective_refresh_mode == REFRESH_MODE_VRR;
+
+    /* Fixed refresh: request the selected V_TOTAL and let the wall-clock
+     * 35Hz tic clock run as-is.  VRR mode restores the adaptive path. */
     if (!frame_interpolation)
     {
-        I_ApplyCappedRefresh();
         last_frame_interpolation = 0;
         if (!I_PocketPacingActive())
+        {
+            I_ApplyCappedRefresh();
             return;
+        }
     }
     else if (!I_PocketPacingActive())
     {
@@ -589,18 +680,29 @@ void I_StartFrame(void)
      * full vsync period as its budget.  Poll on vblank_count rather
      * than of_video_wait_flip() because the GPU triggered-flip path
      * queues CMD_FLIPs that of_video_wait_flip() does not track. */
-    for (;;) {
-        of_video_get_timing(&timing);
-        if (timing.vblank_count != last_seen_vblank)
-            break;
+    if (!I_WaitForNextVBlank(&last_seen_vblank, 100000u))
+    {
+        if (!frame_interpolation)
+            I_RestoreFallbackRefresh(effective_refresh_mode, "no vblank");
+        else
+            I_RestoreFallbackRefresh(REFRESH_MODE_VRR, "no vblank");
+        return;
     }
-    last_seen_vblank = timing.vblank_count;
+
+    if (!frame_interpolation)
+    {
+        I_ApplyCappedRefresh();
+        return;
+    }
 
     if (frame_interpolation
-               && last_frame_interpolation == 0
+               && last_frame_interpolation != 1
                && gpu_pace.current_vtotal != OF_VIDEO_VTOTAL_60HZ) {
+        printf("Doom video: refresh VRR V_TOTAL=%u\n",
+               OF_VIDEO_VTOTAL_60HZ);
         of_video_set_refresh_vtotal(OF_VIDEO_VTOTAL_60HZ);
         gpu_pace.current_vtotal = OF_VIDEO_VTOTAL_60HZ;
+        gpu_pace.last_vtotal_update_us = of_time_us();
         gpu_pace.refresh_period_us = GPU_PACE_MIN_US;
         R_Perf_PacingSetVTotal(OF_VIDEO_VTOTAL_60HZ);
     }
@@ -709,7 +811,7 @@ void I_FinishUpdate(void)
     if (I_PocketPacingActive()) {
         last_flip_us = 0;
         /* Dynamic VRR only when interpolating; capped mode holds the
-         * fixed 61.25Hz target in I_StartFrame. */
+         * selected fixed-refresh target in I_StartFrame. */
         if (gpu_pace.pocket_vrr_enabled && frame_interpolation) {
             unsigned int prepare_us = R_Perf_PacingCurrentPrepareUS();
             if (prepare_us > 0)
@@ -717,6 +819,7 @@ void I_FinishUpdate(void)
         }
         if (R_GPU_UsingDirectFramebuffer()) {
             if (R_GPU_PresentFrame()) {
+                video_present_count++;
                 R_Perf_CountPresentedFrame(1);
                 R_Perf_PacingFrameQueued();
                 R_Perf_FrameEnd();
@@ -729,6 +832,7 @@ void I_FinishUpdate(void)
         uint8_t *fb = of_video_surface();
         memcpy(fb, I_VideoBuffer, SCREENWIDTH * SCREENHEIGHT);
         of_video_flip();
+        video_present_count++;
         R_Perf_CountPresentedFrame(0);
         R_Perf_PacingFrameQueued();
         R_Perf_FrameEnd();
@@ -741,6 +845,7 @@ void I_FinishUpdate(void)
         if (R_GPU_PresentFrame())
         {
             I_AdaptiveGpuPaceQueued();
+            video_present_count++;
             R_Perf_CountPresentedFrame(1);
             R_Perf_PacingFrameQueued();
             R_Perf_FrameEnd();
@@ -767,6 +872,7 @@ void I_FinishUpdate(void)
     uint8_t *fb = of_video_surface();
     memcpy(fb, I_VideoBuffer, SCREENWIDTH * SCREENHEIGHT);
     of_video_flip();
+    video_present_count++;
     R_Perf_EndStage(R_PERF_STAGE_BLIT, blit_start);
     R_Perf_CountPresentedFrame(0);
     R_Perf_PacingFrameQueued();

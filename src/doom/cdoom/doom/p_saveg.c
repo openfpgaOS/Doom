@@ -19,6 +19,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "dstrings.h"
 #include "deh_main.h"
@@ -38,6 +39,47 @@ int savegamelength;
 boolean savegame_error;
 
 #ifndef OF_PC
+#define OPENFPGA_SAVE_PREFIX_MAX 48
+static char openfpga_save_prefix[OPENFPGA_SAVE_PREFIX_MAX] = "doom";
+static char openfpga_save_filenames[10][64];
+
+void P_SetOpenFPGASavePrefix(const char *prefix)
+{
+    const char *base;
+    size_t len;
+
+    if (prefix == NULL || prefix[0] == '\0')
+    {
+        return;
+    }
+
+    base = prefix;
+    for (const char *p = prefix; *p; ++p)
+    {
+        if (*p == '/' || *p == '\\')
+        {
+            base = p + 1;
+        }
+    }
+
+    len = 0;
+    while (base[len] != '\0'
+        && base[len] != '.'
+        && len < sizeof(openfpga_save_prefix) - 1)
+    {
+        openfpga_save_prefix[len] = base[len];
+        ++len;
+    }
+
+    if (len == 0)
+    {
+        return;
+    }
+
+    openfpga_save_prefix[len] = '\0';
+    memset(openfpga_save_filenames, 0, sizeof(openfpga_save_filenames));
+}
+
 static byte *save_buffer;
 static size_t save_buffer_capacity;
 static size_t save_buffer_length;
@@ -106,8 +148,6 @@ char *P_TempSaveGameFile(void)
 char *P_SaveGameFile(int slot)
 {
 #ifndef OF_PC
-    static char filenames[10][16];
-
     if (slot < 0)
     {
         slot = 0;
@@ -117,13 +157,14 @@ char *P_SaveGameFile(int slot)
         slot = 9;
     }
 
-    if (filenames[slot][0] == '\0')
+    if (openfpga_save_filenames[slot][0] == '\0')
     {
-        DEH_snprintf(filenames[slot], sizeof(filenames[slot]),
-                     "doom_%d.sav", slot);
+        DEH_snprintf(openfpga_save_filenames[slot],
+                     sizeof(openfpga_save_filenames[slot]),
+                     "%s_%d.sav", openfpga_save_prefix, slot);
     }
 
-    return filenames[slot];
+    return openfpga_save_filenames[slot];
 #else
     static char *filename = NULL;
     static size_t filename_size = 0;

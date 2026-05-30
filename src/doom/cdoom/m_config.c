@@ -548,11 +548,21 @@ static default_t	doom_defaults_list[] =
     //!
     // @game doom
     //
-    // Sub-tic frame interpolation.  0 = capped (one rendered frame per
-    // gametic, DOS cadence), 1 = uncapped (interpolated motion).
+    // Legacy sub-tic frame interpolation flag.  The openfpgaOS port derives
+    // this from refresh_mode at runtime.
     //
 
     CONFIG_VARIABLE_INT(frame_interpolation),
+
+    //!
+    // @game doom
+    //
+    // openfpgaOS refresh mode.  Saved values use 2=52.25 and 6=VRR.
+    // Other old fixed-refresh values migrate to 52.25.  PAL/NTSC are
+    // display-only effective modes when Analogizer is active.
+    //
+
+    CONFIG_VARIABLE_INT(refresh_mode),
 
     //!
     // Number of sounds that will be played simultaneously.

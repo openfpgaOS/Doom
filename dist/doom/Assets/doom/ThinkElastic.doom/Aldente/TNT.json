@@ -7,10 +7,11 @@
         },
         "data_slots": [
             { "id": 1, "filename": "os.bin" },
-            { "id": 2, "filename": "doom.elf" },
-            { "id": 3, "filename": "TNT.WAD" },
-            { "id": 4, "filename": "ALDENTE.wad" },
-            { "id": 5, "filename": "ALDENTE.deh" },
+            { "id": 2, "filename": "aldentetnt.ini" },
+            { "id": 3, "filename": "doom.elf" },
+            { "id": 4, "filename": "TNT.WAD" },
+            { "id": 5, "filename": "ALDENTE.wad" },
+            { "id": 6, "filename": "ALDENTE.deh" },
             { "id": 7, "filename": "bank.ofsf" },
             { "id": 9, "filename": "AldenteTNT.cfg" },
             { "id": 10, "filename": "AldenteTNT_0.sav" },
@@ -22,8 +23,7 @@
             { "id": 16, "filename": "AldenteTNT_6.sav" },
             { "id": 17, "filename": "AldenteTNT_7.sav" },
             { "id": 18, "filename": "AldenteTNT_8.sav" },
-            { "id": 19, "filename": "AldenteTNT_9.sav" },
-            { "id": 20, "filename": "AldenteTNT.sav" }
+            { "id": 19, "filename": "AldenteTNT_9.sav" }
         ]
     }
 }

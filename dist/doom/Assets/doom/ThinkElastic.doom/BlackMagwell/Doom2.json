@@ -7,9 +7,10 @@
         },
         "data_slots": [
             { "id": 1, "filename": "os.bin" },
-            { "id": 2, "filename": "doom.elf" },
-            { "id": 3, "filename": "DOOM2.WAD" },
-            { "id": 4, "filename": "BLACK_MAGWELL.wad" },
+            { "id": 2, "filename": "blackmagwelldoom2.ini" },
+            { "id": 3, "filename": "doom.elf" },
+            { "id": 4, "filename": "DOOM2.WAD" },
+            { "id": 5, "filename": "BLACK_MAGWELL.wad" },
             { "id": 7, "filename": "bank.ofsf" },
             { "id": 9, "filename": "BlackMagwellDoom2.cfg" },
             { "id": 10, "filename": "BlackMagwellDoom2_0.sav" },
@@ -21,8 +22,7 @@
             { "id": 16, "filename": "BlackMagwellDoom2_6.sav" },
             { "id": 17, "filename": "BlackMagwellDoom2_7.sav" },
             { "id": 18, "filename": "BlackMagwellDoom2_8.sav" },
-            { "id": 19, "filename": "BlackMagwellDoom2_9.sav" },
-            { "id": 20, "filename": "BlackMagwellDoom2.sav" }
+            { "id": 19, "filename": "BlackMagwellDoom2_9.sav" }
         ]
     }
 }

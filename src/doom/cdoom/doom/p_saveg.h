@@ -63,6 +63,7 @@ extern FILE *save_stream;
 extern boolean savegame_error;
 
 #ifndef OF_PC
+void P_SetOpenFPGASavePrefix(const char *prefix);
 void P_SaveBufferForRead(byte *buffer, size_t length);
 void P_SaveBufferForWrite(byte *buffer, size_t capacity);
 void P_SaveBufferClear(void);

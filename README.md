@@ -2,7 +2,7 @@
 
 Chocolate Doom port for the Analogue Pocket using openfpgaOS.
 
-Current release: `1.1.7` (`2026-05-26`).
+Current release: `1.1.9` (`2026-05-29`).
 
 This repository contains the Doom custom core, the openfpgaOS SDK subset it
 builds against, instance files, runtime binaries, and the Doom-specific shims
@@ -35,7 +35,7 @@ Supported:
 - Ultimate Doom
 - Doom II
 - Final Doom: TNT and Plutonia
-- Chex Quest
+- Chex Quest with `chex.deh`
 - Vanilla-compatible PWADs
 - Vanilla DeHackEd and many BEX patches
 - SIGIL using the compatibility WAD
@@ -118,18 +118,19 @@ Important data slots:
 | Slot | Purpose |
 |------|---------|
 | 1 | `os.bin` |
-| 2 | `doom.elf` |
-| 3 | IWAD |
-| 4 | Optional PWAD |
-| 5 | Optional external DEH/BEX patch |
+| 2 | Per-instance OS launch `.ini` |
+| 3 | `doom.elf` |
+| 4 | IWAD |
+| 5 | Optional PWAD |
+| 6 | Optional external DEH/BEX patch |
 | 7 | `bank.ofsf` MIDI/SoundFont bank |
 | 9 | Per-instance config file |
 | 10-19 | Per-instance Doom save slots |
-| 20 | Legacy PocketDoom save migration slot |
 
-The loader injects `-iwad slot:3 -noautoload`. If slot 4 opens, it adds
-`-merge slot:4 -dehlump`. If slot 5 looks like a DeHackEd patch, it adds
-`-deh slot:5`.
+Each instance maps slot 2 to a small `.ini` file in `Assets/doom/common/`.
+The `[os] ARGS` line names the IWAD/PWAD/DEH, config file, and save prefix
+for that instance. Doom uses those argv filenames directly instead of
+inferring game data from fixed slot numbers.
 
 ## Instances
 
@@ -170,11 +171,12 @@ that mod.
 ## Saves And Config
 
 Each instance has its own config file in slot 9 and ten save slots in slots
-10-19. Save names are filtered by game id so stale nonvolatile memory from a
+10-19. The slot 2 `.ini` passes the config filename and save filename prefix to
+Doom, and save names are filtered by game id so stale nonvolatile memory from a
 different instance is ignored.
 
-Slot 20 is reserved for one-time migration of older PocketDoom-style single save
-files into this port's per-instance save layout.
+Older PocketDoom-style single save migration is attempted only when a
+`legacy.sav` file is visible to the app.
 
 New save names default to the current map name.
 

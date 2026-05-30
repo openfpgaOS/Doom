@@ -345,6 +345,19 @@ struct of_services_table {
     void      (*video_get_caps)(of_video_caps_t *out);
     int       (*video_check_mode)(const of_video_mode_t *mode,
                                   of_video_mode_t *normalized);
+
+    /* -- OS/app configuration (append-only) --
+     * Parsed from os.ini at boot. Section/key lookup is
+     * case-insensitive; values preserve case and internal spaces. */
+    int       (*config_get)(const char *section, const char *key,
+                            char *out, uint32_t out_len);
+    int       (*config_get_int)(const char *section, const char *key,
+                                int default_value);
+    int       (*config_get_bool)(const char *section, const char *key,
+                                 int default_value);
+    int       (*config_next)(const char *section, uint32_t *cursor,
+                             char *key_out, uint32_t key_len,
+                             char *value_out, uint32_t value_len);
 };
 
 #ifndef OF_PC

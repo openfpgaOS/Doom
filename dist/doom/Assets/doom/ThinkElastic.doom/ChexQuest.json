@@ -7,8 +7,10 @@
         },
         "data_slots": [
             { "id": 1, "filename": "os.bin" },
-            { "id": 2, "filename": "doom.elf" },
-            { "id": 3, "filename": "chex.wad" },
+            { "id": 2, "filename": "chexquest.ini" },
+            { "id": 3, "filename": "doom.elf" },
+            { "id": 4, "filename": "chex.wad" },
+            { "id": 6, "filename": "chex.deh" },
             { "id": 7, "filename": "bank.ofsf" },
             { "id": 9, "filename": "chex/ChexQuest.cfg" },
             { "id": 10, "filename": "chex/ChexQuest_0.sav" },
@@ -20,8 +22,7 @@
             { "id": 16, "filename": "chex/ChexQuest_6.sav" },
             { "id": 17, "filename": "chex/ChexQuest_7.sav" },
             { "id": 18, "filename": "chex/ChexQuest_8.sav" },
-            { "id": 19, "filename": "chex/ChexQuest_9.sav" },
-            { "id": 20, "filename": "chex/ChexQuest.sav" }
+            { "id": 19, "filename": "chex/ChexQuest_9.sav" }
         ]
     }
 }

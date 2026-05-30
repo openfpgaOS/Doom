@@ -74,7 +74,7 @@ typedef struct of_video_timing {
 #define OF_VIDEO_MAX_HEIGHT      600
 #define OF_VIDEO_MAX_STRIDE      2048
 #define OF_VIDEO_MAX_FRAME_BYTES (1024u * 1024u)
-#define OF_VIDEO_PHYSICAL_WIDTH  640
+#define OF_VIDEO_PHYSICAL_WIDTH  320
 #define OF_VIDEO_PHYSICAL_HEIGHT 240
 
 #ifndef OF_VIDEO_MODE_T_DEFINED

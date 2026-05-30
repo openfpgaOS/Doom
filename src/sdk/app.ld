@@ -21,9 +21,9 @@ ENTRY(_start)
 
 MEMORY {
     APP_BRAM (rwx) : ORIGIN = 0x00004000, LENGTH = 0x3800
-    /* Ends at 0x13E7C000: below the dynamic audio reservation and
-     * 512 KB app stack in the no-SoundFont case. */
-    SDRAM    (rwx) : ORIGIN = 0x10400000, LENGTH = 0x03A7C000
+    /* Ends at 0x13A7C000: below the 4 MB OS file cache, dynamic audio
+     * reservation, and 512 KB app stack in the no-SoundFont case. */
+    SDRAM    (rwx) : ORIGIN = 0x10400000, LENGTH = 0x0367C000
 }
 
 SECTIONS {

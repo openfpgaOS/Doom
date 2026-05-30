@@ -41,6 +41,9 @@
 #include "i_video.h"
 #include "m_config.h"
 #include "m_misc.h"
+#ifndef OF_PC
+#include "of_analogizer.h"
+#endif
 #include "v_video.h"
 #include "w_wad.h"
 #include "z_zone.h"
@@ -80,10 +83,10 @@ int			showMessages = 1;
 // Blocky mode, has default, 0 = high, 1 = normal
 int			detailLevel = 0;
 
-// Repurposed Graphic Detail menu slot — toggles sub-tic frame
-// interpolation instead.  0 = capped (one frame per gametic, DOS
-// cadence), 1 = uncapped (interpolated sub-tic motion).
+// Repurposed Graphic Detail menu slot — selects the display refresh policy.
+// frame_interpolation is derived from refresh_mode == REFRESH_MODE_VRR.
 int			frame_interpolation = 0;
+int                     refresh_mode = REFRESH_MODE_52_25;
 int			screenblocks = 9;
 
 // temp for screenblocks (0-9)
@@ -370,7 +373,7 @@ menuitem_t OptionsMenu[]=
 {
     {1,"M_ENDGAM",	M_EndGame,'e'},
     {1,"M_MESSG",	M_ChangeMessages,'m'},
-    {1,"",		M_ChangeDetail,'v'},
+    {2,"",		M_ChangeDetail,'r'},
     {2,"M_SCRNSZ",	M_SizeDisplay,'s'},
     {-1,"",0,'\0'},
     {2,"M_MSENS",	M_ChangeSensitivity,'m'},
@@ -1118,53 +1121,119 @@ void M_Episode(int choice)
 //
 static const char *msgNames[2] = {"M_MSGOFF","M_MSGON"};
 
+#define DOOM_ANLG_VIDEO_YC_PAL      0x4u
+#define DOOM_ANLG_VIDEO_POCKET_OFF  0x8u
+
+static int M_AnalogizerRefreshMode(void)
+{
+#ifndef OF_PC
+    of_analogizer_state_t state;
+
+    if (of_analogizer_state(&state) < 0 || !state.enabled)
+        return -1;
+
+    if ((state.video_mode & ~DOOM_ANLG_VIDEO_POCKET_OFF)
+        == DOOM_ANLG_VIDEO_YC_PAL)
+    {
+        return REFRESH_MODE_PAL;
+    }
+
+    return REFRESH_MODE_NTSC;
+#else
+    return -1;
+#endif
+}
+
+static int M_NormalizeRefreshMode(int mode)
+{
+    return mode == REFRESH_MODE_VRR ? REFRESH_MODE_VRR : REFRESH_MODE_52_25;
+}
+
+int M_EffectiveRefreshMode(void)
+{
+    int analogizer_mode = M_AnalogizerRefreshMode();
+
+    if (analogizer_mode >= 0)
+        return analogizer_mode;
+
+    return M_NormalizeRefreshMode(refresh_mode);
+}
+
+const char *M_RefreshModeName(int mode)
+{
+    switch (mode)
+    {
+        case REFRESH_MODE_PAL:
+            return "PAL";
+        case REFRESH_MODE_NTSC:
+            return "NTSC";
+        case REFRESH_MODE_VRR:
+            return "VRR";
+        case REFRESH_MODE_52_25:
+        default:
+            return "52.25";
+    }
+}
+
+#define REFRESH_MENU_SCALE_NUM 7
+#define REFRESH_MENU_SCALE_DEN 4
+
+static int M_RefreshTextScale(int value)
+{
+    return (value * REFRESH_MENU_SCALE_NUM) / REFRESH_MENU_SCALE_DEN;
+}
+
+static int M_DrawRefreshString(int x, int y, const char *text)
+{
+    const char *p;
+
+    for (p = text; *p; ++p)
+    {
+        int c = *p - HU_FONTSTART;
+
+        if (c < 0 || c >= HU_FONTSIZE)
+        {
+            x += 8;
+            continue;
+        }
+
+        V_DrawPatchScaled(x, y, hu_font[c],
+                          REFRESH_MENU_SCALE_NUM,
+                          REFRESH_MENU_SCALE_DEN);
+        x += M_RefreshTextScale(SHORT(hu_font[c]->width));
+    }
+
+    return x;
+}
+
 void M_DrawOptions(void)
 {
     V_DrawPatchDirect(108, 15, W_CacheLumpName(DEH_String("M_OPTTTL"),
                                                PU_CACHE));
 
-    // Repurposed Graphic Detail slot — draw "VRR:" by pixel-doubling
-    // hu_font characters next to the M_MSGON/M_MSGOFF indicator (same
-    // patches as the Messages line) for a compact "VRR:On"/"VRR:Off"
-    // layout.  Vertical position is computed from the M_MSG patch's
-    // own visual top so the doubled letters share a baseline with it
-    // regardless of the patch's leftoffset/topoffset.
+    // Repurposed Graphic Detail slot: draw the refresh selector with
+    // hu_font glyphs because Doom has no WAD patch for this label.
     {
         patch_t *msg;
-        int msg_x;
         int msg_y;
         int visual_top;
         int hu_h;
-        int doubled_y;
-        const char *label = "VRR:";
-        const char *p;
-        int lx;
+        int refresh_y;
+        const char *value;
 
-        msg = (patch_t *)W_CacheLumpName(
-            DEH_String(msgNames[frame_interpolation]), PU_CACHE);
+        msg = (patch_t *)W_CacheLumpName(DEH_String(msgNames[0]), PU_CACHE);
         msg_y = OptionsDef.y + LINEHEIGHT * detail;
         visual_top = msg_y - SHORT(msg->topoffset);
 
-        /* Center doubled hu_font vertically against the M_MSG patch
+        /* Center the hu_font label vertically against the M_MSG patch
          * (heights are close but not identical). */
         hu_h = SHORT(hu_font[0]->height);
-        doubled_y = visual_top + (SHORT(msg->height) - hu_h * 2) / 2;
+        refresh_y = visual_top
+                  + (SHORT(msg->height) - M_RefreshTextScale(hu_h)) / 2;
 
-        lx = OptionsDef.x;
-        for (p = label; *p; ++p)
-        {
-            int c = *p - HU_FONTSTART;
-            if (c < 0 || c >= HU_FONTSIZE)
-            {
-                lx += 8;
-                continue;
-            }
-            V_DrawPatchDoubled(lx, doubled_y, hu_font[c]);
-            lx += SHORT(hu_font[c]->width) * 2;
-        }
-
-        msg_x = lx + 4 + SHORT(msg->leftoffset);
-        V_DrawPatchDirect(msg_x, msg_y, msg);
+        value = M_RefreshModeName(M_EffectiveRefreshMode());
+        M_DrawRefreshString(OptionsDef.x, refresh_y, "REFRESH:");
+        M_DrawRefreshString(OptionsDef.x + 120, refresh_y, value);
     }
 
     V_DrawPatchDirect(OptionsDef.x + 120, OptionsDef.y + LINEHEIGHT * messages,
@@ -1359,13 +1428,27 @@ void M_ChangeSensitivity(int choice)
 
 void M_ChangeDetail(int choice)
 {
+    int analogizer_mode = M_AnalogizerRefreshMode();
     (void) choice;
-    frame_interpolation = 1 - frame_interpolation;
 
-    if (frame_interpolation)
-	players[consoleplayer].message = "Frame Interpolation On";
-    else
-	players[consoleplayer].message = "Frame Interpolation Off";
+    if (analogizer_mode >= 0)
+    {
+        frame_interpolation = 0;
+        players[consoleplayer].message =
+            analogizer_mode == REFRESH_MODE_PAL
+            ? "Refresh fixed by Analogizer PAL"
+            : "Refresh fixed by Analogizer NTSC";
+        return;
+    }
+
+    refresh_mode = M_NormalizeRefreshMode(refresh_mode);
+    refresh_mode = refresh_mode == REFRESH_MODE_VRR
+                 ? REFRESH_MODE_52_25
+                 : REFRESH_MODE_VRR;
+
+    frame_interpolation = refresh_mode == REFRESH_MODE_VRR;
+    players[consoleplayer].message =
+        frame_interpolation ? "Refresh VRR" : "Refresh 52.25";
 
     M_SaveSettingsIfNeeded();
 }
@@ -1904,7 +1987,7 @@ boolean M_Responder (event_t* ev)
 	}
         else if (key == key_menu_detail)   // Detail toggle
         {
-	    M_ChangeDetail(0);
+	    M_ChangeDetail(1);
 	    S_StartSound(NULL,sfx_swtchn);
 	    return true;
         }

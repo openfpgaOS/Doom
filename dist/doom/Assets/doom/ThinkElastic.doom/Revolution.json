@@ -7,9 +7,10 @@
         },
         "data_slots": [
             { "id": 1, "filename": "os.bin" },
-            { "id": 2, "filename": "doom.elf" },
-            { "id": 3, "filename": "DOOM2.WAD" },
-            { "id": 4, "filename": "TVR!.WAD" },
+            { "id": 2, "filename": "revolution.ini" },
+            { "id": 3, "filename": "doom.elf" },
+            { "id": 4, "filename": "DOOM2.WAD" },
+            { "id": 5, "filename": "TVR!.WAD" },
             { "id": 7, "filename": "bank.ofsf" },
             { "id": 9, "filename": "revolution/Revolution.cfg" },
             { "id": 10, "filename": "revolution/Revolution_0.sav" },
@@ -21,8 +22,7 @@
             { "id": 16, "filename": "revolution/Revolution_6.sav" },
             { "id": 17, "filename": "revolution/Revolution_7.sav" },
             { "id": 18, "filename": "revolution/Revolution_8.sav" },
-            { "id": 19, "filename": "revolution/Revolution_9.sav" },
-            { "id": 20, "filename": "revolution/Revolution.sav" }
+            { "id": 19, "filename": "revolution/Revolution_9.sav" }
         ]
     }
 }
