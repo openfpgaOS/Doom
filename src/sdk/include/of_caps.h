@@ -89,9 +89,6 @@ struct of_capabilities {
     /* OS info */
     uint32_t os_version;        /* Packed: major.minor.patch */
     uint32_t cpu_freq_hz;       /* CPU clock frequency */
-    uint32_t services_table;    /* Address of OS services table (0 = none).
-                                 * Legacy: new apps get the same pointer
-                                 * via the AT_OF_SVC auxv tag. */
 
     /* Memory bases for inline accessors that need to translate
      * pointers without hardcoding target addresses. Added in v2. */

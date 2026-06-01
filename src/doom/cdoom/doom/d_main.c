@@ -335,7 +335,8 @@ boolean D_Display (void)
 
     // menus go directly to the screen
     M_Drawer ();          // menu is drawn even on top of everything
-    NetUpdate ();         // send out any new accumulation
+    if (netgame || net_client_connected)
+        NetUpdate ();     // send out any new accumulation
 
     if (wipe)
     {
@@ -514,18 +515,20 @@ void D_RunFrame()
         if (!frame_interp_initialized)
         {
             // Capped (one rendered frame per gametic, no sub-tic
-            // interpolation) is the default — matches DOS Doom's 35Hz
-            // discrete-step motion.  The refresh selector controls whether
-            // fixed refresh or VRR is active; frame_interpolation is derived
-            // from that effective mode for the renderer/timer code.
+            // interpolation) is the default. The refresh selector controls
+            // whether fixed refresh or VRR is active; frame_interpolation is
+            // derived from that effective mode for the renderer/timer code.
             if (M_CheckParm("-uncapped") > 0 || M_CheckParm("-interp") > 0)
                 refresh_mode = REFRESH_MODE_VRR;
             else if (M_CheckParm("-fixed60") > 0)
-                refresh_mode = REFRESH_MODE_52_25;
+                refresh_mode = REFRESH_MODE_FIXED;
             else if (M_CheckParm("-capped") > 0
                   || M_CheckParm("-nointerp") > 0)
-                refresh_mode = REFRESH_MODE_52_25;
-            frame_interpolation = M_EffectiveRefreshMode() == REFRESH_MODE_VRR;
+                refresh_mode = REFRESH_MODE_FIXED;
+            {
+                int mode = M_EffectiveRefreshMode();
+                frame_interpolation = M_RefreshModeUsesInterpolation(mode);
+            }
             frame_interp_initialized = 1;
         }
 
@@ -560,24 +563,17 @@ void D_RunFrame()
             else
             {
                 uint64_t now_us = I_GetDisplayTimeUS();
-                uint64_t base_us = D_GameLoopStartTimeUS();
-                uint64_t rel_us = now_us > base_us ? now_us - base_us : 0;
-                uint64_t tic_start_us = ((uint64_t)gametic * 1000000ULL) / TICRATE;
-                uint64_t dt_us = 0;
+                uint64_t phase_us = (now_us * TICRATE) % 1000000ULL;
 
-                if (gametic > 0 && rel_us > tic_start_us)
-                {
-                    dt_us = rel_us - tic_start_us;
-                }
-
-                if (dt_us >= (1000000ULL + TICRATE - 1) / TICRATE)
-                {
-                    fractionaltic = FRACUNIT;
-                }
-                else
-                {
-                    fractionaltic = (fixed_t)((dt_us * TICRATE * FRACUNIT) / 1000000ULL);
-                }
+                /* The renderer only keeps the latest previous/current tic
+                 * pair.  Use the display clock's fractional tic phase for
+                 * the blend, and let gametic select the pair.  Deriving the
+                 * phase from gametic itself, or from D_StartGameLoop(), is
+                 * fragile because the loop starts at an arbitrary point
+                 * inside the global 35 Hz timer tick.  Align to the same
+                 * timer phase that TryRunTics() uses. */
+                fractionaltic = (fixed_t)((phase_us * FRACUNIT)
+                                          / 1000000ULL);
             }
         }
         else

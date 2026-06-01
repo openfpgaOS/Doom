@@ -4,7 +4,7 @@
 #include "of.h"
 #include "of_caps.h"
 #ifndef OF_PC
-#include "of_video.h"
+#include "doom_video_refresh.h"
 #include "doom_loading_logo.h"
 #endif
 #include "doomtype.h"
@@ -38,7 +38,7 @@ static void ShowLoadingLogo(void)
     unsigned int dst_stride;
     size_t surface_bytes;
 
-    of_video_set_refresh_vtotal(OF_VIDEO_VTOTAL_60HZ);
+    of_video_set_refresh_vtotal(DOOM_VIDEO_VTOTAL_60HZ);
     of_video_get_mode(&actual);
     if (actual.width != OF_SCREEN_W ||
         actual.height != OF_SCREEN_H ||
@@ -55,8 +55,6 @@ static void ShowLoadingLogo(void)
     dst_stride = actual.stride != 0 ? actual.stride : dst_w;
     surface_bytes = (size_t) dst_stride * dst_h;
 
-    printf("Doom logo video: mode %ux%u stride %u color %u\n",
-           dst_w, dst_h, dst_stride, (unsigned int)actual.color_mode);
     of_video_palette_bulk(doom_loading_logo_palette, 256);
 
     for (int frame = 0; frame < 3; ++frame)
@@ -95,15 +93,6 @@ static void ShowLoadingLogo(void)
         of_video_wait_flip();
     }
 
-    {
-        of_video_timing_t timing;
-
-        of_video_get_timing(&timing);
-        printf("Doom logo video: vblank=%u present=%u last=%u\n",
-               timing.vblank_count,
-               timing.present_count,
-               timing.last_presented_idx);
-    }
 }
 
 static const char *FindArgValue(int argc, char **argv, const char *name)
@@ -135,15 +124,30 @@ static void ConfigureDoomInstanceFromArgs(int argc, char **argv)
     I_MigratePocketDoomSaves();
 }
 
+static void AddDoomArg(const char *arg)
+{
+    char **newargv = realloc(myargv, (myargc + 1) * sizeof(*myargv));
+
+    assert(newargv != NULL);
+    myargv = newargv;
+    myargv[myargc++] = M_StringDuplicate(arg);
+}
+
+static void AddOpenFPGADefaultArgs(void)
+{
+    if (M_CheckParm("-mmap") == 0)
+        AddDoomArg("-mmap");
+}
+
 #endif
 
 int main(int argc, char **argv)
 {
 #ifdef OF_PC
-    /* Doom ticks at 35 Hz. On a 60 Hz desktop, hard vsync inside
+    /* Doom ticks at TICRATE Hz. On a 60 Hz desktop, hard vsync inside
      * SDL_RenderPresent aligns each frame to a 16.67 ms boundary,
-     * which effectively quantises our 28.57 ms tic budget to every
-     * *other* vsync (= 30 Hz) and makes the game feel choppy.
+     * which can quantise the tic budget to an uneven cadence and make
+     * the game feel choppy.
      * TryRunTics already paces the loop, so disable vsync and let
      * the tic cadence drive the display rate. */
     setenv("OF_NO_VSYNC", "1", 0);
@@ -170,6 +174,9 @@ int main(int argc, char **argv)
     }
 
     M_FindResponseFile();
+#ifndef OF_PC
+    AddOpenFPGADefaultArgs();
+#endif
     M_SetExeDir();
 
     D_DoomMain();

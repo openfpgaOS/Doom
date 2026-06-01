@@ -18,6 +18,7 @@ void R_GPU_EndFrame(void);
 void R_GPU_PrepareForCPUAccess(void);
 void R_GPU_PrepareForCPUAccessRect(int x, int y, int w, int h);
 void R_GPU_TextureDataUpdated(void *ptr, unsigned int size);
+void R_GPU_TextureDataFlushAll(void);
 boolean R_GPU_PresentFrame(void);
 boolean R_GPU_UsingDirectFramebuffer(void);
 int R_GPU_CurrentDrawSlot(void);

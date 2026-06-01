@@ -23,6 +23,7 @@
 
 #include "gusconf.h"
 #include "i_sound.h"
+#include "i_timer.h"
 #include "i_video.h"
 #include "m_argv.h"
 #include "m_config.h"
@@ -44,9 +45,9 @@ int snd_samplerate = 44100;
 int snd_cachesize = 64 * 1024 * 1024;
 
 // Config variable that controls the sound buffer size.
-// We default to 28ms (1000 / 35fps = 1 buffer per tic).
+// Default to roughly one buffer per tic.
 
-int snd_maxslicetime_ms = 28;
+int snd_maxslicetime_ms = (1000 + TICRATE - 1) / TICRATE;
 
 // External command to invoke to play back music.
 

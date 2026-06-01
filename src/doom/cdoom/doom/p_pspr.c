@@ -54,8 +54,10 @@ P_SetPsprite
 {
     pspdef_t*	psp;
     state_t*	state;
+    boolean	wasactive;
 	
     psp = &player->psprites[position];
+    wasactive = psp->state != NULL;
 	
     do
     {
@@ -81,6 +83,12 @@ P_SetPsprite
 	    // coordinate set
 	    psp->sx = state->misc1 << FRACBITS;
 	    psp->sy = state->misc2 << FRACBITS;
+	}
+
+	if (!wasactive)
+	{
+	    psp->oldsx = psp->sx;
+	    psp->oldsy = psp->sy;
 	}
 	
 	// Call action routine.
@@ -849,7 +857,11 @@ void P_SetupPsprites (player_t* player)
 	
     // remove all psprites
     for (i=0 ; i<NUMPSPRITES ; i++)
+    {
 	player->psprites[i].state = NULL;
+	player->psprites[i].oldsx = player->psprites[i].sx;
+	player->psprites[i].oldsy = player->psprites[i].sy;
+    }
 		
     // spawn the gun
     player->pendingweapon = player->readyweapon;
@@ -889,4 +901,3 @@ void P_MovePsprites (player_t* player)
     player->psprites[ps_flash].sx = player->psprites[ps_weapon].sx;
     player->psprites[ps_flash].sy = player->psprites[ps_weapon].sy;
 }
-

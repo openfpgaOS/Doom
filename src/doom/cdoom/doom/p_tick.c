@@ -121,6 +121,34 @@ void P_RunThinkers (void)
 //
 // P_Ticker
 //
+static void P_SnapshotSectorInterpolation(void)
+{
+    int i;
+
+    for (i = 0; i < numsectors; i++)
+    {
+        sectors[i].oldfloorheight = sectors[i].floorheight;
+        sectors[i].oldceilingheight = sectors[i].ceilingheight;
+    }
+}
+
+static void P_UpdateSectorInterpolationList(void)
+{
+    int i;
+
+    numinterpolatedsectors = 0;
+
+    for (i = 0; i < numsectors; i++)
+    {
+        sector_t *sec = &sectors[i];
+
+        if (sec->oldfloorheight != sec->floorheight
+         || sec->oldceilingheight != sec->ceilingheight)
+        {
+            interpolatedsectors[numinterpolatedsectors++] = sec;
+        }
+    }
+}
 
 void P_Ticker (void)
 {
@@ -139,7 +167,8 @@ void P_Ticker (void)
 	return;
     }
     
-		
+    P_SnapshotSectorInterpolation();
+
     for (i=0 ; i<MAXPLAYERS ; i++)
 	if (playeringame[i])
 	    P_PlayerThink (&players[i]);
@@ -147,6 +176,7 @@ void P_Ticker (void)
     P_RunThinkers ();
     P_UpdateSpecials ();
     P_RespawnSpecials ();
+    P_UpdateSectorInterpolationList();
 
     // for par times
     leveltime++;	

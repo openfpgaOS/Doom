@@ -160,8 +160,9 @@ typedef struct player_s
 
     // --- Interpolation support (uncapped framerate) ---
     // Snapshot of player->viewz at the start of the most recent tic.
-    // x/y/angle are interpolated via player->mo->old* directly; only
-    // viewz has no mobj analogue (it combines mo->z + viewheight + bob).
+    // x/y/angle are interpolated via player->mo->old* directly; viewz has
+    // no mobj analogue (it combines mo->z + viewheight + bob). Psprite
+    // interpolation state lives in pspdef_t.
     fixed_t		oldviewz;
 
 } player_t;

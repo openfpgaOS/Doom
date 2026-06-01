@@ -1030,4 +1030,5 @@ void R_PrecacheLevel (void)
     }
 
     Z_Free(spritepresent);
+    R_GPU_TextureDataFlushAll();
 }

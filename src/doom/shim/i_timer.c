@@ -1,4 +1,4 @@
-/* i_timer.c -- openfpgaOS timer: 1/35s tics, us clock. */
+/* i_timer.c -- openfpgaOS timer: 35 Hz game tics, us clock. */
 
 #include "of.h"
 #include "i_timer.h"
@@ -15,6 +15,7 @@ static uint64_t high_us = 0;
 static uint64_t display_vblank_period_us = 16667;
 static uint64_t display_last_vblank_raw_us = 0;
 static uint32_t display_last_vblank_count = 0;
+static uint64_t display_frame_sample_raw_us = 0;
 
 /* When pocket VRR writes a new V_TOTAL it pushes the implied period
  * here so I_GetDisplayTimeUS predicts the next vblank using the value
@@ -22,22 +23,17 @@ static uint32_t display_last_vblank_count = 0;
  * of past vblank intervals. */
 static uint64_t predicted_vblank_period_us = 0;
 
-/* I_StartFrame in i_video.c waits for the next vblank so the renderer
- * gets the full vsync period.
- *
- * Two tic-clock modes:
- *  - frame_interpolation off (capped, no VRR): wall-clock derivation,
- *    35 tics/sec constant — demo/netplay safe.
- *  - frame_interpolation on (VRR active): one tic per rendered frame,
- *    advanced at the start of every frame by I_PocketAdvanceFrameTic
- *    (called from I_StartFrame after the vblank wait).  Game speed
- *    becomes (vsync rate) tics/sec: 60 tics/sec at default 60Hz,
- *    slowing in lockstep when VRR stretches V_TOTAL toward 42Hz.
- *    Each rendered frame shows a fresh gametic — no interpolation
- *    needed between frames. */
+/* Doom gameplay stays on vanilla 35 Hz wall-clock time. Display-paced modes
+ * use vblank timing in i_video.c and sub-tic interpolation without changing
+ * simulation speed. */
 static int pocket_pacing = 0;
-extern int frame_interpolation;
+static int pocket_frame_clock_started = 0;
 static uint32_t pocket_tic_count = 0;
+
+static int I_WallTic(void)
+{
+    return (int)((I_GetTimeUS() * TICRATE) / 1000000ULL);
+}
 
 static uint64_t I_RawTimeUS(void)
 {
@@ -70,6 +66,18 @@ uint64_t I_GetDisplayTimeUS(void)
     uint64_t sample_raw_us;
 
     raw_now = I_RawTimeUS();
+
+    if (display_frame_sample_raw_us != 0)
+    {
+        if (display_frame_sample_raw_us <= (uint64_t)base_us)
+            return raw_now - base_us;
+
+        if (display_frame_sample_raw_us > raw_now)
+            return raw_now - base_us;
+
+        return display_frame_sample_raw_us - base_us;
+    }
+
     of_video_get_timing(&timing);
 
     if (timing.last_vblank_us == 0 || timing.vblank_count == 0)
@@ -104,8 +112,18 @@ uint64_t I_GetDisplayTimeUS(void)
 
 void I_SetPredictedVblankPeriodUS(uint64_t period_us)
 {
-    if (period_us >= 10000 && period_us <= 30000)
+    if (period_us == 0 || (period_us >= 10000 && period_us <= 30000))
         predicted_vblank_period_us = period_us;
+}
+
+void I_SetDisplayFrameSampleUS(uint64_t raw_us)
+{
+    display_frame_sample_raw_us = raw_us;
+}
+
+void I_SetDisplayFrameSampleNow(void)
+{
+    display_frame_sample_raw_us = I_RawTimeUS();
 }
 
 void I_PocketTicAdvance(uint64_t now_us)
@@ -120,6 +138,16 @@ uint64_t I_PocketSmoothPeriodUS(void)
 
 void I_SetPocketPacing(int enabled)
 {
+    if (enabled && !pocket_pacing)
+    {
+        pocket_tic_count = (uint32_t)I_WallTic();
+        pocket_frame_clock_started = 0;
+    }
+    else if (!enabled)
+    {
+        pocket_frame_clock_started = 0;
+    }
+
     pocket_pacing = enabled ? 1 : 0;
 }
 
@@ -128,32 +156,49 @@ int I_PocketPacingActive(void)
     return pocket_pacing;
 }
 
+void I_PocketAdvanceFrameTics(unsigned int tics)
+{
+    if (pocket_pacing && tics > 0)
+    {
+        if (!pocket_frame_clock_started)
+        {
+            int wall_tic = I_WallTic();
+
+            if ((int32_t)(pocket_tic_count - (uint32_t)wall_tic) < 0)
+                pocket_tic_count = (uint32_t)wall_tic;
+
+            pocket_frame_clock_started = 1;
+        }
+
+        pocket_tic_count += (uint32_t)tics;
+    }
+}
+
 void I_PocketAdvanceFrameTic(void)
 {
-    if (frame_interpolation && pocket_pacing)
-        pocket_tic_count++;
+    I_PocketAdvanceFrameTics(1);
 }
 
 int I_GetTime(void)
 {
-    int wall_tic = (int)((I_GetTimeUS() * TICRATE) / 1000000ULL);
-
-    if (frame_interpolation && pocket_pacing)
+    if (pocket_pacing && pocket_frame_clock_started)
         return (int)pocket_tic_count;
 
-    /* Keep the per-frame counter in sync with wall-clock when interp
-     * is off so toggling on starts at a sensible tic value. */
+    /* Keep the per-frame counter in sync with wall-clock when pocket pacing
+     * is off, or before the first paced vblank, so startup code that calls
+     * TryRunTics() before I_StartFrame() cannot wait on a frozen clock. */
+    int wall_tic = I_WallTic();
     pocket_tic_count = (uint32_t)wall_tic;
     return wall_tic;
 }
 
 int I_GetTimeFrac(void)
 {
-    /* In interp mode each rendered frame already shows a fresh gametic
-     * (one tic per frame), so sub-tic interpolation isn't needed —
+    /* In paced mode each rendered frame already shows a fresh gametic
+     * (one tic per vblank), so sub-tic interpolation isn't needed —
      * fractionaltic stays at 0.  In capped mode, fall back to Doom's
      * I_GetDisplayTimeUS-based interp in d_main.c (returns -1). */
-    if (frame_interpolation && pocket_pacing)
+    if (pocket_pacing && pocket_frame_clock_started)
         return 0;
     return -1;
 }
@@ -166,7 +211,7 @@ int I_GetTimeMS(void)
 void I_Sleep(int ms)
 {
     /* TryRunTics() calls I_Sleep(1) in a tight spin-wait when it's
-     * throttling to the 35 Hz tic rate — several thousand times a
+     * throttling to the tic rate -- several thousand times a
      * second.  A busy-wait here pegs a core at 100%, causes thermal
      * throttling on laptops/handhelds, and starves the audio thread,
      * all of which show up as visible render judder.  Use a real
@@ -195,5 +240,6 @@ void I_InitTimer(void)
     display_vblank_period_us = 16667;
     display_last_vblank_raw_us = 0;
     display_last_vblank_count = 0;
+    display_frame_sample_raw_us = 0;
     predicted_vblank_period_us = 0;
 }

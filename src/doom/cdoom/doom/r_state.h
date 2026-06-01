@@ -77,6 +77,8 @@ extern seg_t*		segs;
 
 extern int		numsectors;
 extern sector_t*	sectors;
+extern int		numinterpolatedsectors;
+extern sector_t**	interpolatedsectors;
 
 extern int		numsubsectors;
 extern subsector_t*	subsectors;

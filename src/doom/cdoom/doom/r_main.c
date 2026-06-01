@@ -28,6 +28,7 @@
 
 
 #include "doomdef.h"
+#include "doomstat.h"
 #include "d_loop.h"
 #include "of_fastram.h"
 
@@ -83,11 +84,17 @@ player_t*		viewplayer;
 // 0 = high, 1 = low
 int			detailshift;
 
-// Uncapped framerate: render at display rate with interpolation between 35 Hz tics.
+// Uncapped framerate: render at display rate with interpolation between tics.
 // See r_main.h for description. Default on; disabled in d_loop when inappropriate.
 boolean		crispy_uncapped = true;
 boolean		r_interpolate = false;
 fixed_t		fractionaltic = 0;
+
+static void R_RenderNetUpdate(void)
+{
+    if (netgame)
+        NetUpdate();
+}
 
 #define R_CACHE_ALIGNED __attribute__((aligned(64)))
 
@@ -874,7 +881,7 @@ void R_SetupFrame (player_t* player)
     viewplayer = player;
 
     // Interpolate the camera between tics so the view moves smoothly at
-    // display rate (60 Hz) instead of snapping to 35 Hz tic boundaries.
+    // display rate instead of snapping to tic boundaries.
     // All mobjs in R_ProjectSprite use the same fractionaltic, so the
     // view and the world stay in sync at every sub-tic frame.
     if (r_interpolate)
@@ -929,6 +936,43 @@ void R_SetupFrame (player_t* player)
     validcount++;
 }
 
+static void R_BeginSectorInterpolation(void)
+{
+    int i;
+
+    if (!r_interpolate)
+        return;
+
+    for (i = 0; i < numinterpolatedsectors; i++)
+    {
+        sector_t *sec = interpolatedsectors[i];
+        sec->renderfloorheight = sec->floorheight;
+        sec->renderceilingheight = sec->ceilingheight;
+
+        sec->floorheight =
+            sec->oldfloorheight
+            + FixedMul(sec->floorheight - sec->oldfloorheight, fractionaltic);
+        sec->ceilingheight =
+            sec->oldceilingheight
+            + FixedMul(sec->ceilingheight - sec->oldceilingheight, fractionaltic);
+    }
+}
+
+static void R_EndSectorInterpolation(void)
+{
+    int i;
+
+    if (!r_interpolate)
+        return;
+
+    for (i = 0; i < numinterpolatedsectors; i++)
+    {
+        sector_t *sec = interpolatedsectors[i];
+        sec->floorheight = sec->renderfloorheight;
+        sec->ceilingheight = sec->renderceilingheight;
+    }
+}
+
 
 
 //
@@ -949,9 +993,10 @@ void R_RenderPlayerView (player_t* player)
     R_ClearDrawSegs ();
     R_ClearPlanes ();
     R_ClearSprites ();
+    R_BeginSectorInterpolation();
     
     // check for new console commands.
-    NetUpdate ();
+    R_RenderNetUpdate();
 
     // The head node is the last node output.
     stage_start = R_Perf_BeginStage();
@@ -959,21 +1004,22 @@ void R_RenderPlayerView (player_t* player)
     R_Perf_EndStage(R_PERF_STAGE_BSP, stage_start);
     
     // Check for new console commands.
-    NetUpdate ();
+    R_RenderNetUpdate();
     
     stage_start = R_Perf_BeginStage();
     R_DrawPlanes ();
     R_Perf_EndStage(R_PERF_STAGE_PLANES, stage_start);
     
     // Check for new console commands.
-    NetUpdate ();
+    R_RenderNetUpdate();
     
     stage_start = R_Perf_BeginStage();
     R_DrawMasked ();
     R_Perf_EndStage(R_PERF_STAGE_MASKED, stage_start);
 
     // Check for new console commands.
-    NetUpdate ();				
+    R_RenderNetUpdate();
+    R_EndSectorInterpolation();
 
     R_Perf_EndStage(R_PERF_STAGE_VIEW, view_start);
 }

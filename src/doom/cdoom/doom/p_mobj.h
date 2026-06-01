@@ -280,7 +280,7 @@ typedef struct mobj_s
     // --- Interpolation support (uncapped framerate) ---
     // Snapshot of x/y/z/angle at the start of the most recent tic. The
     // renderer lerps between (old*, current) by fractionaltic so sprites
-    // move smoothly between 35 Hz simulation steps.
+    // move smoothly between simulation steps.
     // Not serialized — reset to match x/y/z/angle on savegame load and
     // whenever a thing teleports or spawns so we never interpolate across
     // discontinuities.

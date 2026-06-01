@@ -83,10 +83,11 @@ int			showMessages = 1;
 // Blocky mode, has default, 0 = high, 1 = normal
 int			detailLevel = 0;
 
-// Repurposed Graphic Detail menu slot — selects the display refresh policy.
-// frame_interpolation is derived from refresh_mode == REFRESH_MODE_VRR.
+// Repurposed Graphic Detail menu slot: selects the display refresh policy.
+// LCD fixed and VRR modes render interpolated frames without changing TICRATE.
+// Analogizer PAL/NTSC stays on Doom's normal 35 Hz render loop.
 int			frame_interpolation = 0;
-int                     refresh_mode = REFRESH_MODE_52_25;
+int                     refresh_mode = REFRESH_MODE_FIXED;
 int			screenblocks = 9;
 
 // temp for screenblocks (0-9)
@@ -1146,7 +1147,7 @@ static int M_AnalogizerRefreshMode(void)
 
 static int M_NormalizeRefreshMode(int mode)
 {
-    return mode == REFRESH_MODE_VRR ? REFRESH_MODE_VRR : REFRESH_MODE_52_25;
+    return mode == REFRESH_MODE_VRR ? REFRESH_MODE_VRR : REFRESH_MODE_FIXED;
 }
 
 int M_EffectiveRefreshMode(void)
@@ -1169,9 +1170,25 @@ const char *M_RefreshModeName(int mode)
             return "NTSC";
         case REFRESH_MODE_VRR:
             return "VRR";
-        case REFRESH_MODE_52_25:
+        case REFRESH_MODE_FIXED:
         default:
-            return "52.25";
+            return "FIXED";
+    }
+}
+
+boolean M_RefreshModeUsesInterpolation(int mode)
+{
+    switch (mode)
+    {
+        case REFRESH_MODE_FIXED:
+        case REFRESH_MODE_VRR:
+            return true;
+        case REFRESH_MODE_PAL:
+        case REFRESH_MODE_NTSC:
+            return false;
+        default:
+            return M_NormalizeRefreshMode(mode) == REFRESH_MODE_FIXED
+                || M_NormalizeRefreshMode(mode) == REFRESH_MODE_VRR;
     }
 }
 
@@ -1433,7 +1450,7 @@ void M_ChangeDetail(int choice)
 
     if (analogizer_mode >= 0)
     {
-        frame_interpolation = 0;
+        frame_interpolation = M_RefreshModeUsesInterpolation(analogizer_mode);
         players[consoleplayer].message =
             analogizer_mode == REFRESH_MODE_PAL
             ? "Refresh fixed by Analogizer PAL"
@@ -1443,12 +1460,12 @@ void M_ChangeDetail(int choice)
 
     refresh_mode = M_NormalizeRefreshMode(refresh_mode);
     refresh_mode = refresh_mode == REFRESH_MODE_VRR
-                 ? REFRESH_MODE_52_25
+                 ? REFRESH_MODE_FIXED
                  : REFRESH_MODE_VRR;
 
-    frame_interpolation = refresh_mode == REFRESH_MODE_VRR;
+    frame_interpolation = M_RefreshModeUsesInterpolation(refresh_mode);
     players[consoleplayer].message =
-        frame_interpolation ? "Refresh VRR" : "Refresh 52.25";
+        refresh_mode == REFRESH_MODE_VRR ? "Refresh VRR" : "Refresh Fixed";
 
     M_SaveSettingsIfNeeded();
 }

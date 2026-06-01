@@ -557,8 +557,8 @@ static default_t	doom_defaults_list[] =
     //!
     // @game doom
     //
-    // openfpgaOS refresh mode.  Saved values use 2=52.25 and 6=VRR.
-    // Other old fixed-refresh values migrate to 52.25.  PAL/NTSC are
+    // openfpgaOS refresh mode.  Saved values use 2=FIXED and 6=VRR.
+    // Other old fixed-refresh values migrate to FIXED.  PAL/NTSC are
     // display-only effective modes when Analogizer is active.
     //
 
@@ -891,8 +891,7 @@ static default_t extra_defaults_list[] =
     // Maximum size of the output sound buffer size in milliseconds.
     // Sound output is generated periodically in slices. Higher values
     // might be more efficient but will introduce latency to the
-    // sound output. The default is 28ms (one slice per tic with the
-    // 35fps timer).
+    // sound output. The default is roughly one slice per tic.
     //
 
     CONFIG_VARIABLE_INT(snd_maxslicetime_ms),

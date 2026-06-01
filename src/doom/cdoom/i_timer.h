@@ -37,6 +37,13 @@ uint64_t I_GetTimeUS(void);
 // returns the display-paced render sample time in us
 uint64_t I_GetDisplayTimeUS(void);
 
+// Override the display sample with a raw vblank timestamp captured by
+// of_video_get_timing(). Pass 0 to return to measured/predicted timing.
+void I_SetDisplayFrameSampleUS(uint64_t raw_us);
+
+// Override the display sample with the current raw timer value.
+void I_SetDisplayFrameSampleNow(void);
+
 // Pause for a specified number of ms
 void I_Sleep(int ms);
 
@@ -46,11 +53,9 @@ void I_InitTimer(void);
 // Wait for vertical retrace or pause a bit.
 void I_WaitVBL(int count);
 
-// Vsync-locked tic clock.  When pocket pacing is on, I_GetTime returns
-// ticks accumulated from vsync edges (matched to the display period)
-// and I_GetTimeFrac returns the sub-tic interpolation phase.
-// I_StartFrame is expected to call I_PocketTicAdvance after each
-// vsync-bound wait.
+// Optional display-locked tic clock helpers. Normal Doom gameplay uses the
+// 35 Hz wall-clock timer; fixed LCD output only uses vblank as a render
+// cadence and leaves these disabled.
 void     I_SetPocketPacing(int enabled);
 int      I_PocketPacingActive(void);
 void     I_PocketTicAdvance(uint64_t now_us);
@@ -61,8 +66,9 @@ uint64_t I_PocketSmoothPeriodUS(void);
 // computation.
 int  I_GetTimeFrac(void);
 
-// Called by I_StartFrame right after the vblank wait when VRR is on,
-// to advance the gametic counter once per rendered frame.
+// Advance the optional display-locked counter by the number of display
+// intervals that elapsed.
+void I_PocketAdvanceFrameTics(unsigned int display_frames);
 void I_PocketAdvanceFrameTic(void);
 
 // Push the next-vblank period the hardware just latched (in µs) so

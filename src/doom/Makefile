@@ -51,6 +51,7 @@ CFLAGS += -Wno-implicit-fallthrough -Wno-unused-result
 CFLAGS += -Wno-maybe-uninitialized -Wno-address
 # chocolate-doom uses many old-style prototypes / pre-C99 patterns
 CFLAGS += -Wno-strict-prototypes -Wno-old-style-definition
+CFLAGS += -MMD -MP
 
 # Keep hot renderer code inside APP_BRAM.  The SDK default 64-byte function
 # alignment over-pads this app now that the renderer has more GPU paths.
@@ -88,6 +89,8 @@ endif
 
 include $(SDK_DIR)/sdk.mk
 
+-include $(APP_OBJS:.o=.d) $(OF_INIT_OBJ:.o=.d) $(OF_SDL2_OBJ:.o=.d)
+
 # ── Build: ELF + release bundle ──────────────────────────────────────
 all: $(OBJ_DIR)/app.elf release
 	@$(SIZE) $<
@@ -120,6 +123,7 @@ package: all
 test: app_pc
 
 clean: sdk-clean
+	rm -f $(APP_OBJS:.o=.d) $(OF_INIT_OBJ:.o=.d) $(OF_SDL2_OBJ:.o=.d)
 	rm -rf $(OUT) app_pc
 
 .PHONY: all release debug copy package test clean

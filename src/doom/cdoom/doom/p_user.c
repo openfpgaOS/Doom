@@ -239,6 +239,11 @@ void P_PlayerThink (player_t* player)
     player->mo->oldz     = player->mo->z;
     player->mo->oldangle = player->mo->angle;
     player->oldviewz = player->viewz;
+    for (int i = 0; i < NUMPSPRITES; i++)
+    {
+        player->psprites[i].oldsx = player->psprites[i].sx;
+        player->psprites[i].oldsy = player->psprites[i].sy;
+    }
 
     // fixme: do this in the cheat code
     if (player->cheats & CF_NOCLIP)
@@ -384,4 +389,3 @@ void P_PlayerThink (player_t* player)
     else
 	player->fixedcolormap = 0;
 }
-

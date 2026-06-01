@@ -10,6 +10,7 @@
 #include "of.h"
 #include "i_sound.h"
 #include "i_system.h"
+#include "m_argv.h"
 #include "m_misc.h"
 #include "w_wad.h"
 #include "z_zone.h"
@@ -21,6 +22,9 @@
 #include <string.h>
 
 #define NUM_CHANNELS 16
+#define AUDIO_PUMP_SKIP_US 1000u
+#define AUDIO_PUMP_REPORT_US 1000000u
+#define AUDIO_PUMP_MIN_US 1000u
 
 typedef struct {
     int16_t *pcm;
@@ -30,6 +34,77 @@ typedef struct {
 
 /* Per-Doom-channel state (channel -> stable mixer handle). */
 static of_mixer_handle_t channel_voice[NUM_CHANNELS];
+static unsigned int mixer_last_pump_us;
+static int audio_trace_options_checked;
+static int audio_trace_enabled;
+static unsigned int audio_trace_last_report_us;
+static unsigned int audio_trace_debt_us;
+static unsigned int audio_trace_debt_count;
+static unsigned int audio_trace_debt_max_us;
+
+static void check_audio_trace_options(void)
+{
+    if (audio_trace_options_checked)
+        return;
+
+    audio_trace_enabled = M_CheckParm("-spilltrace") > 0
+                       && M_CheckParm("-nospilltrace") <= 0;
+    audio_trace_options_checked = 1;
+}
+
+void I_OpenFPGAMixerPump(const char *source)
+{
+    unsigned int now_us = of_time_us();
+    unsigned int start_us;
+    unsigned int elapsed_us;
+
+    if (mixer_last_pump_us != 0 &&
+        now_us - mixer_last_pump_us < AUDIO_PUMP_SKIP_US)
+    {
+        return;
+    }
+
+    start_us = now_us;
+    of_mixer_pump();
+    now_us = of_time_us();
+    elapsed_us = now_us - start_us;
+    mixer_last_pump_us = now_us;
+
+    check_audio_trace_options();
+    if (!audio_trace_enabled || elapsed_us == 0)
+        return;
+
+    audio_trace_debt_us += elapsed_us;
+    audio_trace_debt_count++;
+    if (elapsed_us > audio_trace_debt_max_us)
+        audio_trace_debt_max_us = elapsed_us;
+
+    if (elapsed_us < AUDIO_PUMP_MIN_US &&
+        audio_trace_debt_us < AUDIO_PUMP_MIN_US)
+    {
+        return;
+    }
+
+    if (audio_trace_last_report_us != 0 &&
+        now_us - audio_trace_last_report_us < AUDIO_PUMP_REPORT_US)
+    {
+        return;
+    }
+
+    printf("Doom audio: mixer pump source=%s last=%u.%03ums "
+           "debt=%u.%03ums count=%u max=%u.%03ums\n",
+           source,
+           elapsed_us / 1000u, elapsed_us % 1000u,
+           audio_trace_debt_us / 1000u, audio_trace_debt_us % 1000u,
+           audio_trace_debt_count,
+           audio_trace_debt_max_us / 1000u,
+           audio_trace_debt_max_us % 1000u);
+
+    audio_trace_last_report_us = now_us;
+    audio_trace_debt_us = 0;
+    audio_trace_debt_count = 0;
+    audio_trace_debt_max_us = 0;
+}
 
 /* Sound devices we claim we can drive. */
 static const snddevice_t sdl_devices[] = {
@@ -43,9 +118,7 @@ static void free_sfx_slot(sfxinfo_t *sfx)
 {
     sfx_slot_t *s = sfx->driver_data;
     if (!s) return;
-    /* s->pcm was allocated from CRAM1 via of_mixer_alloc_samples, which
-     * is a bump allocator with no per-slot free.  Leave it; the whole
-     * pool is reclaimed by of_mixer_free_samples() at shutdown. */
+    free(s->pcm);
     free(s);
     sfx->driver_data = NULL;
 }
@@ -80,10 +153,11 @@ static boolean load_sfx(sfxinfo_t *sfx)
     byte *pcm8 = data + 8;
     if (samples > 32) { pcm8 += 16; samples -= 32; }
 
-    /* The hardware mixer reads samples from CRAM1 — ordinary malloc'd
-     * heap memory is not accessible to it, so we MUST allocate via
-     * of_mixer_alloc_samples and expand 8→16-bit into that buffer. */
-    int16_t *pcm16 = of_mixer_alloc_samples(samples * sizeof(int16_t));
+    /* Current openfpgaOS can DMA mixer samples from ordinary SDRAM and
+     * flushes the range before playback. Avoid the legacy mixer allocator:
+     * it has a small compatibility slot table and Doom precaches more SFX
+     * lumps than it can hold. */
+    int16_t *pcm16 = malloc(samples * sizeof(int16_t));
     if (!pcm16) { W_ReleaseLumpNum(sfx->lumpnum); return false; }
     for (uint32_t i = 0; i < samples; i++)
         pcm16[i] = (int16_t)((pcm8[i] - 128) << 8);
@@ -103,9 +177,12 @@ static boolean load_sfx(sfxinfo_t *sfx)
 static boolean I_SDL_InitSound(GameMission_t mission)
 {
     (void)mission;
-    /* Audio + mixer are initialised by music_opl_module's Init.  Two inits
-     * race over master/group volumes and were the only divergence from
-     * mididemo's clean path. */
+    of_audio_init();
+    of_mixer_init(32, 48000);
+    of_mixer_set_master_volume(255);
+    of_mixer_set_group_volume(OF_MIXER_GROUP_MUSIC, 255);
+    of_mixer_set_group_volume(OF_MIXER_GROUP_SFX, 255);
+
     for (int i = 0; i < NUM_CHANNELS; i++)
         channel_voice[i] = OF_MIXER_HANDLE_INVALID;
     return true;
@@ -125,7 +202,7 @@ static int I_SDL_GetSfxLumpNum(sfxinfo_t *sfx)
 
 static void I_SDL_UpdateSound(void)
 {
-    of_mixer_pump();
+    I_OpenFPGAMixerPump("sfx");
 }
 
 /* Doom volume: 0..127, sep: 0..254 (0=left, 128=center, 254=right).

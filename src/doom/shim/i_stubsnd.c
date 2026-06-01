@@ -57,7 +57,6 @@ const sound_module_t sound_pcsound_module = {
 #include "of_mixer.h"
 #include "of_smp_bank.h"
 #include "of_smp_voice.h"
-#include "of_awe.h"
 #include "memio.h"
 #include "mus2mid.h"
 
@@ -69,6 +68,8 @@ typedef struct {
 static int opl_music_volume = 127;
 static int opl_game_paused;
 static int opl_zero_volume_suspended;
+
+void I_OpenFPGAMixerPump(const char *source);
 
 static void opl_suspend_zero_volume(void)
 {
@@ -110,11 +111,8 @@ static boolean opl_Init(void)
 
     int rc = of_midi_init();
 
-    /* SW voice engine — envelope/LFO/filter advance in C at 1 kHz,
-     * mixer writes from CPU only.  Disables the AWE coprocessor path
-     * that had the shared voice_state_ram, the multi-writer voice_tbl
-     * mux, and the PITCH_COMPOSE stage.  Simpler, all debuggable in C. */
-    smp_voice_enable_awe_backend(0);
+    /* SW voice engine: envelope/LFO/filter advance in C at 1 kHz,
+     * mixer writes from CPU only. */
 
     /* Reverb/chorus left at FPGA reset default (0 = bypass).  Duke3D's
      * midi_of.c warns explicitly that mididemo's (80,140) reverb +
@@ -256,18 +254,14 @@ static void opl_StopSong(void)
 
 static boolean opl_IsPlaying(void)   { return of_midi_playing(); }
 
-/* MIDI envelope/LFO advance is still pumped by the 1 kHz timer ISR
- * (it's cheap).  But the heavy sample-mixing work has moved to the
- * main thread so the renderer can keep its cache warm — the ISR
- * used to trash it every ms and Doom rendered at 0.1 fps.  Poll is
- * called once per game tic (35 Hz); each call catches the CRAM1 DMA
- * ring back up to ~42 ms of buffered audio.  of_mixer_pump loops
- * swmixer_tick internally with a sane cap. */
+/* MIDI event/envelope work is timer-driven by of_midi_play().  Poll only
+ * services the shared mixer, and I_OpenFPGAMixerPump de-duplicates that
+ * with the SFX module's own mixer pump. */
 static void    opl_Poll(void)
 {
     if (opl_music_volume > 0)
     {
-        of_mixer_pump();
+        I_OpenFPGAMixerPump("music");
     }
 }
 

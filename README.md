@@ -2,7 +2,7 @@
 
 Chocolate Doom port for the Analogue Pocket using openfpgaOS.
 
-Current release: `1.1.9` (`2026-05-29`).
+Current release: `1.1.10` (`2026-05-31`).
 
 This repository contains the Doom custom core, the openfpgaOS SDK subset it
 builds against, instance files, runtime binaries, and the Doom-specific shims
@@ -12,7 +12,7 @@ that replace the SDL platform layer.
 
 - Chocolate Doom based game code with an openfpgaOS platform layer.
 - GPU accelerated 320x200 Doom renderer using native grouped span commands.
-- Uncapped interpolated rendering for smoother output between Doom's 35 Hz tics.
+- Uncapped interpolated rendering for smoother output between Doom tics.
 - Adaptive Pocket LCD pacing with fixed 60 Hz startup and runtime VRR tuning.
 - Direct GPU flip path with rotating framebuffers.
 - Hardware mixed Doom SFX through the openfpgaOS mixer.
@@ -224,14 +224,11 @@ framebuffers and GPU flip commands. The 320x200 Doom image is centered in the
 
 ## Frame Pacing
 
-Doom game simulation still runs at 35 Hz. Rendering is uncapped and interpolates
-between tics when it is safe to do so. Interpolation is disabled for cases where
-Chocolate Doom expects exact tic output, such as demos or non-gameplay states.
-
-Video startup requests `OF_VIDEO_VTOTAL_60HZ`. The Pocket video shim then uses
-openfpgaOS timing feedback to fine tune refresh timing within the supported
-Pocket LCD range. The goal is to keep the display cadence close to the measured
-render cadence without introducing avoidable queue gaps.
+Doom game simulation runs at 42 Hz in fixed-refresh mode. The default `FIXED`
+refresh option requests `OF_VIDEO_VTOTAL_42HZ`, and the tic clock advances once
+per display vblank so gameplay and scanout stay locked 1:1. `VRR` remains
+available for the Pocket LCD; Analogizer output automatically reports `PAL` or
+`NTSC` and is not user-selectable from the menu.
 
 ## CPU/GPU Framebuffer Ownership
 

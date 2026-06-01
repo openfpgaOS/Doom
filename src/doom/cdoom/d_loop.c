@@ -120,12 +120,20 @@ static boolean local_playeringame[NET_MAXPLAYERS];
 
 static int player_class;
 
+#if TICRATE != 35
+#error Doom gameplay TICRATE must remain 35 Hz.
+#endif
 
-// 35 fps clock adjusted by offsetms milliseconds
+// TICRATE clock adjusted by offsetms milliseconds
 
 static int GetAdjustedTime(void)
 {
     int64_t time_us;
+
+#ifndef OF_PC
+    if (I_PocketPacingActive() && !net_client_connected)
+        return I_GetTime();
+#endif
 
     time_us = (int64_t) I_GetTimeUS();
 

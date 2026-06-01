@@ -45,6 +45,7 @@ void R_GPU_TextureDataUpdated(void *ptr, unsigned int size)
     (void)ptr;
     (void)size;
 }
+void R_GPU_TextureDataFlushAll(void) { }
 boolean R_GPU_PresentFrame(void) { return false; }
 boolean R_GPU_UsingDirectFramebuffer(void) { return false; }
 int R_GPU_CurrentDrawSlot(void) { return -1; }
@@ -781,6 +782,113 @@ static void gpu_upload_fuzz_translucency(void)
                                sizeof(gpu_fuzz_transluc_table));
 }
 
+static int gpu_caps_cover_range(const struct of_capabilities *caps,
+                                uintptr_t ptr, uint32_t size)
+{
+    uint64_t base;
+    uint64_t end;
+    uint64_t range_start = ptr;
+    uint64_t range_end = range_start + size;
+
+    if (caps == NULL || caps->sdram_base == 0 || caps->sdram_size == 0)
+        return 0;
+    if (range_end < range_start)
+        return 0;
+
+    base = caps->sdram_base;
+    end = base + caps->sdram_size;
+
+    return range_start >= base && range_end <= end;
+}
+
+static int gpu_init_for_doom(const struct of_capabilities *caps)
+{
+    uint32_t batch_base;
+    uint32_t pal_base;
+    int caps_cover_batch;
+    int caps_cover_pal;
+
+    _gpu_base = caps->gpu_base;
+
+    _gpu_wrptr = 0;
+    _gpu_known_rdptr = 0;
+    _gpu_fence_next = 1;
+    _gpu_cmd_words = 0;
+    _gpu_batch_dma_base = 0;
+    _gpu_batch_dma_addr = 0;
+    _gpu_batch_index = 0;
+    _gpu_batch_inflight_mask = 0;
+    _gpu_batch_buf_base = NULL;
+    _gpu_batch_buf = NULL;
+    _gpu_palookup_dma_base = 0;
+    _gpu_dbg_dma_waits = 0;
+    _gpu_dbg_dma_spin_iters = 0;
+    _gpu_dbg_ring_waits = 0;
+    _gpu_dbg_ring_spin_iters = 0;
+    _gpu_dbg_min_ring_free = OF_GPU_RING_SIZE;
+    _gpu_state_valid = 0;
+
+    GPU_CTRL = 6;
+    for (volatile int i = 0; i < 100; i++) {}
+    GPU_CTRL = 4;
+    GPU_CTRL = 1;
+
+    batch_base = (uint32_t)(uintptr_t)&_gpu_batch_storage[0][0];
+    pal_base = (uint32_t)(uintptr_t)&_gpu_palookup_storage[0];
+
+    caps_cover_batch =
+        gpu_caps_cover_range(caps, (uintptr_t)&_gpu_batch_storage[0][0],
+                             OF_GPU_BATCH_BUF_BYTES);
+    caps_cover_pal =
+        gpu_caps_cover_range(caps, (uintptr_t)&_gpu_palookup_storage[0],
+                             OF_GPU_PALOOKUP_BYTES);
+
+    if (!caps_cover_batch || !caps_cover_pal)
+    {
+        printf("Doom GPU: caps SDRAM range base=%08lx size=%08lx "
+               "uncached=%08lx gpu=%08lx does not cover GPU buffers "
+               "batch=%08lx pal=%08lx\n",
+               (unsigned long)caps->sdram_base,
+               (unsigned long)caps->sdram_size,
+               (unsigned long)caps->sdram_uncached_base,
+               (unsigned long)caps->gpu_base,
+               (unsigned long)batch_base,
+               (unsigned long)pal_base);
+    }
+
+    if ((pal_base & (OF_GPU_PALOOKUP_STRIDE - 1u)) != 0u)
+    {
+        printf("Doom GPU: palookup buffer misaligned; disabling GPU\n");
+        return 0;
+    }
+
+    _gpu_batch_dma_base = batch_base;
+    _gpu_batch_buf_base = &_gpu_batch_storage[0][0];
+    _gpu_select_batch_buffer(0);
+
+    _gpu_palookup_dma_base = pal_base;
+    GPU_PALOOKUP_BASE = pal_base;
+    GPU_TEX_FLUSH = 1;
+
+    return 1;
+}
+
+static void gpu_upload_palookup(uint8_t slot, const uint8_t *data,
+                                uint32_t size)
+{
+    uint8_t *dst;
+
+    if (slot >= OF_GPU_PALOOKUP_SLOTS || size > OF_GPU_PALOOKUP_STRIDE)
+        return;
+
+    dst = &_gpu_palookup_storage[(uint32_t)slot * OF_GPU_PALOOKUP_STRIDE];
+    memcpy(dst, data, size);
+    if (size < OF_GPU_PALOOKUP_STRIDE)
+        memset(dst + size, 0, OF_GPU_PALOOKUP_STRIDE - size);
+
+    of_cache_flush_range(dst, OF_GPU_PALOOKUP_STRIDE);
+}
+
 static void gpu_set_framebuffer_base(uint8_t *base)
 {
     uint32_t fb_addr = (uint32_t)(uintptr_t)base;
@@ -826,8 +934,21 @@ void R_GPU_Init(void)
     }
 
     const struct of_capabilities *caps = of_get_caps();
-    if (caps == NULL || caps->gpu_base == 0 ||
-        (caps->hw_features & OF_HW_GPU_SPAN) == 0)
+    if (caps == NULL || caps->magic != OF_CAPS_MAGIC)
+    {
+        printf("Doom GPU: capability table missing; using software renderer\n");
+        return;
+    }
+
+    if (caps->version < 2)
+    {
+        printf("Doom GPU: capability table v%lu lacks GPU memory bases; "
+               "using software renderer\n",
+               (unsigned long)caps->version);
+        return;
+    }
+
+    if (caps->gpu_base == 0 || (caps->hw_features & OF_HW_GPU_SPAN) == 0)
     {
         return;
     }
@@ -839,10 +960,13 @@ void R_GPU_Init(void)
         return;
     }
 
-    of_gpu_init();
+    if (!gpu_init_for_doom(caps))
+        return;
+
     if (!gpu_probe_affine_span_group())
     {
         of_gpu_shutdown();
+        printf("Doom GPU: probe failed; using software renderer\n");
         return;
     }
 
@@ -856,7 +980,7 @@ void R_GPU_Init(void)
     /* Make all already-loaded WAD/cache data visible to the GPU, then copy
      * Doom's palette remap rows into the fabric palookup table. */
     of_cache_flush();
-    of_gpu_palookup_upload(0, colormaps, (uint32_t)cmap_size);
+    gpu_upload_palookup(0, colormaps, (uint32_t)cmap_size);
     gpu_upload_fuzz_translucency();
     of_cache_flush_range(gpu_fuzz_source_tex, sizeof(gpu_fuzz_source_tex));
     GPU_TEX_FLUSH = 1;
@@ -865,8 +989,6 @@ void R_GPU_Init(void)
 
     gpu_draw_idx = of_video_acquire_next(-1, 0);
     gpu_flip_enabled = gpu_draw_idx >= 0;
-    printf("Doom GPU: direct framebuffer flip %s\n",
-           gpu_flip_enabled ? "enabled" : "unavailable");
 
 }
 
@@ -1074,6 +1196,20 @@ void R_GPU_TextureDataUpdated(void *ptr, unsigned int size)
     gpu_finish_pending();
     cache_start = R_Perf_BeginStage();
     of_cache_flush_range(ptr, size);
+    R_Perf_EndStage(R_PERF_STAGE_CACHE, cache_start);
+    GPU_TEX_FLUSH = 1;
+}
+
+void R_GPU_TextureDataFlushAll(void)
+{
+    unsigned int cache_start;
+
+    if (!gpu_present)
+        return;
+
+    gpu_finish_pending();
+    cache_start = R_Perf_BeginStage();
+    of_cache_flush();
     R_Perf_EndStage(R_PERF_STAGE_CACHE, cache_start);
     GPU_TEX_FLUSH = 1;
 }

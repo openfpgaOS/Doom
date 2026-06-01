@@ -101,6 +101,10 @@ typedef	struct
 {
     fixed_t	floorheight;
     fixed_t	ceilingheight;
+    fixed_t	oldfloorheight;
+    fixed_t	oldceilingheight;
+    fixed_t	renderfloorheight;
+    fixed_t	renderceilingheight;
     short	floorpic;
     short	ceilingpic;
     short	lightlevel;

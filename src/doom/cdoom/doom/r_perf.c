@@ -19,6 +19,7 @@
 typedef struct
 {
     uint64_t stage_us[R_PERF_STAGE_COUNT];
+    uint64_t current_stage_us[R_PERF_STAGE_COUNT];
     uint64_t detail_us[R_PERF_DETAIL_COUNT];
     uint64_t frame_us;
     uint32_t max_frame_us;
@@ -134,6 +135,8 @@ void R_Perf_AddStageUS(r_perf_stage_t stage, unsigned int elapsed_us)
         return;
 
     perf.stage_us[stage] += elapsed_us;
+    if (perf.frame_active)
+        perf.current_stage_us[stage] += elapsed_us;
 }
 
 void R_Perf_EndStage(r_perf_stage_t stage, unsigned int start_us)
@@ -393,6 +396,7 @@ void R_Perf_FrameStart(void)
         R_Perf_Reset(now);
 
     perf.frame_start_us = now;
+    memset(perf.current_stage_us, 0, sizeof(perf.current_stage_us));
     perf.frame_active = 1;
     perf.frames++;
 }
@@ -446,6 +450,14 @@ void R_Perf_CountPresentedFrame(int direct_gpu)
         perf.direct_frames++;
     else
         perf.blit_frames++;
+}
+
+uint64_t R_Perf_CurrentStageUS(r_perf_stage_t stage)
+{
+    if (!r_perf_enabled || (unsigned int)stage >= R_PERF_STAGE_COUNT)
+        return 0;
+
+    return perf.current_stage_us[stage];
 }
 
 void R_Perf_CountGpuColumn(unsigned int pixels)
@@ -567,6 +579,7 @@ typedef struct
     int frame_active;
     int options_checked;
     int enabled;
+    int spill_enabled;
 } r_slow_counters_t;
 
 static r_slow_counters_t slow;
@@ -582,18 +595,28 @@ static void R_Slow_CheckOptions(void)
 #else
     slow.enabled = 0;
 #endif
+    slow.spill_enabled = M_CheckParm("-spilltrace") > 0
+                       && M_CheckParm("-nospilltrace") <= 0;
     slow.options_checked = 1;
+}
+
+static int R_Slow_StageTimingEnabled(void)
+{
+    R_Slow_CheckOptions();
+    return slow.enabled || slow.spill_enabled;
 }
 
 static void R_Slow_Reset(unsigned int now_us)
 {
     int options_checked = slow.options_checked;
     int enabled = slow.enabled;
+    int spill_enabled = slow.spill_enabled;
 
     memset(&slow, 0, sizeof(slow));
     slow.interval_start_us = now_us;
     slow.options_checked = options_checked;
     slow.enabled = enabled;
+    slow.spill_enabled = spill_enabled;
 }
 
 static void R_Slow_PrintMS(const char *name, uint64_t us)
@@ -647,9 +670,7 @@ unsigned int R_Perf_NowUS(void)
 
 unsigned int R_Perf_BeginStage(void)
 {
-    R_Slow_CheckOptions();
-
-    if (!slow.enabled)
+    if (!R_Slow_StageTimingEnabled())
         return 0;
 
     return of_time_us();
@@ -657,7 +678,7 @@ unsigned int R_Perf_BeginStage(void)
 
 void R_Perf_AddStageUS(r_perf_stage_t stage, unsigned int elapsed_us)
 {
-    if (!slow.enabled || !slow.frame_active ||
+    if (!R_Slow_StageTimingEnabled() || !slow.frame_active ||
         (unsigned int)stage >= R_PERF_STAGE_COUNT)
         return;
 
@@ -676,9 +697,7 @@ void R_Perf_FrameStart(void)
 {
     unsigned int now_us;
 
-    R_Slow_CheckOptions();
-
-    if (!slow.enabled)
+    if (!R_Slow_StageTimingEnabled())
         return;
 
     now_us = of_time_us();
@@ -689,15 +708,16 @@ void R_Perf_FrameStart(void)
     slow.frame_start_us = now_us;
     slow.views = 0;
     slow.frame_active = 1;
-    slow.frames++;
+    if (slow.enabled)
+        slow.frames++;
 }
 
 void R_Perf_FrameCancel(void)
 {
-    if (!slow.enabled || !slow.frame_active)
+    if (!R_Slow_StageTimingEnabled() || !slow.frame_active)
         return;
 
-    if (slow.frames > 0)
+    if (slow.enabled && slow.frames > 0)
         slow.frames--;
     slow.frame_active = 0;
 }
@@ -706,12 +726,12 @@ void R_Perf_FrameEnd(void)
 {
     unsigned int now_us;
 
-    if (!slow.enabled)
+    if (!R_Slow_StageTimingEnabled())
         return;
 
     now_us = of_time_us();
 
-    if (slow.frame_active)
+    if (slow.enabled && slow.frame_active)
     {
         unsigned int frame_us = now_us - slow.frame_start_us;
 
@@ -725,15 +745,20 @@ void R_Perf_FrameEnd(void)
 
         slow.frame_active = 0;
     }
+    else if (slow.frame_active)
+    {
+        slow.frame_active = 0;
+    }
 
-    if ((unsigned int)(now_us - slow.interval_start_us) >=
+    if (slow.enabled &&
+        (unsigned int)(now_us - slow.interval_start_us) >=
         R_SLOW_REPORT_US)
         R_Slow_PrintAndReset(now_us);
 }
 
 void R_Perf_CountRenderedView(void)
 {
-    if (slow.enabled && slow.frame_active)
+    if (R_Slow_StageTimingEnabled() && slow.frame_active)
         slow.views++;
 }
 
@@ -746,6 +771,15 @@ void R_Perf_CountPresentedFrame(int direct_gpu)
         slow.direct_frames++;
     else
         slow.blit_frames++;
+}
+
+uint64_t R_Perf_CurrentStageUS(r_perf_stage_t stage)
+{
+    if (!R_Slow_StageTimingEnabled() || !slow.frame_active ||
+        (unsigned int)stage >= R_PERF_STAGE_COUNT)
+        return 0;
+
+    return slow.current_stage_us[stage];
 }
 
 #endif
@@ -1088,9 +1122,7 @@ void R_Perf_PacingAddWait(unsigned int wait_us)
     if (!pacing.frame_active || wait_us == 0)
         return;
 
-#if R_RENDER_PERF || R_RUNTIME_TRACES
     R_Perf_AddStageUS(R_PERF_STAGE_VSYNC_WAIT, wait_us);
-#endif
     pacing.current_frame_wait_us += wait_us;
 
     if (!pacing.enabled)

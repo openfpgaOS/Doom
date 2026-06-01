@@ -62,29 +62,6 @@ static const of_video_mode_t g_video_modes[] = {
     {800, 600, 0, OF_VIDEO_MODE_8BIT, 0},
 };
 
-/* ---- Tile engine state ---- */
-static int      g_tile_enabled;
-static int      g_tile_priority;  /* 0=behind FB, 1=over FB */
-static int      g_tile_scroll_x;
-static int      g_tile_scroll_y;
-static uint16_t g_tilemap[64 * 32];          /* 64 cols x 32 rows */
-static uint32_t g_tile_chr[256 * 8];         /* 256 tiles x 8 rows x 32-bit */
-
-/* ---- Sprite engine state ---- */
-#define MAX_SPRITES 64
-
-typedef struct {
-    int16_t  x, y;
-    uint8_t  tile_id;
-    uint8_t  palette;
-    uint8_t  hflip, vflip;
-    uint8_t  enabled;
-} sprite_t;
-
-static int      g_sprite_enabled;
-static sprite_t g_sprites[MAX_SPRITES];
-static uint32_t g_sprite_chr[256 * 8];       /* same format as tile chr */
-
 /* ---- Input state ---- */
 static of_input_state_t g_input[2];
 static uint32_t g_prev_buttons[2];
@@ -204,61 +181,6 @@ static void ensure_texture_for_mode(void) {
     }
 }
 
-/* Render tile layer into a scanline buffer (palette indices) */
-static void render_tile_scanline(uint8_t *line, int y) {
-    int sy = (y + g_tile_scroll_y) & 0xFF;  /* 256 pixel wrap (32 tiles * 8) */
-    int tile_row = sy >> 3;
-    int fine_y   = sy & 7;
-
-    for (int x = 0; x < (int)g_mode.width; x++) {
-        int sx = (x + g_tile_scroll_x) & 0x1FF;  /* 512 pixel wrap (64 * 8) */
-        int tile_col = sx >> 3;
-        int fine_x   = sx & 7;
-
-        uint16_t entry = g_tilemap[tile_row * 64 + tile_col];
-        int tile_id = entry & 0xFF;
-        int pal     = (entry >> 10) & 0xF;
-        int hflip   = (entry >> 14) & 1;
-        int vflip   = (entry >> 15) & 1;
-
-        int row = vflip ? (7 - fine_y) : fine_y;
-        int col = hflip ? (7 - fine_x) : fine_x;
-
-        uint32_t chr_word = g_tile_chr[tile_id * 8 + row];
-        int nibble = (chr_word >> (col * 4)) & 0xF;
-
-        line[x] = nibble ? ((pal << 4) | nibble) : 0;
-    }
-}
-
-/* Render all sprites into a scanline buffer (palette indices) */
-static void render_sprite_scanline(uint8_t *line, int y) {
-    memset(line, 0, g_mode.width);
-
-    /* Back to front for correct priority (sprite 0 = highest) */
-    for (int i = MAX_SPRITES - 1; i >= 0; i--) {
-        sprite_t *s = &g_sprites[i];
-        if (!s->enabled) continue;
-
-        int sy = y - s->y;
-        if (sy < 0 || sy >= 8) continue;
-
-        int row = s->vflip ? (7 - sy) : sy;
-        uint32_t chr_word = g_sprite_chr[s->tile_id * 8 + row];
-
-        for (int px = 0; px < 8; px++) {
-            int col = s->hflip ? (7 - px) : px;
-            int nibble = (chr_word >> (col * 4)) & 0xF;
-            if (nibble == 0) continue;
-
-            int screen_x = s->x + px;
-            if (screen_x < 0 || screen_x >= (int)g_mode.width) continue;
-
-            line[screen_x] = (s->palette << 4) | nibble;
-        }
-    }
-}
-
 static uint32_t rgb565_to_argb(uint16_t v) {
     uint32_t r = (uint32_t)((v >> 11) & 0x1F);
     uint32_t g = (uint32_t)((v >> 5) & 0x3F);
@@ -305,13 +227,11 @@ static uint8_t framebuffer_index_at(const uint8_t *fb, int x, int y) {
     }
 }
 
-/* Composite all layers and upload to texture */
+/* Composite the framebuffer and upload to texture */
 static void composite_and_present(void) {
     int disp = g_draw_buf ^ 1;  /* display buffer is the one we just flipped from */
     const uint8_t *fb = g_fb[disp];
     const uint16_t *fb16 = (const uint16_t *)fb;
-    uint8_t tile_line[OF_VIDEO_MAX_WIDTH];
-    uint8_t sprite_line[OF_VIDEO_MAX_WIDTH];
     int w = (int)g_mode.width;
     int h = (int)g_mode.height;
     int stride = (int)g_mode.stride;
@@ -319,11 +239,6 @@ static void composite_and_present(void) {
     ensure_texture_for_mode();
 
     for (int y = 0; y < h; y++) {
-        if (g_tile_enabled)
-            render_tile_scanline(tile_line, y);
-        if (g_sprite_enabled)
-            render_sprite_scanline(sprite_line, y);
-
         for (int x = 0; x < w; x++) {
             uint32_t color = 0xFF000000;  /* opaque black */
 
@@ -337,15 +252,6 @@ static void composite_and_present(void) {
                 uint8_t fb_idx = framebuffer_index_at(fb, x, y);
                 if (fb_idx && g_palette[fb_idx])
                     color = g_palette[fb_idx] | 0xFF000000;
-            }
-
-            /* Compositing: sprite > tile(hi) > FB > tile(lo) > black */
-            if (g_sprite_enabled && sprite_line[x]) {
-                color = g_palette[sprite_line[x]] | 0xFF000000;
-            } else if (g_tile_enabled && g_tile_priority && tile_line[x]) {
-                color = g_palette[tile_line[x]] | 0xFF000000;
-            } else if (g_tile_enabled && !g_tile_priority && tile_line[x]) {
-                color = g_palette[tile_line[x]] | 0xFF000000;
             }
 
             g_pixels[(uint32_t)y * w + x] = color;
@@ -758,82 +664,6 @@ int of_analogizer_enabled(void)                     { return 0; }
 int of_analogizer_state(of_analogizer_state_t *state) {
     if (state) memset(state, 0, sizeof(*state));
     return 0;
-}
-
-/* ======================================================================
- * Tile Layer
- * ====================================================================== */
-
-void of_tile_enable(int enable, int priority) {
-    g_tile_enabled  = enable;
-    g_tile_priority = priority;
-}
-
-void of_tile_scroll(int x, int y) {
-    g_tile_scroll_x = x;
-    g_tile_scroll_y = y;
-}
-
-void of_tile_set(int col, int row, uint16_t entry) {
-    if ((unsigned)col < 64 && (unsigned)row < 32)
-        g_tilemap[row * 64 + col] = entry;
-}
-
-void of_tile_load_map(const uint16_t *data, int x, int y, int w, int h) {
-    for (int r = 0; r < h; r++)
-        for (int c = 0; c < w; c++)
-            of_tile_set(x + c, y + r, data[r * w + c]);
-}
-
-void of_tile_load_chr(int first_tile, const void *data, int num_tiles) {
-    int words = num_tiles * 8;
-    int offset = first_tile * 8;
-    if (offset + words > 256 * 8) words = 256 * 8 - offset;
-    memcpy(&g_tile_chr[offset], data, words * sizeof(uint32_t));
-}
-
-/* ======================================================================
- * Sprite Engine
- * ====================================================================== */
-
-void of_sprite_enable(int enable) {
-    g_sprite_enabled = enable;
-}
-
-void of_sprite_set(int index, int x, int y, int tile_id, int palette,
-                   int hflip, int vflip, int enable) {
-    if ((unsigned)index >= MAX_SPRITES) return;
-    sprite_t *s = &g_sprites[index];
-    s->x       = (int16_t)x;
-    s->y       = (int16_t)y;
-    s->tile_id = (uint8_t)tile_id;
-    s->palette = (uint8_t)palette;
-    s->hflip   = (uint8_t)hflip;
-    s->vflip   = (uint8_t)vflip;
-    s->enabled = (uint8_t)enable;
-}
-
-void of_sprite_move(int index, int x, int y) {
-    if ((unsigned)index >= MAX_SPRITES) return;
-    g_sprites[index].x = (int16_t)x;
-    g_sprites[index].y = (int16_t)y;
-}
-
-void of_sprite_load_chr(int first_tile, const void *data, int num_tiles) {
-    int words = num_tiles * 8;
-    int offset = first_tile * 8;
-    if (offset + words > 256 * 8) words = 256 * 8 - offset;
-    memcpy(&g_sprite_chr[offset], data, words * sizeof(uint32_t));
-}
-
-void of_sprite_hide(int index) {
-    if ((unsigned)index < MAX_SPRITES)
-        g_sprites[index].enabled = 0;
-}
-
-void of_sprite_hide_all(void) {
-    for (int i = 0; i < MAX_SPRITES; i++)
-        g_sprites[i].enabled = 0;
 }
 
 /* ======================================================================

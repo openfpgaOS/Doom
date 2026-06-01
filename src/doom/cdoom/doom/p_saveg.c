@@ -759,6 +759,9 @@ static void saveg_read_pspdef_t(pspdef_t *str)
 
     // fixed_t sy;
     str->sy = saveg_read32();
+
+    str->oldsx = str->sx;
+    str->oldsy = str->sy;
 }
 
 static void saveg_write_pspdef_t(pspdef_t *str)
@@ -1696,6 +1699,10 @@ void P_UnArchiveWorld (void)
     {
 	sec->floorheight = saveg_read16() << FRACBITS;
 	sec->ceilingheight = saveg_read16() << FRACBITS;
+	sec->oldfloorheight = sec->floorheight;
+	sec->oldceilingheight = sec->ceilingheight;
+	sec->renderfloorheight = sec->floorheight;
+	sec->renderceilingheight = sec->ceilingheight;
 	sec->floorpic = saveg_read16();
 	sec->ceilingpic = saveg_read16();
 	sec->lightlevel = saveg_read16();
@@ -1704,7 +1711,8 @@ void P_UnArchiveWorld (void)
 	sec->specialdata = 0;
 	sec->soundtarget = 0;
     }
-    
+    numinterpolatedsectors = 0;
+
     // do lines
     for (i=0, li = lines ; i<numlines ; i++,li++)
     {

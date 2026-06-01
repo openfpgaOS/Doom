@@ -706,6 +706,8 @@ void R_AddSprites (sector_t* sec)
 void R_DrawPSprite (pspdef_t* psp)
 {
     fixed_t		tx;
+    fixed_t		draw_sx;
+    fixed_t		draw_sy;
     int			x1;
     int			x2;
     spritedef_t*	sprdef;
@@ -731,9 +733,20 @@ void R_DrawPSprite (pspdef_t* psp)
 
     if ((unsigned int) lump >= (unsigned int) numspritelumps)
 	return;
+
+    if (r_interpolate)
+    {
+	draw_sx = psp->oldsx + FixedMul(psp->sx - psp->oldsx, fractionaltic);
+	draw_sy = psp->oldsy + FixedMul(psp->sy - psp->oldsy, fractionaltic);
+    }
+    else
+    {
+	draw_sx = psp->sx;
+	draw_sy = psp->sy;
+    }
     
     // calculate edges of the shape
-    tx = psp->sx-(SCREENWIDTH/2)*FRACUNIT;
+    tx = draw_sx-(SCREENWIDTH/2)*FRACUNIT;
 	
     tx -= spriteoffset[lump];	
     x1 = (centerxfrac + FixedMul (tx,pspritescale) ) >>FRACBITS;
@@ -752,7 +765,7 @@ void R_DrawPSprite (pspdef_t* psp)
     // store information in a vissprite
     vis = &avis;
     vis->mobjflags = 0;
-    vis->texturemid = (BASEYCENTER<<FRACBITS)+FRACUNIT/2-(psp->sy-spritetopoffset[lump]);
+    vis->texturemid = (BASEYCENTER<<FRACBITS)+FRACUNIT/2-(draw_sy-spritetopoffset[lump]);
     vis->x1 = x1 < 0 ? 0 : x1;
     vis->x2 = x2 >= viewwidth ? viewwidth-1 : x2;	
     vis->scale = pspritescale<<detailshift;

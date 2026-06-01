@@ -8,6 +8,7 @@
 
 #include "config.h"
 #include "deh_str.h"
+#include "doom_video_refresh.h"
 #include "of.h"
 #include "i_system.h"
 #include "i_video.h"
@@ -79,21 +80,22 @@ static grabmouse_callback_t grabmouse_cb;
 
 #define GPU_PACE_SAMPLES 32
 #define GPU_PACE_WARMUP_SAMPLES 8
-#define DOOM_VTOTAL_52_25HZ 302u
 #define GPU_PACE_MIN_US 16667u
 #define GPU_PACE_MAX_US 23800u
 #define GPU_PACE_MARGIN_US 1000u
 #define GPU_PACE_WAIT_CAP_US 1000u
 #define GPU_PACE_SPIKE_US 50000u
 #define GPU_PACE_ENABLE_MAX_TARGET_US GPU_PACE_MAX_US
-#define GPU_PACE_VTOTAL_MIN OF_VIDEO_VTOTAL_60HZ
-#define GPU_PACE_VTOTAL_MAX OF_VIDEO_VTOTAL_42HZ
+#define GPU_PACE_VTOTAL_MIN DOOM_VIDEO_VTOTAL_60HZ
+#define GPU_PACE_VTOTAL_MAX DOOM_VIDEO_VTOTAL_42HZ
 #define GPU_PACE_VTOTAL_HYSTERESIS 5u
 #define GPU_PACE_VTOTAL_RAISE_STEP 24u
 #define GPU_PACE_VTOTAL_LOWER_STEP 24u
 #define GPU_PACE_VTOTAL_UPDATE_US 500000u
 #define GPU_PACE_POCKET_VTOTAL_UPDATE_US 100000u
 #define GPU_PACE_POCKET_VTOTAL_STEP 12u
+#define FRAME_SPILL_REPORT_US 1000000u
+#define FRAME_SPILL_MIN_OVER_US 1000u
 
 typedef struct
 {
@@ -118,7 +120,23 @@ typedef struct
 static gpu_adaptive_pace_t gpu_pace;
 static int failed_refresh_mode = -1;
 static unsigned int video_present_count;
-static int startup_refresh_hold_logged;
+static int current_vtotal_valid;
+static int display_frame_paced;
+static int display_render_ahead;
+static int display_flip_queued;
+static uint64_t fixed_display_sample_raw_us;
+static uint64_t fixed_display_last_raw_vblank_us;
+static unsigned int fixed_display_period_us;
+static int fixed_display_sample_valid;
+static int frame_spill_options_checked;
+static int frame_spill_trace_enabled;
+static unsigned int frame_spill_last_report_us;
+static unsigned int frame_spill_suppressed;
+static unsigned int frame_spill_debt_us;
+static unsigned int frame_spill_debt_frames;
+static unsigned int frame_spill_debt_max_over_us;
+static int frame_spill_gap_valid;
+static int frame_spill_last_gap;
 
 static void I_ApplyCappedRefresh(void);
 
@@ -127,21 +145,18 @@ static void I_CheckAdaptivePacingOptions(void)
     if (gpu_pace.options_checked)
         return;
 
-    frame_interpolation = M_EffectiveRefreshMode() == REFRESH_MODE_VRR;
+    {
+        int mode = M_EffectiveRefreshMode();
+        frame_interpolation = M_RefreshModeUsesInterpolation(mode);
+    }
     gpu_pace.enabled = M_CheckParm("-noadaptivepacing") <= 0;
     gpu_pace.pocket_pacing_enabled = M_CheckParm("-nopocketpacing") <= 0
                                    && M_CheckParm("-fixed60") <= 0;
-    /* Pocket pacing implies pocket VRR (sample comes from I_StartFrame
-     * instead of I_AdaptiveGpuPaceBeforeFlip; the two are coupled). */
-    gpu_pace.pocket_vrr_enabled = (gpu_pace.enabled
-                                   && M_CheckParm("-pocketvrr") > 0
-                                   && M_CheckParm("-fixed60") <= 0)
-                                || gpu_pace.pocket_pacing_enabled;
-    gpu_pace.fine_vrr_enabled = gpu_pace.enabled
-                              && !gpu_pace.pocket_vrr_enabled
-                              && M_CheckParm("-nofinevrr") <= 0
-                              && M_CheckParm("-fixed60") <= 0;
-    I_SetPocketPacing(gpu_pace.pocket_pacing_enabled);
+    /* Current openfpgaOS owns VRR when Doom requests V_TOTAL=AUTO. Do not
+     * also run Doom's old manual V_TOTAL nudging loop. */
+    gpu_pace.pocket_vrr_enabled = 0;
+    gpu_pace.fine_vrr_enabled = 0;
+    I_SetPocketPacing(0);
     gpu_pace.options_checked = 1;
 }
 
@@ -150,45 +165,380 @@ static unsigned int I_RefreshModeVTotal(int mode)
     switch (mode)
     {
         case REFRESH_MODE_PAL:
-            return OF_VIDEO_VTOTAL_50HZ;
+            return DOOM_VIDEO_VTOTAL_50HZ;
         case REFRESH_MODE_NTSC:
-            return OF_VIDEO_VTOTAL_60HZ;
-        case REFRESH_MODE_52_25:
+            return DOOM_VIDEO_VTOTAL_60HZ;
+        case REFRESH_MODE_FIXED:
         default:
-            return DOOM_VTOTAL_52_25HZ;
+            return DOOM_VIDEO_VTOTAL_42HZ;
     }
+}
+
+static unsigned int I_VTotalPeriodUS(unsigned int vtotal)
+{
+    if (vtotal == OF_VIDEO_VTOTAL_AUTO)
+        return 0;
+
+    return (unsigned int)(((uint64_t)GPU_PACE_MIN_US * vtotal
+                           + DOOM_VIDEO_VTOTAL_60HZ / 2u)
+                          / DOOM_VIDEO_VTOTAL_60HZ);
+}
+
+static void I_CheckFrameSpillOptions(void)
+{
+    if (frame_spill_options_checked)
+        return;
+
+    frame_spill_trace_enabled = M_CheckParm("-spilltrace") > 0
+                              && M_CheckParm("-nospilltrace") <= 0;
+    frame_spill_options_checked = 1;
+}
+
+static unsigned int I_CurrentDisplayBudgetUS(void)
+{
+    if (current_vtotal_valid)
+    {
+        if (gpu_pace.current_vtotal == OF_VIDEO_VTOTAL_AUTO)
+            return gpu_pace.refresh_period_us;
+
+        return I_VTotalPeriodUS(gpu_pace.current_vtotal);
+    }
+
+    return gpu_pace.refresh_period_us;
+}
+
+static unsigned int I_FrameStageUS(r_perf_stage_t stage)
+{
+    uint64_t us = R_Perf_CurrentStageUS(stage);
+
+    return us > UINT32_MAX ? UINT32_MAX : (unsigned int)us;
+}
+
+static void I_LogFrameSpill(const char *path,
+                            unsigned int prepare_us,
+                            unsigned int queued_wait_us)
+{
+    of_video_timing_t timing;
+    unsigned int display_us;
+    unsigned int view_us;
+    unsigned int hud_us;
+    unsigned int budget_us;
+    unsigned int over_us;
+    unsigned int now_us;
+    unsigned int missed_slots;
+    unsigned int suppressed;
+    unsigned int debt_us;
+    unsigned int debt_frames;
+    unsigned int debt_max_over_us;
+    unsigned int gap_inc = 0;
+    int gap = 0;
+    unsigned int bsp_us;
+    unsigned int planes_us;
+    unsigned int masked_us;
+    unsigned int present_us;
+    unsigned int gpuwait_us;
+    unsigned int flip_us;
+    unsigned int cache_us;
+    unsigned int blit_us;
+
+    if (!display_frame_paced || !frame_interpolation)
+        return;
+
+    I_CheckFrameSpillOptions();
+    if (!frame_spill_trace_enabled)
+        return;
+
+    budget_us = I_CurrentDisplayBudgetUS();
+    if (budget_us == 0)
+        return;
+
+    of_video_get_timing(&timing);
+    if (timing.vblank_count != 0 || timing.present_count != 0)
+    {
+        gap = (int)(timing.vblank_count - timing.present_count);
+        if (frame_spill_gap_valid && gap > frame_spill_last_gap)
+            gap_inc = (unsigned int)(gap - frame_spill_last_gap);
+        frame_spill_last_gap = gap;
+        frame_spill_gap_valid = 1;
+    }
+
+    if (prepare_us > budget_us)
+    {
+        over_us = prepare_us - budget_us;
+        frame_spill_debt_us += over_us;
+        frame_spill_debt_frames++;
+        if (over_us > frame_spill_debt_max_over_us)
+            frame_spill_debt_max_over_us = over_us;
+    }
+    else
+    {
+        unsigned int slack_us = budget_us - prepare_us;
+
+        over_us = 0;
+        if (slack_us >= frame_spill_debt_us)
+        {
+            frame_spill_debt_us = 0;
+            frame_spill_debt_frames = 0;
+            frame_spill_debt_max_over_us = 0;
+        }
+        else
+        {
+            frame_spill_debt_us -= slack_us;
+        }
+    }
+
+    if (over_us < FRAME_SPILL_MIN_OVER_US &&
+        frame_spill_debt_us < FRAME_SPILL_MIN_OVER_US &&
+        gap_inc == 0)
+    {
+        return;
+    }
+
+    now_us = of_time_us();
+    if (frame_spill_last_report_us != 0 &&
+        now_us - frame_spill_last_report_us < FRAME_SPILL_REPORT_US)
+    {
+        frame_spill_suppressed++;
+        return;
+    }
+
+    missed_slots = prepare_us > budget_us
+                 ? ((prepare_us + budget_us - 1u) / budget_us) - 1u
+                 : 0u;
+    suppressed = frame_spill_suppressed;
+    debt_us = frame_spill_debt_us;
+    debt_frames = frame_spill_debt_frames;
+    debt_max_over_us = frame_spill_debt_max_over_us;
+    frame_spill_suppressed = 0;
+    frame_spill_debt_us = 0;
+    frame_spill_debt_frames = 0;
+    frame_spill_debt_max_over_us = 0;
+    frame_spill_last_report_us = now_us;
+
+    display_us = I_FrameStageUS(R_PERF_STAGE_DISPLAY);
+    view_us = I_FrameStageUS(R_PERF_STAGE_VIEW);
+    hud_us = display_us > view_us ? display_us - view_us : 0;
+    bsp_us = I_FrameStageUS(R_PERF_STAGE_BSP);
+    planes_us = I_FrameStageUS(R_PERF_STAGE_PLANES);
+    masked_us = I_FrameStageUS(R_PERF_STAGE_MASKED);
+    present_us = I_FrameStageUS(R_PERF_STAGE_PRESENT);
+    gpuwait_us = I_FrameStageUS(R_PERF_STAGE_GPU_WAIT);
+    flip_us = I_FrameStageUS(R_PERF_STAGE_GPU_FLIP);
+    cache_us = I_FrameStageUS(R_PERF_STAGE_CACHE);
+    blit_us = I_FrameStageUS(R_PERF_STAGE_BLIT);
+
+    printf("Doom video: frame spill mode=%s path=%s prep=%u.%03ums "
+           "budget=%u.%03ums over=%u.%03ums missed=%u vt=%u "
+           "vb=%u present=%u gap=%d gap_inc=%u debt=%u.%03ums "
+           "debt_frames=%u debt_max=%u.%03ums suppressed=%u "
+           "display=%u.%03ums "
+           "hud=%u.%03ums view=%u.%03ums bsp=%u.%03ums planes=%u.%03ums "
+           "masked=%u.%03ums present_us=%u.%03ums gpuwait=%u.%03ums "
+           "flip=%u.%03ums cache=%u.%03ums blit=%u.%03ums "
+           "flipwait=%u.%03ums\n",
+           M_RefreshModeName(M_EffectiveRefreshMode()),
+           path,
+           prepare_us / 1000u, prepare_us % 1000u,
+           budget_us / 1000u, budget_us % 1000u,
+           over_us / 1000u, over_us % 1000u,
+           missed_slots,
+           current_vtotal_valid ? gpu_pace.current_vtotal : 0u,
+           timing.vblank_count,
+           timing.present_count,
+           gap,
+           gap_inc,
+           debt_us / 1000u, debt_us % 1000u,
+           debt_frames,
+           debt_max_over_us / 1000u, debt_max_over_us % 1000u,
+           suppressed,
+           display_us / 1000u, display_us % 1000u,
+           hud_us / 1000u, hud_us % 1000u,
+           view_us / 1000u, view_us % 1000u,
+           bsp_us / 1000u, bsp_us % 1000u,
+           planes_us / 1000u, planes_us % 1000u,
+           masked_us / 1000u, masked_us % 1000u,
+           present_us / 1000u, present_us % 1000u,
+           gpuwait_us / 1000u, gpuwait_us % 1000u,
+           flip_us / 1000u, flip_us % 1000u,
+           cache_us / 1000u, cache_us % 1000u,
+           blit_us / 1000u, blit_us % 1000u,
+           queued_wait_us / 1000u, queued_wait_us % 1000u);
+}
+
+static void I_ResetFixedDisplaySample(void)
+{
+    fixed_display_sample_raw_us = 0;
+    fixed_display_last_raw_vblank_us = 0;
+    fixed_display_period_us = 0;
+    fixed_display_sample_valid = 0;
+}
+
+static uint64_t I_FixedDisplaySampleUS(const of_video_timing_t *timing,
+                                       uint32_t elapsed_vblanks)
+{
+    unsigned int measured_period_us = 0;
+    int64_t error_us;
+
+    if (!current_vtotal_valid || timing->last_vblank_us == 0)
+        return timing->last_vblank_us;
+
+    if (!fixed_display_sample_valid)
+    {
+        fixed_display_sample_raw_us = timing->last_vblank_us;
+        fixed_display_last_raw_vblank_us = timing->last_vblank_us;
+        fixed_display_period_us = I_VTotalPeriodUS(gpu_pace.current_vtotal);
+        fixed_display_sample_valid = 1;
+        return fixed_display_sample_raw_us;
+    }
+
+    if (elapsed_vblanks != 0 &&
+        timing->last_vblank_us > fixed_display_last_raw_vblank_us)
+    {
+        measured_period_us =
+            (unsigned int)((timing->last_vblank_us
+                          - fixed_display_last_raw_vblank_us)
+                         / elapsed_vblanks);
+
+        if (measured_period_us >= 10000u && measured_period_us <= 30000u)
+        {
+            if (fixed_display_period_us == 0)
+            {
+                fixed_display_period_us = measured_period_us;
+            }
+            else
+            {
+                fixed_display_period_us =
+                    (fixed_display_period_us * 7u
+                     + measured_period_us + 4u) / 8u;
+            }
+        }
+    }
+
+    fixed_display_last_raw_vblank_us = timing->last_vblank_us;
+
+    if (fixed_display_period_us == 0)
+        return timing->last_vblank_us;
+
+    fixed_display_sample_raw_us +=
+        (uint64_t)fixed_display_period_us * elapsed_vblanks;
+    error_us = (int64_t)timing->last_vblank_us
+             - (int64_t)fixed_display_sample_raw_us;
+
+    if (error_us > (int64_t)fixed_display_period_us
+     || error_us < -(int64_t)fixed_display_period_us)
+    {
+        fixed_display_sample_raw_us = timing->last_vblank_us;
+    }
+    else
+    {
+        fixed_display_sample_raw_us += error_us / 16;
+    }
+
+    return fixed_display_sample_raw_us;
+}
+
+static uint64_t I_DisplaySampleForVBlank(const of_video_timing_t *timing,
+                                         uint32_t *last_seen_vblank)
+{
+    uint32_t elapsed_vblanks = 1;
+
+    if (*last_seen_vblank != 0 && timing->vblank_count != *last_seen_vblank)
+        elapsed_vblanks = timing->vblank_count - *last_seen_vblank;
+
+    *last_seen_vblank = timing->vblank_count;
+
+    return I_FixedDisplaySampleUS(timing, elapsed_vblanks);
+}
+
+static void I_SetRefreshVTotal(unsigned int vtotal)
+{
+    if (!current_vtotal_valid || gpu_pace.current_vtotal != vtotal)
+        I_ResetFixedDisplaySample();
+
+    of_video_set_refresh_vtotal(vtotal);
+    gpu_pace.current_vtotal = vtotal;
+    current_vtotal_valid = 1;
+    gpu_pace.last_vtotal_update_us = of_time_us();
+    R_Perf_PacingSetVTotal(vtotal);
+    I_SetPredictedVblankPeriodUS(I_VTotalPeriodUS(vtotal));
 }
 
 static void I_RestoreFallbackRefresh(int failed_mode, const char *reason)
 {
-    if (failed_refresh_mode != failed_mode)
-    {
-        printf("Doom video: refresh %s failed (%s); falling back to 60\n",
-               M_RefreshModeName(failed_mode), reason);
-        failed_refresh_mode = failed_mode;
-    }
+    (void)reason;
 
-    if (gpu_pace.current_vtotal != OF_VIDEO_VTOTAL_60HZ)
+    if (failed_refresh_mode != failed_mode)
+        failed_refresh_mode = failed_mode;
+
+    if (!current_vtotal_valid || gpu_pace.current_vtotal != DOOM_VIDEO_VTOTAL_60HZ)
     {
-        of_video_set_refresh_vtotal(OF_VIDEO_VTOTAL_60HZ);
-        gpu_pace.current_vtotal = OF_VIDEO_VTOTAL_60HZ;
-        gpu_pace.last_vtotal_update_us = of_time_us();
-        R_Perf_PacingSetVTotal(OF_VIDEO_VTOTAL_60HZ);
+        I_SetRefreshVTotal(DOOM_VIDEO_VTOTAL_60HZ);
     }
 }
 
+static void I_WaitForQueuedDisplayFlip(void)
+{
+    if (!display_flip_queued)
+        return;
+
+    of_video_wait_flip();
+    display_flip_queued = 0;
+}
+
+static void I_MarkDisplayFlipQueued(void)
+{
+    display_flip_queued = 1;
+}
+
 static int I_WaitForNextVBlank(uint32_t *last_seen_vblank,
-                               unsigned int timeout_us)
+                               unsigned int timeout_us,
+                               uint32_t *elapsed_vblanks,
+                               of_video_timing_t *out_timing)
 {
     unsigned int start_us = of_time_us();
     of_video_timing_t timing;
+    uint32_t total_elapsed = 0;
+
+    /* If rendering overran the previous display slot, vblank_count may
+     * already be ahead when we enter.  Account for those missed slots, then
+     * wait for the next fresh vblank instead of returning immediately and
+     * rendering a burst frame. */
+    of_video_get_timing(&timing);
+    if (timing.vblank_count != *last_seen_vblank)
+    {
+        uint32_t previous = *last_seen_vblank;
+        uint32_t delta = previous == 0
+                       ? 0u
+                       : timing.vblank_count - previous;
+
+        *last_seen_vblank = timing.vblank_count;
+        total_elapsed += delta;
+    }
 
     for (;;)
     {
         of_video_get_timing(&timing);
         if (timing.vblank_count != *last_seen_vblank)
         {
+            uint32_t previous = *last_seen_vblank;
+            uint32_t delta;
+
             *last_seen_vblank = timing.vblank_count;
+            delta = previous == 0
+                  ? 1u
+                  : timing.vblank_count - previous;
+            if (delta == 0)
+                delta = 1u;
+            total_elapsed += delta;
+
+            if (elapsed_vblanks != NULL)
+            {
+                *elapsed_vblanks = total_elapsed == 0
+                                 ? 1u
+                                 : total_elapsed;
+            }
+            if (out_timing != NULL)
+                *out_timing = timing;
             return 1;
         }
 
@@ -263,9 +613,9 @@ static unsigned int I_PaceTargetToVTotal(unsigned int target_us)
     unsigned int current_vtotal;
     unsigned int current_period_us;
 
-    current_vtotal = gpu_pace.current_vtotal != 0
+    current_vtotal = current_vtotal_valid
                    ? gpu_pace.current_vtotal
-                   : OF_VIDEO_VTOTAL_60HZ;
+                   : DOOM_VIDEO_VTOTAL_60HZ;
     current_period_us = gpu_pace.refresh_period_us != 0
                       ? gpu_pace.refresh_period_us
                       : GPU_PACE_MIN_US;
@@ -318,9 +668,9 @@ static void I_UpdatePocketVRR(unsigned int sample_us)
         now_us - gpu_pace.last_vtotal_update_us < GPU_PACE_POCKET_VTOTAL_UPDATE_US)
         return;
 
-    current_vtotal = gpu_pace.current_vtotal != 0
+    current_vtotal = current_vtotal_valid
                    ? gpu_pace.current_vtotal
-                   : OF_VIDEO_VTOTAL_60HZ;
+                   : DOOM_VIDEO_VTOTAL_60HZ;
     if (gpu_pace.refresh_period_us == 0)
         return;
 
@@ -344,10 +694,7 @@ static void I_UpdatePocketVRR(unsigned int sample_us)
         next_vtotal = current_vtotal - GPU_PACE_POCKET_VTOTAL_STEP;
     }
 
-    of_video_set_refresh_vtotal(next_vtotal);
-    gpu_pace.current_vtotal = next_vtotal;
-    gpu_pace.last_vtotal_update_us = now_us;
-    R_Perf_PacingSetVTotal(next_vtotal);
+    I_SetRefreshVTotal(next_vtotal);
 
     /* Push the implied next-vblank period into the predictor so the
      * interpolation phase in d_main.c uses the new V_TOTAL on the very
@@ -386,9 +733,9 @@ static void I_UpdateFineVRR(unsigned int target_us)
         now_us - gpu_pace.last_vtotal_update_us < GPU_PACE_VTOTAL_UPDATE_US)
         return;
 
-    current_vtotal = gpu_pace.current_vtotal != 0
+    current_vtotal = current_vtotal_valid
                    ? gpu_pace.current_vtotal
-                   : OF_VIDEO_VTOTAL_60HZ;
+                   : DOOM_VIDEO_VTOTAL_60HZ;
     desired_vtotal = I_PaceTargetToVTotal(gpu_pace.vrr_target_us);
     delta = desired_vtotal > current_vtotal
           ? desired_vtotal - current_vtotal
@@ -409,10 +756,7 @@ static void I_UpdateFineVRR(unsigned int target_us)
         next_vtotal = current_vtotal - GPU_PACE_VTOTAL_LOWER_STEP;
     }
 
-    of_video_set_refresh_vtotal(next_vtotal);
-    gpu_pace.current_vtotal = next_vtotal;
-    gpu_pace.last_vtotal_update_us = now_us;
-    R_Perf_PacingSetVTotal(next_vtotal);
+    I_SetRefreshVTotal(next_vtotal);
 }
 
 static unsigned int I_UpdateAdaptivePaceTarget(unsigned int sample_us)
@@ -567,34 +911,24 @@ static void I_ApplyCappedRefresh(void)
 {
     int mode = M_EffectiveRefreshMode();
     unsigned int vtotal = mode == failed_refresh_mode
-                         ? OF_VIDEO_VTOTAL_60HZ
+                         ? DOOM_VIDEO_VTOTAL_60HZ
                          : I_RefreshModeVTotal(mode);
 
     if (video_present_count < 2)
-    {
-        if (!startup_refresh_hold_logged)
-        {
-            printf("Doom video: holding 60Hz until first app presents\n");
-            startup_refresh_hold_logged = 1;
-        }
-        vtotal = OF_VIDEO_VTOTAL_60HZ;
-    }
+        vtotal = DOOM_VIDEO_VTOTAL_60HZ;
 
-    if (gpu_pace.current_vtotal == vtotal)
+    if (current_vtotal_valid && gpu_pace.current_vtotal == vtotal)
         return;
 
-    if (video_present_count < 2)
-        printf("Doom video: startup V_TOTAL=%u\n", vtotal);
-    else if (mode == failed_refresh_mode)
-        printf("Doom video: refresh %s using fallback V_TOTAL=%u\n",
-               M_RefreshModeName(mode), vtotal);
-    else
-        printf("Doom video: refresh %s V_TOTAL=%u\n",
-               M_RefreshModeName(mode), vtotal);
-    of_video_set_refresh_vtotal(vtotal);
-    gpu_pace.current_vtotal = vtotal;
-    gpu_pace.last_vtotal_update_us = of_time_us();
-    R_Perf_PacingSetVTotal(vtotal);
+    I_SetRefreshVTotal(vtotal);
+}
+
+static void I_ApplyVRRRefresh(void)
+{
+    if (current_vtotal_valid && gpu_pace.current_vtotal == OF_VIDEO_VTOTAL_AUTO)
+        return;
+
+    I_SetRefreshVTotal(OF_VIDEO_VTOTAL_AUTO);
 }
 
 void I_InitGraphics(void)
@@ -610,9 +944,10 @@ void I_InitGraphics(void)
     gpu_pace.last_vtotal_update_us = of_time_us();
     gpu_pace.refresh_period_us = GPU_PACE_MIN_US;
     gpu_pace.vrr_target_us = 0;
+    current_vtotal_valid = 0;
+    I_ResetFixedDisplaySample();
     of_video_set_display_mode(OF_DISPLAY_FRAMEBUFFER);
     video_present_count = 0;
-    startup_refresh_hold_logged = 0;
 
     /* Clear all three 320x200 back buffers once. */
     for (int buf = 0; buf < 3; buf++) {
@@ -625,7 +960,6 @@ void I_InitGraphics(void)
     I_VideoBuffer = video_buf;
     V_RestoreBuffer();
     I_SetPalette(W_CacheLumpName(DEH_String("PLAYPAL"), PU_CACHE));
-    printf("Doom video: restored PLAYPAL after graphics init\n");
     R_GPU_Init();
     screenvisible = true;
 
@@ -655,62 +989,103 @@ void I_BeginRead(void)                 { }
 void I_StartFrame(void)
 {
     static uint32_t last_seen_vblank = 0;
-    static int last_frame_interpolation = -1;
+    static int display_clock_active = 0;
+    static int last_effective_refresh_mode = -1;
     int effective_refresh_mode = M_EffectiveRefreshMode();
+    int mode_changed;
+    int use_vblank_wait;
+    uint32_t elapsed_vblanks = 1;
+    of_video_timing_t frame_timing;
 
-    frame_interpolation = effective_refresh_mode == REFRESH_MODE_VRR;
-
-    /* Fixed refresh: request the selected V_TOTAL and let the wall-clock
-     * 35Hz tic clock run as-is.  VRR mode restores the adaptive path. */
-    if (!frame_interpolation)
+    frame_interpolation =
+        M_RefreshModeUsesInterpolation(effective_refresh_mode);
+    mode_changed = effective_refresh_mode != last_effective_refresh_mode;
+    if (mode_changed)
     {
-        last_frame_interpolation = 0;
-        if (!I_PocketPacingActive())
-        {
-            I_ApplyCappedRefresh();
-            return;
-        }
+        failed_refresh_mode = -1;
+        display_clock_active = 0;
+        last_seen_vblank = 0;
+        display_frame_paced = 0;
+        display_render_ahead = 0;
+        I_SetDisplayFrameSampleUS(0);
+        I_ResetFixedDisplaySample();
+        I_AdaptiveGpuPaceReset();
+        last_effective_refresh_mode = effective_refresh_mode;
     }
-    else if (!I_PocketPacingActive())
+
+    if (effective_refresh_mode == REFRESH_MODE_VRR)
+        I_ApplyVRRRefresh();
+    else
+        I_ApplyCappedRefresh();
+
+    use_vblank_wait = frame_interpolation
+                   && gpu_pace.pocket_pacing_enabled
+                   && effective_refresh_mode != failed_refresh_mode;
+    I_SetPocketPacing(0);
+    display_frame_paced = use_vblank_wait;
+    display_render_ahead = use_vblank_wait && R_GPU_UsingDirectFramebuffer();
+
+    /* Display-paced refresh modes wait on vblank here, but gameplay stays on
+     * vanilla 35 Hz wall-clock tics. d_main.c renders interpolated frames
+     * between simulation tics. */
+    if (!use_vblank_wait)
     {
+        I_WaitForQueuedDisplayFlip();
+        I_SetDisplayFrameSampleUS(0);
+        I_ResetFixedDisplaySample();
+        display_clock_active = 0;
+        last_seen_vblank = 0;
         return;
+    }
+
+    if (display_render_ahead)
+    {
+        of_video_get_timing(&frame_timing);
+        display_clock_active = 1;
+        if (effective_refresh_mode == REFRESH_MODE_VRR)
+        {
+            I_SetDisplayFrameSampleNow();
+        }
+        else
+        {
+            I_SetDisplayFrameSampleUS(
+                I_DisplaySampleForVBlank(&frame_timing, &last_seen_vblank));
+        }
+        return;
+    }
+
+    if (!display_clock_active)
+    {
+        of_video_timing_t timing;
+
+        of_video_get_timing(&timing);
+        last_seen_vblank = timing.vblank_count;
+        display_clock_active = 1;
     }
 
     /* Wait for the next vsync at frame start so the renderer has the
      * full vsync period as its budget.  Poll on vblank_count rather
      * than of_video_wait_flip() because the GPU triggered-flip path
      * queues CMD_FLIPs that of_video_wait_flip() does not track. */
-    if (!I_WaitForNextVBlank(&last_seen_vblank, 100000u))
+    memset(&frame_timing, 0, sizeof(frame_timing));
+    if (!I_WaitForNextVBlank(&last_seen_vblank, 100000u, &elapsed_vblanks,
+                             &frame_timing))
     {
-        if (!frame_interpolation)
-            I_RestoreFallbackRefresh(effective_refresh_mode, "no vblank");
-        else
-            I_RestoreFallbackRefresh(REFRESH_MODE_VRR, "no vblank");
+        I_SetDisplayFrameSampleUS(0);
+        display_clock_active = 0;
+        last_seen_vblank = 0;
+        display_frame_paced = 0;
+        display_render_ahead = 0;
+        I_RestoreFallbackRefresh(effective_refresh_mode, "no vblank");
         return;
     }
 
-    if (!frame_interpolation)
-    {
-        I_ApplyCappedRefresh();
-        return;
-    }
-
-    if (frame_interpolation
-               && last_frame_interpolation != 1
-               && gpu_pace.current_vtotal != OF_VIDEO_VTOTAL_60HZ) {
-        printf("Doom video: refresh VRR V_TOTAL=%u\n",
-               OF_VIDEO_VTOTAL_60HZ);
-        of_video_set_refresh_vtotal(OF_VIDEO_VTOTAL_60HZ);
-        gpu_pace.current_vtotal = OF_VIDEO_VTOTAL_60HZ;
-        gpu_pace.last_vtotal_update_us = of_time_us();
-        gpu_pace.refresh_period_us = GPU_PACE_MIN_US;
-        R_Perf_PacingSetVTotal(OF_VIDEO_VTOTAL_60HZ);
-    }
-    last_frame_interpolation = frame_interpolation ? 1 : 0;
-
-    /* VRR on: one gametic per rendered frame, advanced right at the
-     * start of this frame so TryRunTics sees the new tic value. */
-    I_PocketAdvanceFrameTic();
+    if (effective_refresh_mode == REFRESH_MODE_VRR)
+        I_SetDisplayFrameSampleNow();
+    else
+        I_SetDisplayFrameSampleUS(I_FixedDisplaySampleUS(&frame_timing,
+                                                         elapsed_vblanks));
+    (void)elapsed_vblanks;
 }
 extern void I_PollInput(void);
 void I_StartTic(void)                  { I_PollInput(); }
@@ -780,8 +1155,8 @@ void I_FinishUpdate(void)
 {
     /* Pace presentation to ~60 Hz.
      *
-     * Before uncapped interpolation landed, TryRunTics() blocked ~28 ms
-     * per iteration waiting for the next 35 Hz tic — that was the only
+     * Before uncapped interpolation landed, TryRunTics() blocked for roughly
+     * one tic per iteration -- that was the only
      * thing keeping the loop from running at CPU speed, because
      * of_video_flip() is non-blocking.
      *
@@ -798,27 +1173,41 @@ void I_FinishUpdate(void)
     static unsigned int last_flip_us = 0;
     const unsigned int target_us = 16667;  /* ~60 Hz */
 
-    /* Pocket pacing path: I_StartFrame already waited for the previous
-     * flip and advanced the tic clock.  Skip the percentile pacing,
-     * skip the explicit busy-wait in I_AdaptiveGpuPaceBeforeFlip, skip
-     * the usleep in the CPU-fb branch — just submit the present and
-     * record perf state.  CMD_FLIP backpressure / the next frame's
-     * of_video_wait_flip() provide the only stall.
+    /* Display-paced path. Direct framebuffer flips render one frame ahead:
+     * one flip may be queued while the next frame renders into the third
+     * buffer, then we wait before submitting the new flip. CPU-fb fallback
+     * keeps the older frame-start vblank wait.
      *
      * Sample the renderer prep time before PacingFrameQueued() clears
      * frame_active — that's the directly-measured render cost we feed
      * into VRR. */
-    if (I_PocketPacingActive()) {
+    if (display_frame_paced) {
         last_flip_us = 0;
         /* Dynamic VRR only when interpolating; capped mode holds the
          * selected fixed-refresh target in I_StartFrame. */
         if (gpu_pace.pocket_vrr_enabled && frame_interpolation) {
             unsigned int prepare_us = R_Perf_PacingCurrentPrepareUS();
+
             if (prepare_us > 0)
                 I_UpdatePocketVRR(prepare_us);
         }
         if (R_GPU_UsingDirectFramebuffer()) {
+            unsigned int queued_wait_us = 0;
+
+            if (display_render_ahead)
+            {
+                unsigned int wait_start_us = of_time_us();
+
+                I_WaitForQueuedDisplayFlip();
+                queued_wait_us = of_time_us() - wait_start_us;
+                R_Perf_PacingAddWait(queued_wait_us);
+            }
             if (R_GPU_PresentFrame()) {
+                I_LogFrameSpill("direct",
+                                R_Perf_PacingCurrentPrepareUS(),
+                                queued_wait_us);
+                if (display_render_ahead)
+                    I_MarkDisplayFlipQueued();
                 video_present_count++;
                 R_Perf_CountPresentedFrame(1);
                 R_Perf_PacingFrameQueued();
@@ -832,6 +1221,7 @@ void I_FinishUpdate(void)
         uint8_t *fb = of_video_surface();
         memcpy(fb, I_VideoBuffer, SCREENWIDTH * SCREENHEIGHT);
         of_video_flip();
+        I_LogFrameSpill("blit", R_Perf_PacingCurrentPrepareUS(), 0);
         video_present_count++;
         R_Perf_CountPresentedFrame(0);
         R_Perf_PacingFrameQueued();

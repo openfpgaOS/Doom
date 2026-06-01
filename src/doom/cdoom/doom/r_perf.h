@@ -78,36 +78,11 @@ typedef enum
     R_PERF_DETAIL_COUNT
 } r_perf_detail_t;
 
-#if R_RENDER_PERF || R_RUNTIME_TRACES || defined(R_PERF_IMPLEMENTATION)
 unsigned int R_Perf_NowUS(void);
 unsigned int R_Perf_BeginStage(void);
 void R_Perf_EndStage(r_perf_stage_t stage, unsigned int start_us);
 void R_Perf_AddStageUS(r_perf_stage_t stage, unsigned int elapsed_us);
-#else
-static inline unsigned int R_Perf_NowUS(void)
-{
-    return 0;
-}
-
-static inline unsigned int R_Perf_BeginStage(void)
-{
-    return 0;
-}
-
-static inline void R_Perf_EndStage(r_perf_stage_t stage,
-                                   unsigned int start_us)
-{
-    (void)stage;
-    (void)start_us;
-}
-
-static inline void R_Perf_AddStageUS(r_perf_stage_t stage,
-                                     unsigned int elapsed_us)
-{
-    (void)stage;
-    (void)elapsed_us;
-}
-#endif
+uint64_t R_Perf_CurrentStageUS(r_perf_stage_t stage);
 
 #if R_RENDER_PERF && R_RENDER_PERF_DETAIL
 
@@ -244,22 +219,11 @@ static inline void R_Perf_AddGpuDebug(uint32_t dma_waits,
 
 #endif
 
-#if R_RENDER_PERF || R_RUNTIME_TRACES || defined(R_PERF_IMPLEMENTATION)
 void R_Perf_FrameStart(void);
 void R_Perf_FrameCancel(void);
 void R_Perf_FrameEnd(void);
 void R_Perf_CountRenderedView(void);
 void R_Perf_CountPresentedFrame(int direct_gpu);
-#else
-static inline void R_Perf_FrameStart(void) {}
-static inline void R_Perf_FrameCancel(void) {}
-static inline void R_Perf_FrameEnd(void) {}
-static inline void R_Perf_CountRenderedView(void) {}
-static inline void R_Perf_CountPresentedFrame(int direct_gpu)
-{
-    (void)direct_gpu;
-}
-#endif
 
 void R_Perf_PacingFrameStart(void);
 void R_Perf_PacingFrameCancel(void);

@@ -60,6 +60,8 @@ seg_t*		segs;
 
 int		numsectors;
 sector_t*	sectors;
+int             numinterpolatedsectors;
+sector_t**      interpolatedsectors;
 
 int		numsubsectors;
 subsector_t*	subsectors;
@@ -290,6 +292,9 @@ void P_LoadSectors (int lump)
 	
     numsectors = W_LumpLength (lump) / sizeof(mapsector_t);
     sectors = Z_Malloc (numsectors*sizeof(sector_t),PU_LEVEL,0);	
+    interpolatedsectors = Z_Malloc(numsectors * sizeof(*interpolatedsectors),
+                                   PU_LEVEL, 0);
+    numinterpolatedsectors = 0;
     memset (sectors, 0, numsectors*sizeof(sector_t));
     data = W_CacheLumpNum (lump,PU_STATIC);
 	
@@ -299,6 +304,10 @@ void P_LoadSectors (int lump)
     {
 	ss->floorheight = SHORT(ms->floorheight)<<FRACBITS;
 	ss->ceilingheight = SHORT(ms->ceilingheight)<<FRACBITS;
+	ss->oldfloorheight = ss->floorheight;
+	ss->oldceilingheight = ss->ceilingheight;
+	ss->renderfloorheight = ss->floorheight;
+	ss->renderceilingheight = ss->ceilingheight;
 	ss->floorpic = R_FlatNumForName(ms->floorpic);
 	ss->ceilingpic = R_FlatNumForName(ms->ceilingpic);
 	ss->lightlevel = SHORT(ms->lightlevel);
