@@ -67,13 +67,6 @@ static const uint16_t period_table[36] = {
  * Amiga base clock = 7093789.2 Hz (PAL), period is clock divider. */
 #define AMIGA_CLOCK 7093789
 
-/* Amiga-style low-pass: the A500 output stage rolled off around 7 kHz
- * (LED filter off).  SVF cutoff is Q0.16 where 65535 = Nyquist (24 kHz).
- * 7 kHz → 7000/24000 × 65536 ≈ 19115.  A touch of resonance (Q ≈ 20)
- * adds a slight presence bump at the cutoff. */
-#define MOD_LPF_CUTOFF  35000
-#define MOD_LPF_Q       80
-
 /* Pre-computed 16.16 fixed-point rates for each period */
 static uint32_t period_to_rate_fp16(uint16_t period) {
     if (period == 0) return 0;
@@ -289,7 +282,8 @@ static void trigger_note(channel_t *c, uint16_t period, int sample_offset) {
                 if (ls < 0) ls = 0;
                 of_mixer_set_loop(c->voice, ls, ls + (int)s->loop_length);
             }
-            of_mixer_set_filter(c->voice, MOD_LPF_CUTOFF, MOD_LPF_Q, 1);
+            /* Per-voice SVF filter API was retired (the mixer HW has no
+             * state-variable filter, so this was always a no-op). */
         }
     }
 }

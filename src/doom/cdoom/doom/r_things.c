@@ -414,7 +414,16 @@ R_DrawVisSprite
     boolean		fuzz_gpu_batch = false;
 	
 	
-    patch = W_CacheLumpNum (vis->patch+firstspritelump, PU_CACHE);
+    /* Cache the sprite patch PU_LEVEL, not PU_CACHE.  R_DrawVisSprite runs
+     * for every visible sprite every frame; with PU_CACHE the per-frame
+     * Z_ChangeTag re-marks the lump purgeable, so the zone rover can evict it
+     * between sightings.  Rotation sweeps many sprite-rotation lumps in and
+     * out of view, and each re-entry then misses the cache and reloads via
+     * W_CacheLumpNum -> R_GPU_TextureDataUpdated -> a full GPU pipeline drain
+     * mid-frame, which surfaces as a periodic rotation hiccup.  Keeping the
+     * level's drawn sprite set resident eliminates the reload stall.  PU_LEVEL
+     * (not PU_STATIC) so it is reclaimed at the next level load. */
+    patch = W_CacheLumpNum (vis->patch+firstspritelump, PU_LEVEL);
     patchwidth = SHORT(patch->width);
     if (patchwidth <= 0)
 	return;

@@ -222,7 +222,7 @@ R_RenderMaskedSegRange
 //
 #define HEIGHTBITS		12
 #define HEIGHTUNIT		(1<<HEIGHTBITS)
-#define WALL_COLUMN_BATCH_LANES 8
+#define WALL_COLUMN_BATCH_LANES 16
 
 static inline fixed_t __attribute__((always_inline))
 R_TextureColumnForX(int x)
@@ -285,7 +285,6 @@ typedef struct
     const byte *source[WALL_COLUMN_BATCH_LANES];
     int32_t t[WALL_COLUMN_BATCH_LANES];
     int32_t tstep[WALL_COLUMN_BATCH_LANES];
-    fixed_t texturemid[WALL_COLUMN_BATCH_LANES];
     lighttable_t *colormap[WALL_COLUMN_BATCH_LANES];
     uint8_t light[WALL_COLUMN_BATCH_LANES];
 } wall_column_batch_t;
@@ -324,8 +323,9 @@ OF_FASTTEXT static void R_FlushWallColumnBatch(wall_column_batch_t *batch)
 	    dc_x = batch->x + i;
 	    dc_yl = batch->yl[i];
 	    dc_yh = batch->yh[i];
-	    dc_texturemid = batch->texturemid[i];
 	    dc_iscale = batch->tstep[i];
+	    dc_texturemid = batch->t[i]
+			  - (dc_yl - centery) * dc_iscale;
 	    dc_source = (byte *)batch->source[i];
 	    dc_colormap = batch->colormap[i];
 	    colfunc ();
@@ -380,7 +380,6 @@ R_AddWallColumnBatch(wall_column_batch_t *batch,
     batch->t[lane] = (int32_t)((uint32_t)texturemid
 			       + (uint32_t)(yl - centery) * (uint32_t)iscale);
     batch->tstep[lane] = iscale;
-    batch->texturemid[lane] = texturemid;
     batch->colormap[lane] = colormap;
     batch->light[lane] = (uint8_t)lightrow;
 }
@@ -522,14 +521,18 @@ OF_FASTTEXT void R_RenderSegLoop (void)
 	if (midtexture)
 	{
 	    // single sided line
-	    texturecolumn = R_TextureColumnForX(x);
-	    texturecolumn_ready = true;
-	    R_PrepareDrawColumn(scale, &iscale, &lightrow,
-				&column_colormap);
-	    drawcolumn_ready = true;
-	    R_AddWallColumnBatch(&upper_batch, x, mid_columns, mid_widthmask,
-				 texturecolumn, rw_midtexturemid,
-				 yl, yh, iscale, lightrow, column_colormap);
+	    if (yl <= yh)
+	    {
+		texturecolumn = R_TextureColumnForX(x);
+		texturecolumn_ready = true;
+		R_PrepareDrawColumn(scale, &iscale, &lightrow,
+				    &column_colormap);
+		drawcolumn_ready = true;
+		R_AddWallColumnBatch(&upper_batch, x, mid_columns,
+				     mid_widthmask, texturecolumn,
+				     rw_midtexturemid, yl, yh, iscale,
+				     lightrow, column_colormap);
+	    }
 	    ceiling_clip[x] = viewheight;
 	    floor_clip[x] = -1;
 	}

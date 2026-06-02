@@ -292,10 +292,14 @@ void R_GenerateComposite (int texnum)
 						
     }
 
-    // Now that the texture has been built in column cache,
-    //  it is purgable from zone memory.
+    // The composite is referenced by raw pointers cached in texturecolumnptr[],
+    //  so it must stay resident for the level.  A PU_CACHE composite can be
+    //  purged out from under those pointers (dangling read) and, on the GPU
+    //  build, regenerated with a full pipeline drain mid-frame -- the same
+    //  reload-stall class that causes the rotation hiccup.  Keep it PU_LEVEL;
+    //  it is reclaimed at the next level load.
     R_GPU_TextureDataUpdated(block, texturecompositesize[texnum]);
-    Z_ChangeTag (block, PU_CACHE);
+    Z_ChangeTag (block, PU_LEVEL);
 }
 
 

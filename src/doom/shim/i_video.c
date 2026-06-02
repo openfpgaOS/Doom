@@ -94,6 +94,7 @@ static grabmouse_callback_t grabmouse_cb;
 #define GPU_PACE_VTOTAL_UPDATE_US 500000u
 #define GPU_PACE_POCKET_VTOTAL_UPDATE_US 100000u
 #define GPU_PACE_POCKET_VTOTAL_STEP 12u
+#define DISPLAY_QUEUE_MISS_RESYNC_COUNT 4u
 
 typedef struct
 {
@@ -122,6 +123,9 @@ static int current_vtotal_valid;
 static int display_frame_paced;
 static int display_render_ahead;
 static int display_flip_queued;
+static int display_resync_after_miss;
+static unsigned int display_queue_miss_count;
+static uint32_t display_flip_queued_vblank;
 static uint64_t fixed_display_sample_raw_us;
 static uint64_t fixed_display_last_raw_vblank_us;
 static unsigned int fixed_display_period_us;
@@ -291,11 +295,45 @@ static void I_WaitForQueuedDisplayFlip(void)
 
     of_video_wait_flip();
     display_flip_queued = 0;
+    display_flip_queued_vblank = 0;
 }
 
 static void I_MarkDisplayFlipQueued(void)
 {
+    of_video_timing_t timing;
+
+    of_video_get_timing(&timing);
     display_flip_queued = 1;
+    display_flip_queued_vblank = timing.vblank_count;
+}
+
+static int I_DisplayFlipMissedQueueWindow(void)
+{
+    of_video_timing_t timing;
+
+    if (!display_flip_queued || display_flip_queued_vblank == 0)
+        return 0;
+
+    of_video_get_timing(&timing);
+    return timing.vblank_count != 0
+        && timing.vblank_count != display_flip_queued_vblank;
+}
+
+static uint64_t I_NextFixedDisplaySampleUS(const of_video_timing_t *timing)
+{
+    uint64_t sample_us = I_FixedDisplaySampleUS(timing, 1);
+
+    if (sample_us <= timing->last_vblank_us && timing->last_vblank_us != 0)
+    {
+        unsigned int period_us = current_vtotal_valid
+                               ? I_VTotalPeriodUS(gpu_pace.current_vtotal)
+                               : 0;
+
+        if (period_us != 0)
+            sample_us = timing->last_vblank_us + period_us;
+    }
+
+    return sample_us;
 }
 
 static int I_WaitForNextVBlank(uint32_t *last_seen_vblank,
@@ -815,6 +853,8 @@ void I_StartFrame(void)
         last_seen_vblank = 0;
         display_frame_paced = 0;
         display_render_ahead = 0;
+        display_resync_after_miss = 0;
+        display_queue_miss_count = 0;
         I_SetDisplayFrameSampleUS(0);
         I_ResetFixedDisplaySample();
         I_AdaptiveGpuPaceReset();
@@ -843,11 +883,22 @@ void I_StartFrame(void)
         I_ResetFixedDisplaySample();
         display_clock_active = 0;
         last_seen_vblank = 0;
+        display_resync_after_miss = 0;
+        display_queue_miss_count = 0;
         return;
     }
 
     if (display_render_ahead)
     {
+        if (display_resync_after_miss)
+        {
+            display_resync_after_miss = 0;
+            display_queue_miss_count = 0;
+            I_WaitForQueuedDisplayFlip();
+            I_ResetFixedDisplaySample();
+            last_seen_vblank = 0;
+        }
+
         of_video_get_timing(&frame_timing);
         display_clock_active = 1;
         if (effective_refresh_mode == REFRESH_MODE_VRR)
@@ -856,9 +907,20 @@ void I_StartFrame(void)
         }
         else
         {
-            I_SetDisplayFrameSampleUS(
-                I_DisplaySampleForVBlank(&frame_timing, &last_seen_vblank));
+            if (last_seen_vblank == 0 ||
+                last_seen_vblank == frame_timing.vblank_count)
+            {
+                I_SetDisplayFrameSampleUS(
+                    I_NextFixedDisplaySampleUS(&frame_timing));
+            }
+            else
+            {
+                I_SetDisplayFrameSampleUS(
+                    I_DisplaySampleForVBlank(&frame_timing,
+                                             &last_seen_vblank));
+            }
         }
+        last_seen_vblank = frame_timing.vblank_count;
         return;
     }
 
@@ -884,6 +946,8 @@ void I_StartFrame(void)
         last_seen_vblank = 0;
         display_frame_paced = 0;
         display_render_ahead = 0;
+        display_resync_after_miss = 0;
+        display_queue_miss_count = 0;
         I_RestoreFallbackRefresh(effective_refresh_mode, "no vblank");
         return;
     }
@@ -1001,18 +1065,35 @@ void I_FinishUpdate(void)
         }
         if (R_GPU_UsingDirectFramebuffer()) {
             unsigned int queued_wait_us = 0;
+            int missed_queue_window = 0;
 
             if (display_render_ahead)
             {
                 unsigned int wait_start_us = of_time_us();
 
+                missed_queue_window = I_DisplayFlipMissedQueueWindow();
                 I_WaitForQueuedDisplayFlip();
                 queued_wait_us = of_time_us() - wait_start_us;
                 R_Perf_PacingAddWait(queued_wait_us);
             }
             if (R_GPU_PresentFrame()) {
                 if (display_render_ahead)
+                {
+                    if (missed_queue_window)
+                    {
+                        display_queue_miss_count++;
+                        if (display_queue_miss_count >=
+                            DISPLAY_QUEUE_MISS_RESYNC_COUNT)
+                        {
+                            display_resync_after_miss = 1;
+                        }
+                    }
+                    else
+                    {
+                        display_queue_miss_count = 0;
+                    }
                     I_MarkDisplayFlipQueued();
+                }
                 video_present_count++;
                 R_Perf_CountPresentedFrame(1);
                 R_Perf_PacingFrameQueued();
