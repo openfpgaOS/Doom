@@ -562,18 +562,45 @@ void D_RunFrame()
             }
             else
             {
-                uint64_t now_us = I_GetDisplayTimeUS();
-                uint64_t phase_us = (now_us * TICRATE) % 1000000ULL;
+                /* Anchor the sub-tic phase to the simulation tic the renderer
+                 * actually has loaded (gametic), not to a free-running
+                 * wall-clock phase.  TryRunTics() is non-blocking, so gametic
+                 * is latched a few microseconds before this phase is sampled;
+                 * when a 35 Hz tic boundary falls in that window, the absolute
+                 * phase (now*TICRATE)%1e6 wraps back toward 0 while the
+                 * oldangle->angle pair has NOT advanced, snapping the view
+                 * backward for one frame.  That is the periodic rotation
+                 * hiccup, and it gets more frequent as the window widens under
+                 * load (audio/heavier frames).
+                 *
+                 * Re-anchor phase 0 to the most recent tic boundary whenever
+                 * gametic advances, and clamp to one tic: if the sim is lagging
+                 * real time, hold at the current pair instead of wrapping the
+                 * phase backward.  Use the wall clock (I_GetTimeUS), the same
+                 * source that drives gametic, so the grid and the pair never
+                 * disagree. */
+                static int      interp_anchor_tic = -1;
+                static uint64_t interp_anchor_us  = 0;
+                uint64_t now_us = I_GetTimeUS();
+                uint64_t into_tic_us =
+                    ((now_us * TICRATE) % 1000000ULL) / TICRATE;
+                uint64_t dt_us;
 
-                /* The renderer only keeps the latest previous/current tic
-                 * pair.  Use the display clock's fractional tic phase for
-                 * the blend, and let gametic select the pair.  Deriving the
-                 * phase from gametic itself, or from D_StartGameLoop(), is
-                 * fragile because the loop starts at an arbitrary point
-                 * inside the global 35 Hz timer tick.  Align to the same
-                 * timer phase that TryRunTics() uses. */
-                fractionaltic = (fixed_t)((phase_us * FRACUNIT)
-                                          / 1000000ULL);
+                if (gametic != interp_anchor_tic)
+                {
+                    interp_anchor_tic = gametic;
+                    interp_anchor_us  = now_us > into_tic_us
+                                      ? now_us - into_tic_us : 0;
+                }
+
+                dt_us = now_us > interp_anchor_us
+                      ? now_us - interp_anchor_us : 0;
+
+                if (dt_us >= 1000000ULL / TICRATE)
+                    fractionaltic = FRACUNIT;
+                else
+                    fractionaltic = (fixed_t)((dt_us * TICRATE * FRACUNIT)
+                                              / 1000000ULL);
             }
         }
         else

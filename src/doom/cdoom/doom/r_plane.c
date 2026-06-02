@@ -187,7 +187,7 @@ R_MapPlane
     fixed_t	ystep;
     unsigned	index;
     int		gpu_light;
-    lighttable_t* colormap;
+    lighttable_t* colormap = NULL;
     unsigned int perf_start;
 
     perf_start = R_PERF_DETAIL_BEGIN();
@@ -233,7 +233,6 @@ R_MapPlane
     }
     else
     {
-	colormap = planezlight[index];
 	gpu_light = planezlightrow[index];
     }
 
@@ -255,6 +254,9 @@ R_MapPlane
 	    goto done;
 	}
     }
+
+    if (colormap == NULL)
+	colormap = planezlight[index];
 
     ds_y = y;
     ds_x1 = x1;
