@@ -1197,13 +1197,16 @@ boolean M_RefreshModeUsesInterpolation(int mode)
 
 #define REFRESH_MENU_SCALE_NUM 7
 #define REFRESH_MENU_SCALE_DEN 4
+#define OPTIONS_PATCH_SCALE_NUM 7
+#define OPTIONS_PATCH_SCALE_DEN 8
 
-static int M_RefreshTextScale(int value)
+static int M_MenuTextScale(int value, int numerator, int denominator)
 {
-    return (value * REFRESH_MENU_SCALE_NUM) / REFRESH_MENU_SCALE_DEN;
+    return (value * numerator) / denominator;
 }
 
-static int M_DrawRefreshString(int x, int y, const char *text)
+static int M_DrawScaledMenuString(int x, int y, const char *text,
+                                  int numerator, int denominator)
 {
     const char *p;
 
@@ -1218,12 +1221,26 @@ static int M_DrawRefreshString(int x, int y, const char *text)
         }
 
         V_DrawPatchScaled(x, y, hu_font[c],
-                          REFRESH_MENU_SCALE_NUM,
-                          REFRESH_MENU_SCALE_DEN);
-        x += M_RefreshTextScale(SHORT(hu_font[c]->width));
+                          numerator, denominator);
+        x += M_MenuTextScale(SHORT(hu_font[c]->width),
+                             numerator, denominator);
     }
 
     return x;
+}
+
+static int M_DrawRefreshString(int x, int y, const char *text)
+{
+    return M_DrawScaledMenuString(x, y, text,
+                                  REFRESH_MENU_SCALE_NUM,
+                                  REFRESH_MENU_SCALE_DEN);
+}
+
+static void M_DrawOptionsPatch(int x, int y, patch_t *patch)
+{
+    V_DrawPatchScaled(x, y, patch,
+                      OPTIONS_PATCH_SCALE_NUM,
+                      OPTIONS_PATCH_SCALE_DEN);
 }
 
 void M_DrawOptions(void)
@@ -1243,22 +1260,31 @@ void M_DrawOptions(void)
 
         msg = (patch_t *)W_CacheLumpName(DEH_String(msgNames[0]), PU_CACHE);
         msg_y = OptionsDef.y + LINEHEIGHT * detail;
-        visual_top = msg_y - SHORT(msg->topoffset);
+        visual_top = msg_y
+                   - M_MenuTextScale(SHORT(msg->topoffset),
+                                     OPTIONS_PATCH_SCALE_NUM,
+                                     OPTIONS_PATCH_SCALE_DEN);
 
         /* Center the hu_font label vertically against the M_MSG patch
          * (heights are close but not identical). */
         hu_h = SHORT(hu_font[0]->height);
         refresh_y = visual_top
-                  + (SHORT(msg->height) - M_RefreshTextScale(hu_h)) / 2;
+                  + (M_MenuTextScale(SHORT(msg->height),
+                                     OPTIONS_PATCH_SCALE_NUM,
+                                     OPTIONS_PATCH_SCALE_DEN)
+                     - M_MenuTextScale(hu_h,
+                                       REFRESH_MENU_SCALE_NUM,
+                                       REFRESH_MENU_SCALE_DEN)) / 2;
 
         value = M_RefreshModeName(M_EffectiveRefreshMode());
         M_DrawRefreshString(OptionsDef.x, refresh_y, "REFRESH:");
         M_DrawRefreshString(OptionsDef.x + 120, refresh_y, value);
     }
 
-    V_DrawPatchDirect(OptionsDef.x + 120, OptionsDef.y + LINEHEIGHT * messages,
-                      W_CacheLumpName(DEH_String(msgNames[showMessages]),
-                                      PU_CACHE));
+    M_DrawOptionsPatch(OptionsDef.x + 120,
+                       OptionsDef.y + LINEHEIGHT * messages,
+                       W_CacheLumpName(DEH_String(msgNames[showMessages]),
+                                       PU_CACHE));
 
     M_DrawThermo(OptionsDef.x, OptionsDef.y + LINEHEIGHT * (mousesens + 1),
 		 10, mouseSensitivity);
@@ -2341,7 +2367,14 @@ void M_Drawer (void)
 
 	if (name[0] && W_CheckNumForName(name) > 0)
 	{
-	    V_DrawPatchDirect (x, y, W_CacheLumpName(name, PU_CACHE));
+            if (currentMenu == &OptionsDef)
+            {
+                M_DrawOptionsPatch(x, y, W_CacheLumpName(name, PU_CACHE));
+            }
+            else
+            {
+                V_DrawPatchDirect (x, y, W_CacheLumpName(name, PU_CACHE));
+            }
 	}
         else if (currentMenu == &EpiDef)
         {
