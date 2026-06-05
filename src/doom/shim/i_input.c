@@ -9,9 +9,16 @@
  *   L2 / R2      -> use/open / fire
  *   START        -> ESC
  *   SELECT       -> TAB (map)
- *   Left stick   -> analog turn + forward/back
- *   Right stick  -> analog strafe left/right
- */
+ *   Left stick   -> move forward/back + strafe left/right
+ *   Right stick  -> analog turn
+ *
+ * Axis response follows the Quake port (in_of.c): movement axes get a
+ * 50/50 linear+squared blend on the dock pad and stay linear (1:1) on
+ * a SNAC PSX-Analog pad; turn additionally gets a squared curve to
+ * keep the centre calm for fine aiming.  The dock turn gain is 0.6x
+ * versus 1.0x for SNAC, putting docked full-tilt turn at ~148 deg/s —
+ * between Quake's docked look (112) and Doom's keyboard run-turn
+ * (246, which SNAC full tilt reaches). */
 
 #include "of.h"
 #include "d_event.h"
@@ -34,12 +41,11 @@
 #define STICK_DEADZONE     (16 * 256)
 #define STICK_FULL_SCALE   32640
 #define STICK_INACTIVE     ((int16_t) 0x8000)
-#define MOVE_AXIS_GAIN_NUM 5
-#define MOVE_AXIS_GAIN_DEN 4
-#define TURN_AXIS_GAIN_NUM 9
-#define TURN_AXIS_GAIN_DEN 10
+#define DOCK_TURN_AXIS_GAIN_NUM 3
+#define DOCK_TURN_AXIS_GAIN_DEN 5
+#define SNAC_STRAFE_AXIS_GAIN_NUM 5
+#define SNAC_STRAFE_AXIS_GAIN_DEN 4
 #define STICK_MENU_THRESH  (FRACUNIT / 2)
-#define STICK_RUN_THRESH   ((FRACUNIT * 7) / 8)
 
 static uint32_t prev_buttons;
 static int pad_analog_seen;
@@ -135,40 +141,65 @@ static int axis_live(int16_t axis)
     return axis != 0 && axis != STICK_INACTIVE;
 }
 
+/* SNAC / digital-pad guard, same scheme as the Quake port: a digital
+ * pad's undriven joy fields reach us pinned at 0x8000 every poll, so
+ * axes are zeroed until one of them produces a value only a live,
+ * centred-at-rest stick can produce.  Crucially, 0x8000 is ONLY used
+ * for latching — once a real stick has been seen it must pass through
+ * untouched, because the OS maps the APF's unsigned axis bytes as
+ * (raw - 128) * 256, which makes full left/up deflection exactly
+ * -32768 (0x8000).  Zeroing it per-poll cut every axis dead at full
+ * tilt (e.g. the right stick could strafe right but never left). */
 static void filter_inactive_analog_axes(of_input_state_t *s)
 {
+    if (pad_analog_seen)
+    {
+        return;
+    }
+
     if (axis_live(s->joy_lx) || axis_live(s->joy_ly) ||
         axis_live(s->joy_rx) || axis_live(s->joy_ry))
     {
         pad_analog_seen = 1;
+        return;
     }
 
-    if (s->joy_lx == STICK_INACTIVE)
-    {
-        s->joy_lx = 0;
-    }
-    if (s->joy_ly == STICK_INACTIVE)
-    {
-        s->joy_ly = 0;
-    }
-    if (s->joy_rx == STICK_INACTIVE)
-    {
-        s->joy_rx = 0;
-    }
-    if (s->joy_ry == STICK_INACTIVE)
-    {
-        s->joy_ry = 0;
-    }
-
-    if (!pad_analog_seen)
-    {
-        s->joy_lx = 0;
-        s->joy_ly = 0;
-        s->joy_rx = 0;
-        s->joy_ry = 0;
-    }
+    s->joy_lx = 0;
+    s->joy_ly = 0;
+    s->joy_rx = 0;
+    s->joy_ry = 0;
 }
 
+static int snac_analog_p1(void)
+{
+    of_analogizer_state_t st;
+
+    if (!of_analogizer_enabled())
+    {
+        return 0;
+    }
+
+    if (of_analogizer_state(&st) < 0 || !st.enabled)
+    {
+        return 0;
+    }
+
+    if (st.snac_type != 0x12 && st.snac_type != 0x13)
+    {
+        return 0;
+    }
+
+    if (st.snac_assignment == 0x40 || st.snac_assignment == 1)
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Squared response for the turn axis keeps the centre calm for fine
+ * aiming.  Applied to both pad types; the per-pad gain below sets the
+ * rate. */
 static int shape_turn_axis(int value)
 {
     int sign;
@@ -190,6 +221,35 @@ static int shape_turn_axis(int value)
     }
 
     return sign * curved;
+}
+
+/* Softened response for the dock pad's movement axes: a 50/50 blend
+ * of linear and squared, out = v*(FRACUNIT+|v|)/(2*FRACUNIT) — the
+ * same curve as the Quake port's axis_curved().  Pure squared felt
+ * sluggish mid-range; this keeps walking speeds reasonable (half
+ * tilt -> ~37%) while still calming the centre, and full deflection
+ * reaches full speed.  SNAC DualShock sticks stay linear (1:1). */
+static int axis_move_curve(int value)
+{
+    int sign;
+    int mag;
+    int out;
+
+    if (value == 0)
+    {
+        return 0;
+    }
+
+    sign = value < 0 ? -1 : 1;
+    mag = abs_int(value);
+    out = (int)(((int64_t)mag * (FRACUNIT + mag)) / (2 * FRACUNIT));
+
+    if (out > FRACUNIT)
+    {
+        out = FRACUNIT;
+    }
+
+    return sign * out;
 }
 
 static uint32_t trigger_button_mask(const of_input_state_t *s)
@@ -251,20 +311,40 @@ static void post_joystick_axes(const of_input_state_t *s, uint32_t buttons)
     int ly = normalize_axis(s->joy_ly);
     int rx = normalize_axis(s->joy_rx);
     int ry = normalize_axis(s->joy_ry);
-    int turn = scale_axis(shape_turn_axis(lx),
-                          TURN_AXIS_GAIN_NUM, TURN_AXIS_GAIN_DEN);
+    int snac = snac_analog_p1();
+    int forward = ly;
+    int strafe = lx;
+    int turn;
 
-    ly = scale_axis(ly, MOVE_AXIS_GAIN_NUM, MOVE_AXIS_GAIN_DEN);
-    rx = scale_axis(rx, MOVE_AXIS_GAIN_NUM, MOVE_AXIS_GAIN_DEN);
+    /* Movement axes: soften the dock pad's response; a SNAC
+     * DualShock's pots already feel right at 1:1, except that they
+     * rarely reach the byte rails, so strafe gets a 5/4 boost letting
+     * ~80% deflection hit full speed (forward is fast enough that the
+     * shortfall isn't felt there). */
+    if (!snac)
+    {
+        forward = axis_move_curve(forward);
+        strafe = axis_move_curve(strafe);
+    }
+    else
+    {
+        strafe = scale_axis(strafe, SNAC_STRAFE_AXIS_GAIN_NUM,
+                            SNAC_STRAFE_AXIS_GAIN_DEN);
+    }
+
+    /* Turn: squared curve, then the dock pad runs at 0.6x, a SNAC
+     * PSX-Analog pad at the full rate. */
+    turn = scale_axis(shape_turn_axis(rx),
+                      snac ? 1 : DOCK_TURN_AXIS_GAIN_NUM,
+                      snac ? 1 : DOCK_TURN_AXIS_GAIN_DEN);
 
     memset(&ev, 0, sizeof(ev));
     ev.type = ev_joystick;
-    ev.data1 = joystick_button_mask(joybspeed, abs_int(ly) >= STICK_RUN_THRESH)
-             | joystick_button_mask(joybuse, (buttons & OF_BTN_L2) != 0)
+    ev.data1 = joystick_button_mask(joybuse, (buttons & OF_BTN_L2) != 0)
              | joystick_button_mask(joybfire, (buttons & OF_BTN_R2) != 0);
     ev.data2 = turn;
-    ev.data3 = ly;
-    ev.data4 = rx;
+    ev.data3 = forward;
+    ev.data4 = strafe;
     ev.data5 = 0;
     ev.data6 = stick_dir(lx, ly) << LSTICK_SHIFT
              | stick_dir(rx, ry) << RSTICK_SHIFT;

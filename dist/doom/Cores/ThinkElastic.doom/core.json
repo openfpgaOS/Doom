@@ -7,8 +7,8 @@
             "description": "Doom on openfpgaOS",
             "author": "ThinkElastic",
             "url": "",
-            "version": "1.1.11",
-            "date_release": "2026-06-03"
+            "version": "1.1.12",
+            "date_release": "2026-06-05"
         },
         "framework": {
             "target_product": "Analogue Pocket",

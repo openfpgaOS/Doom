@@ -536,10 +536,11 @@ void G_BuildTiccmd (ticcmd_t* cmd, int maketic)
 	    cmd->angleturn += angleturn[tspeed]; 
         if (use_analog && joyxmove)
         {
-            // Cubic response curve allows for finer control when stick
-            // deflection is small.
-            joyxmove = FixedMul(FixedMul(joyxmove, joyxmove), joyxmove);
+            // Linear response to match the Quake port's look feel; the
+            // input shim applies the per-pad (dock vs SNAC) turn gain.
             joyxmove = joyxmove * joystick_turn_sensitivity / 10;
+            joyxmove = (joyxmove > FRACUNIT) ? FRACUNIT : joyxmove;
+            joyxmove = (joyxmove < -FRACUNIT) ? -FRACUNIT : joyxmove;
             cmd->angleturn -= FixedMul(angleturn[1], joyxmove);
         }
         else if (joystick_turn_sensitivity)
