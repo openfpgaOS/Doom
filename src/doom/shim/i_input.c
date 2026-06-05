@@ -31,11 +31,18 @@
 #define KEY_POCKET_FIRE    KEY_RCTRL
 #define KEY_HOLD_RUN       KEY_RSHIFT
 #define KEY_MENU_BACK      KEY_BACKSPACE
-#define STICK_DEADZONE     4096
+#define STICK_DEADZONE     (16 * 256)
+#define STICK_FULL_SCALE   32640
+#define STICK_INACTIVE     ((int16_t) 0x8000)
+#define MOVE_AXIS_GAIN_NUM 5
+#define MOVE_AXIS_GAIN_DEN 4
+#define TURN_AXIS_GAIN_NUM 9
+#define TURN_AXIS_GAIN_DEN 10
 #define STICK_MENU_THRESH  (FRACUNIT / 2)
 #define STICK_RUN_THRESH   ((FRACUNIT * 7) / 8)
 
 static uint32_t prev_buttons;
+static int pad_analog_seen;
 static int b_mode;
 static int b_tap_use_allowed;
 static unsigned int b_press_ms;
@@ -79,7 +86,6 @@ static int normalize_axis(int16_t axis)
     int v = axis;
     int sign;
     int mag;
-    int denom;
     int out;
 
     if (v > -STICK_DEADZONE && v < STICK_DEADZONE)
@@ -88,9 +94,33 @@ static int normalize_axis(int16_t axis)
     }
 
     sign = v < 0 ? -1 : 1;
-    mag = abs_int(v) - STICK_DEADZONE;
-    denom = 32767 - STICK_DEADZONE;
-    out = (int) (((int64_t) mag * FRACUNIT + denom / 2) / denom);
+    mag = abs_int(v);
+
+    if (mag > STICK_FULL_SCALE)
+    {
+        mag = STICK_FULL_SCALE;
+    }
+
+    out = (int) (((int64_t) mag * FRACUNIT + STICK_FULL_SCALE / 2)
+               / STICK_FULL_SCALE);
+
+    return sign * out;
+}
+
+static int scale_axis(int value, int numerator, int denominator)
+{
+    int sign;
+    int mag;
+    int out;
+
+    if (value == 0)
+    {
+        return 0;
+    }
+
+    sign = value < 0 ? -1 : 1;
+    mag = abs_int(value);
+    out = (mag * numerator + denominator / 2) / denominator;
 
     if (out > FRACUNIT)
     {
@@ -98,6 +128,45 @@ static int normalize_axis(int16_t axis)
     }
 
     return sign * out;
+}
+
+static int axis_live(int16_t axis)
+{
+    return axis != 0 && axis != STICK_INACTIVE;
+}
+
+static void filter_inactive_analog_axes(of_input_state_t *s)
+{
+    if (axis_live(s->joy_lx) || axis_live(s->joy_ly) ||
+        axis_live(s->joy_rx) || axis_live(s->joy_ry))
+    {
+        pad_analog_seen = 1;
+    }
+
+    if (s->joy_lx == STICK_INACTIVE)
+    {
+        s->joy_lx = 0;
+    }
+    if (s->joy_ly == STICK_INACTIVE)
+    {
+        s->joy_ly = 0;
+    }
+    if (s->joy_rx == STICK_INACTIVE)
+    {
+        s->joy_rx = 0;
+    }
+    if (s->joy_ry == STICK_INACTIVE)
+    {
+        s->joy_ry = 0;
+    }
+
+    if (!pad_analog_seen)
+    {
+        s->joy_lx = 0;
+        s->joy_ly = 0;
+        s->joy_rx = 0;
+        s->joy_ry = 0;
+    }
 }
 
 static int shape_turn_axis(int value)
@@ -182,13 +251,18 @@ static void post_joystick_axes(const of_input_state_t *s, uint32_t buttons)
     int ly = normalize_axis(s->joy_ly);
     int rx = normalize_axis(s->joy_rx);
     int ry = normalize_axis(s->joy_ry);
+    int turn = scale_axis(shape_turn_axis(lx),
+                          TURN_AXIS_GAIN_NUM, TURN_AXIS_GAIN_DEN);
+
+    ly = scale_axis(ly, MOVE_AXIS_GAIN_NUM, MOVE_AXIS_GAIN_DEN);
+    rx = scale_axis(rx, MOVE_AXIS_GAIN_NUM, MOVE_AXIS_GAIN_DEN);
 
     memset(&ev, 0, sizeof(ev));
     ev.type = ev_joystick;
     ev.data1 = joystick_button_mask(joybspeed, abs_int(ly) >= STICK_RUN_THRESH)
              | joystick_button_mask(joybuse, (buttons & OF_BTN_L2) != 0)
              | joystick_button_mask(joybfire, (buttons & OF_BTN_R2) != 0);
-    ev.data2 = shape_turn_axis(lx);
+    ev.data2 = turn;
     ev.data3 = ly;
     ev.data4 = rx;
     ev.data5 = 0;
@@ -315,6 +389,8 @@ void I_PollInput(void)
 
     of_input_state_t s;
     of_input_state(0, &s);
+    filter_inactive_analog_axes(&s);
+
     uint32_t curr = s.buttons | trigger_button_mask(&s);
     uint32_t down  = curr & ~prev_buttons;
     uint32_t up    = ~curr &  prev_buttons;
