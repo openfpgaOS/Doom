@@ -5,7 +5,7 @@
             "platform_ids": ["heretic"],
             "shortname": "heretic",
             "description": "Heretic on openfpgaOS",
-            "author": "ThinkElastic",
+            "author": "TheDiscordian",
             "url": "",
             "version": "1.0.0",
             "date_release": "2026-06-05"
