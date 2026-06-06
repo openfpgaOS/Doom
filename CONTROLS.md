@@ -19,8 +19,6 @@ tables below are the shipped defaults.
 | R2 | Fire | — |
 | Start | Menu | Close menu |
 | Select | Automap | — |
-| Left stick | Move / strafe | — |
-| Right stick | Turn | — |
 
 **Options menu**
 
@@ -43,8 +41,6 @@ action below.
 | L1 / R1 | Strafe left / right | — |
 | Start | Menu | Close menu |
 | Select | Automap | — |
-| Left stick | Move / strafe | — |
-| Right stick | Turn | — |
 
 **Hold B + …**
 
