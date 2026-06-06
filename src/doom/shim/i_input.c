@@ -340,8 +340,15 @@ static void post_joystick_axes(const of_input_state_t *s, uint32_t buttons)
 
     memset(&ev, 0, sizeof(ev));
     ev.type = ev_joystick;
+#ifdef OF_HERETIC
+    /* Heretic: A = fire/confirm; B = back, but only while a menu is up. */
+    ev.data1 = joystick_button_mask(joybfire, (buttons & OF_BTN_A) != 0)
+             | joystick_button_mask(joybuse,
+                                     (buttons & OF_BTN_B) != 0 && menuactive);
+#else
     ev.data1 = joystick_button_mask(joybuse, (buttons & OF_BTN_L2) != 0)
              | joystick_button_mask(joybfire, (buttons & OF_BTN_R2) != 0);
+#endif
     ev.data2 = turn;
     ev.data3 = forward;
     ev.data4 = strafe;
@@ -461,6 +468,97 @@ int   mouse_threshold    = 10;
 
 void I_ReadMouse(void) { /* openfpgaOS: no mouse */ }
 
+#ifdef OF_HERETIC
+
+/* Heretic Pocket buttons: A fire, B tap use, B hold = modifier (D-pad fly +
+ * inventory, Y prev weapon), X use item, Y next weapon, L/R strafe, START menu,
+ * SELECT map. A drives fire/confirm via the joystick event (see axes above). */
+
+/* Hold B this long before it acts as the modifier, so a quick tap stays Use. */
+#define HER_MOD_HOLD_MS 150
+
+/* Key each held D-pad / Y is emitting, so toggling the modifier mid-hold can
+ * swap it (release old, press new). */
+static int her_key_up, her_key_down, her_key_left, her_key_right, her_key_y;
+static int her_b_down;
+static int her_b_chord;
+static unsigned int her_b_press_ms;
+
+static void her_emit(int *slot, int key)   /* key 0 = released */
+{
+    if (key == *slot)
+        return;
+    if (*slot)
+        post_key(*slot, 0);
+    if (key)
+        post_key(key, 1);
+    *slot = key;
+}
+
+void I_PollInput(void)
+{
+    of_input_poll();
+
+    of_input_state_t s;
+    of_input_state(0, &s);
+    filter_inactive_analog_axes(&s);
+
+    uint32_t curr = s.buttons | trigger_button_mask(&s);
+    uint32_t down = curr & ~prev_buttons;
+    uint32_t up   = ~curr &  prev_buttons;
+
+    update_tap_use_release();
+
+    int b = (curr & OF_BTN_B) != 0;
+    if (b && !her_b_down)
+    {
+        her_b_down = 1;
+        her_b_chord = 0;
+        her_b_press_ms = of_time_ms();
+    }
+
+    /* Modifier engages only after a short hold, and never while a menu is up. */
+    int mod = b && !menuactive
+           && (unsigned int)(of_time_ms() - her_b_press_ms) >= HER_MOD_HOLD_MS;
+
+    her_emit(&her_key_up,    (curr & OF_BTN_UP)    ? (mod ? key_flyup     : KEY_UPARROW)    : 0);
+    her_emit(&her_key_down,  (curr & OF_BTN_DOWN)  ? (mod ? key_flydown   : KEY_DOWNARROW)  : 0);
+    her_emit(&her_key_left,  (curr & OF_BTN_LEFT)  ? (mod ? key_invleft   : KEY_LEFTARROW)  : 0);
+    her_emit(&her_key_right, (curr & OF_BTN_RIGHT) ? (mod ? key_invright  : KEY_RIGHTARROW) : 0);
+    her_emit(&her_key_y,     (curr & OF_BTN_Y)     ? (mod ? key_prevweapon : key_nextweapon) : 0);
+
+    if (mod && (curr & (OF_BTN_UP | OF_BTN_DOWN | OF_BTN_LEFT | OF_BTN_RIGHT | OF_BTN_Y)))
+        her_b_chord = 1;
+
+    if (down & OF_BTN_X)      post_key(key_useartifact, 1);
+    if (up   & OF_BTN_X)      post_key(key_useartifact, 0);
+    if (down & OF_BTN_L1)     post_key(key_strafeleft, 1);
+    if (up   & OF_BTN_L1)     post_key(key_strafeleft, 0);
+    if (down & OF_BTN_R1)     post_key(key_straferight, 1);
+    if (up   & OF_BTN_R1)     post_key(key_straferight, 0);
+    if (down & OF_BTN_START)  post_key(KEY_ESCAPE, 1);
+    if (up   & OF_BTN_START)  post_key(KEY_ESCAPE, 0);
+    if (down & OF_BTN_SELECT) post_key(KEY_TAB, 1);
+    if (up   & OF_BTN_SELECT) post_key(KEY_TAB, 0);
+
+    /* B released as a quick tap that never engaged the modifier -> Use/Open. */
+    if (!b && her_b_down)
+    {
+        her_b_down = 0;
+        if (!her_b_chord
+         && (unsigned int)(of_time_ms() - her_b_press_ms) < B_TAP_USE_MS)
+        {
+            start_tap_use();   /* posts key_use (space), auto-released */
+        }
+    }
+
+    post_joystick_axes(&s, curr);
+
+    prev_buttons = curr;
+}
+
+#else
+
 /* Poll the buttons and emit keydown/keyup edges. Called from the main
  * loop (invoked from i_video.c's I_StartTic). */
 void I_PollInput(void)
@@ -487,3 +585,5 @@ void I_PollInput(void)
 
     prev_buttons = curr;
 }
+
+#endif

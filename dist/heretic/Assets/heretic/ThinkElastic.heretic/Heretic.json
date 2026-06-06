@@ -1,0 +1,27 @@
+{
+    "instance": {
+        "magic": "APF_VER_1",
+        "variant_select": {
+            "id": 666,
+            "select": false
+        },
+        "data_slots": [
+            { "id": 1, "filename": "os.bin" },
+            { "id": 2, "filename": "heretic.ini" },
+            { "id": 3, "filename": "heretic.elf" },
+            { "id": 4, "filename": "HERETIC.WAD" },
+            { "id": 7, "filename": "bank.ofsf" },
+            { "id": 9, "filename": "heretic/Heretic.cfg" },
+            { "id": 10, "filename": "heretic/Heretic_0.sav" },
+            { "id": 11, "filename": "heretic/Heretic_1.sav" },
+            { "id": 12, "filename": "heretic/Heretic_2.sav" },
+            { "id": 13, "filename": "heretic/Heretic_3.sav" },
+            { "id": 14, "filename": "heretic/Heretic_4.sav" },
+            { "id": 15, "filename": "heretic/Heretic_5.sav" },
+            { "id": 16, "filename": "heretic/Heretic_6.sav" },
+            { "id": 17, "filename": "heretic/Heretic_7.sav" },
+            { "id": 18, "filename": "heretic/Heretic_8.sav" },
+            { "id": 19, "filename": "heretic/Heretic_9.sav" }
+        ]
+    }
+}

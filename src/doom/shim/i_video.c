@@ -810,6 +810,17 @@ void I_InitGraphics(void)
     R_GPU_Init();
     screenvisible = true;
 
+#ifdef OF_HERETIC
+    /* Heretic: keep its own fire/use and '['/']' inventory; give next/prev
+     * weapon their own codes so they don't double as inventory left/right. */
+    key_use  = ' ';
+    key_speed = KEY_RSHIFT;
+    key_strafeleft = ',';
+    key_straferight = '.';
+    key_nextweapon = KEYP_5;
+    key_prevweapon = KEY_SCRLCK;
+    key_message_refresh = 0;
+#else
     key_fire = KEY_ENTER;
     key_use  = ' ';
     key_speed = KEY_RSHIFT;
@@ -818,6 +829,7 @@ void I_InitGraphics(void)
     key_prevweapon = '[';
     key_nextweapon = ']';
     key_message_refresh = 0;
+#endif
 }
 
 void I_GraphicsCheckCommandLine(void) { }

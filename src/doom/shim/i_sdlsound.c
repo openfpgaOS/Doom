@@ -64,12 +64,29 @@ static void free_sfx_slot(sfxinfo_t *sfx)
     sfx->driver_data = NULL;
 }
 
+// Doom/Strife prefix sound lumps with "ds"; Heretic/Hexen name them directly
+// (e.g. "CLKSIT"). I_SDL_InitSound sets this from the game's mission.
+static boolean use_sfx_prefix = true;
+
+static void GetSfxLumpName(sfxinfo_t *sfx, char *buf, size_t buf_len)
+{
+    // Linked sounds (Heretic's SOUND_LINK aliases, e.g. "-impact" -> impsit)
+    // resolve to the target sound's lump, not the alias name.
+    if (sfx->link != NULL)
+        sfx = sfx->link;
+
+    if (use_sfx_prefix)
+        M_snprintf(buf, buf_len, "ds%s", DEH_String(sfx->name));
+    else
+        M_snprintf(buf, buf_len, "%s", DEH_String(sfx->name));
+}
+
 static boolean load_sfx(sfxinfo_t *sfx)
 {
     if (sfx->driver_data) return true;
     if (sfx->lumpnum < 0) {
         char namebuf[9];
-        M_snprintf(namebuf, sizeof(namebuf), "ds%s", DEH_String(sfx->name));
+        GetSfxLumpName(sfx, namebuf, sizeof(namebuf));
         sfx->lumpnum = W_CheckNumForName(namebuf);
         if (sfx->lumpnum < 0) return false;
     }
@@ -117,7 +134,7 @@ static boolean load_sfx(sfxinfo_t *sfx)
 
 static boolean I_SDL_InitSound(GameMission_t mission)
 {
-    (void)mission;
+    use_sfx_prefix = (mission == doom || mission == strife);
     of_audio_init();
     of_mixer_init(32, 48000);
     of_mixer_set_master_volume(255);
@@ -137,7 +154,7 @@ static void I_SDL_ShutdownSound(void)
 static int I_SDL_GetSfxLumpNum(sfxinfo_t *sfx)
 {
     char namebuf[9];
-    M_snprintf(namebuf, sizeof(namebuf), "ds%s", DEH_String(sfx->name));
+    GetSfxLumpName(sfx, namebuf, sizeof(namebuf));
     return W_GetNumForName(namebuf);
 }
 

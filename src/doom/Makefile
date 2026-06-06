@@ -18,7 +18,12 @@
 #   make clean        Remove build artifacts
 #
 
-APP       = doom
+# GAME selects the chocolate-doom game module under cdoom/ to build into
+# this core. Default 'doom' keeps the original build byte-identical; pass
+# GAME=heretic to build the Heretic module (cdoom/heretic) into heretic.elf
+# instead, reusing the same shared engine (cdoom/) and FPGA shim (shim/).
+GAME     ?= doom
+APP       = $(GAME)
 TARGET    = pocket
 SDK_DIR   = ../sdk
 ROOT      = $(realpath $(CURDIR)/../..)
@@ -31,16 +36,19 @@ RUNTIME   = $(ROOT)/runtime
 # ── Sources ────────────────────────────────────────────────────────────
 SHIM_SRCS   = $(wildcard shim/*.c)
 CDOOM_SRCS  = $(filter-out cdoom/w_file_win32.c cdoom/z_native.c,$(wildcard cdoom/*.c))
-DOOM_SRCS   = $(wildcard cdoom/doom/*.c)
+GAME_SRCS   = $(wildcard cdoom/$(GAME)/*.c)
 
 SDK_MIDI    = $(SDK_DIR)/of_midi.c $(SDK_DIR)/of_smp_voice.c \
               $(SDK_DIR)/of_smp_bank.c $(SDK_DIR)/of_smp_tables.c
 
-SRCS        = $(SHIM_SRCS) $(CDOOM_SRCS) $(DOOM_SRCS) $(SDK_MIDI)
+SRCS        = $(SHIM_SRCS) $(CDOOM_SRCS) $(GAME_SRCS) $(SDK_MIDI)
 SRCS_CXX    =
 
 # ── Per-app CFLAGS (applied on top of sdk.mk SDK_CFLAGS) ──────────────
-CFLAGS  = -Ishim -Icdoom -Icdoom/doom
+CFLAGS  = -Ishim -Icdoom -Icdoom/$(GAME)
+# Heretic builds a separate ELF; -DOF_HERETIC lets the shim specialise its
+# controls for Heretic without affecting the Doom build.
+CFLAGS += $(if $(filter heretic,$(GAME)),-DOF_HERETIC)
 CFLAGS += -DDISABLE_SDL2MIXER -DDISABLE_SDL2NET
 CFLAGS += -DSMP_MAX_VOICES=20
 CFLAGS += -Wno-unused-parameter -Wno-unused-function
