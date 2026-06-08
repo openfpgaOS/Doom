@@ -51,4 +51,6 @@ void    I_SlamBlockHR(int x, int y, int w, int h, const byte *src) {
 void    I_SlamHR(const byte *buf) { (void)buf; }
 void    I_CopyScreenHR(byte *dest) { (void)dest; }
 void    I_InputHR(void) { }
-void    I_CheckAbortHR(void) { }
+/* i_videohr.h declares this boolean; Hexen's ST_Progress quits when it reads
+ * true, so a void stub returns a garbage register and aborts startup. */
+boolean I_CheckAbortHR(void) { return false; }

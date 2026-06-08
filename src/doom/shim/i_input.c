@@ -340,8 +340,8 @@ static void post_joystick_axes(const of_input_state_t *s, uint32_t buttons)
 
     memset(&ev, 0, sizeof(ev));
     ev.type = ev_joystick;
-#ifdef OF_HERETIC
-    /* Heretic: A = fire/confirm; B = back, but only while a menu is up. */
+#if defined(OF_HERETIC) || defined(OF_HEXEN)
+    /* Heretic/Hexen: A = fire/confirm; B = back, but only while a menu is up. */
     ev.data1 = joystick_button_mask(joybfire, (buttons & OF_BTN_A) != 0)
              | joystick_button_mask(joybuse,
                                      (buttons & OF_BTN_B) != 0 && menuactive);
@@ -549,6 +549,96 @@ void I_PollInput(void)
          && (unsigned int)(of_time_ms() - her_b_press_ms) < B_TAP_USE_MS)
         {
             start_tap_use();   /* posts key_use (space), auto-released */
+        }
+    }
+
+    post_joystick_axes(&s, curr);
+
+    prev_buttons = curr;
+}
+
+#elif defined(OF_HEXEN)
+
+/* Hexen Pocket buttons: A fire, B tap use, B hold = modifier, X use item,
+ * Y next weapon (B+Y prev weapon), L/R jump (B+L / B+R strafe), B+D-pad
+ * up/down fly, B+D-pad left/right cycle inventory, START menu, SELECT map.
+ * A drives fire/confirm via the joystick event (see axes above). */
+
+/* Hold B this long before it acts as the modifier, so a quick tap stays Use. */
+#define HEX_MOD_HOLD_MS 100
+
+/* Key each held D-pad / Y / L / R is emitting, so toggling the modifier
+ * mid-hold can swap it (release old, press new). */
+static int hex_key_up, hex_key_down, hex_key_left, hex_key_right;
+static int hex_key_y, hex_key_l, hex_key_r;
+static int hex_b_down;
+static int hex_b_chord;
+static unsigned int hex_b_press_ms;
+
+static void hex_emit(int *slot, int key)   /* key 0 = released */
+{
+    if (key == *slot)
+        return;
+    if (*slot)
+        post_key(*slot, 0);
+    if (key)
+        post_key(key, 1);
+    *slot = key;
+}
+
+void I_PollInput(void)
+{
+    of_input_poll();
+
+    of_input_state_t s;
+    of_input_state(0, &s);
+    filter_inactive_analog_axes(&s);
+
+    uint32_t curr = s.buttons | trigger_button_mask(&s);
+    uint32_t down = curr & ~prev_buttons;
+    uint32_t up   = ~curr &  prev_buttons;
+
+    update_tap_use_release();
+
+    int b = (curr & OF_BTN_B) != 0;
+    if (b && !hex_b_down)
+    {
+        hex_b_down = 1;
+        hex_b_chord = 0;
+        hex_b_press_ms = of_time_ms();
+    }
+
+    /* Modifier engages only after a short hold, and never while a menu is up. */
+    int mod = b && !menuactive
+           && (unsigned int)(of_time_ms() - hex_b_press_ms) >= HEX_MOD_HOLD_MS;
+
+    hex_emit(&hex_key_up,    (curr & OF_BTN_UP)    ? (mod ? key_flyup      : KEY_UPARROW)    : 0);
+    hex_emit(&hex_key_down,  (curr & OF_BTN_DOWN)  ? (mod ? key_flydown    : KEY_DOWNARROW)  : 0);
+    hex_emit(&hex_key_left,  (curr & OF_BTN_LEFT)  ? (mod ? key_strafeleft  : KEY_LEFTARROW)  : 0);
+    hex_emit(&hex_key_right, (curr & OF_BTN_RIGHT) ? (mod ? key_straferight : KEY_RIGHTARROW) : 0);
+    hex_emit(&hex_key_y,     (curr & OF_BTN_Y)     ? (mod ? key_prevweapon  : key_nextweapon) : 0);
+    hex_emit(&hex_key_l,     (curr & OF_BTN_L1)    ? (mod ? key_invleft     : key_jump)       : 0);
+    hex_emit(&hex_key_r,     (curr & OF_BTN_R1)    ? (mod ? key_invright    : key_jump)       : 0);
+
+    if (mod && (curr & (OF_BTN_UP | OF_BTN_DOWN | OF_BTN_LEFT | OF_BTN_RIGHT
+                      | OF_BTN_Y | OF_BTN_L1 | OF_BTN_R1)))
+        hex_b_chord = 1;
+
+    if (down & OF_BTN_X)      post_key(key_useartifact, 1);
+    if (up   & OF_BTN_X)      post_key(key_useartifact, 0);
+    if (down & OF_BTN_START)  post_key(KEY_ESCAPE, 1);
+    if (up   & OF_BTN_START)  post_key(KEY_ESCAPE, 0);
+    if (down & OF_BTN_SELECT) post_key(KEY_TAB, 1);
+    if (up   & OF_BTN_SELECT) post_key(KEY_TAB, 0);
+
+    /* B released as a quick tap that never engaged the modifier -> Use/Open. */
+    if (!b && hex_b_down)
+    {
+        hex_b_down = 0;
+        if (!hex_b_chord
+         && (unsigned int)(of_time_ms() - hex_b_press_ms) < B_TAP_USE_MS)
+        {
+            start_tap_use();   /* posts key_use, auto-released */
         }
     }
 

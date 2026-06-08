@@ -810,9 +810,12 @@ void I_InitGraphics(void)
     R_GPU_Init();
     screenvisible = true;
 
-#ifdef OF_HERETIC
-    /* Heretic: keep its own fire/use and '['/']' inventory; give next/prev
-     * weapon their own codes so they don't double as inventory left/right. */
+#if defined(OF_HERETIC) || defined(OF_HEXEN)
+    /* Heretic/Hexen: keep default fire/use and '['/']' inventory; give
+     * next/prev weapon their own codes so they don't double as inventory
+     * left/right. Don't remap key_fire to ENTER like the doom branch below:
+     * these games' X posts key_useartifact (ENTER), so key_fire=ENTER fires
+     * on X too. */
     key_use  = ' ';
     key_speed = KEY_RSHIFT;
     key_strafeleft = ',';

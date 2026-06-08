@@ -1,0 +1,27 @@
+{
+    "instance": {
+        "magic": "APF_VER_1",
+        "variant_select": {
+            "id": 666,
+            "select": false
+        },
+        "data_slots": [
+            { "id": 1, "filename": "os.bin" },
+            { "id": 2, "filename": "hexen.ini" },
+            { "id": 3, "filename": "hexen.elf" },
+            { "id": 4, "filename": "HEXEN.WAD" },
+            { "id": 7, "filename": "bank.ofsf" },
+            { "id": 9, "filename": "hexen/Hexen.cfg" },
+            { "id": 10, "filename": "hexen/Hexen_0.sav" },
+            { "id": 11, "filename": "hexen/Hexen_1.sav" },
+            { "id": 12, "filename": "hexen/Hexen_2.sav" },
+            { "id": 13, "filename": "hexen/Hexen_3.sav" },
+            { "id": 14, "filename": "hexen/Hexen_4.sav" },
+            { "id": 15, "filename": "hexen/Hexen_5.sav" },
+            { "id": 16, "filename": "hexen/Hexen_6.sav" },
+            { "id": 17, "filename": "hexen/Hexen_7.sav" },
+            { "id": 18, "filename": "hexen/Hexen_8.sav" },
+            { "id": 19, "filename": "hexen/Hexen_9.sav" }
+        ]
+    }
+}

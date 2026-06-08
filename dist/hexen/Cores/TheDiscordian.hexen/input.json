@@ -1,0 +1,20 @@
+{
+    "input": {
+        "magic": "APF_VER_1",
+        "controllers": [
+            {
+                "type": "default",
+                "mappings": [
+                    { "id": 0,  "name": "Fire",          "key": "pad_btn_a" },
+                    { "id": 1,  "name": "Use / Open",    "key": "pad_btn_b" },
+                    { "id": 2,  "name": "Use Item",      "key": "pad_btn_x" },
+                    { "id": 3,  "name": "Next Weapon",   "key": "pad_btn_y" },
+                    { "id": 10, "name": "Jump",          "key": "pad_trig_l" },
+                    { "id": 11, "name": "Jump",          "key": "pad_trig_r" },
+                    { "id": 20, "name": "Menu",          "key": "pad_btn_start" },
+                    { "id": 21, "name": "Automap",       "key": "pad_btn_select" }
+                ]
+            }
+        ]
+    }
+}
