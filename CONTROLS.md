@@ -20,11 +20,6 @@ tables below are the shipped defaults.
 | Start | Menu | Close menu |
 | Select | Automap | — |
 
-**Options menu**
-
-- **REFRESH** — `VRR` (default) or `FIXED` display refresh.
-- **RUN** — `ALWAYS` (run by default) or `HOLD` (hold B to run).
-
 ## 🐉 Heretic
 
 The Pocket has fewer buttons than Heretic needs, so **B is a modifier**:
@@ -49,12 +44,6 @@ action below.
 | B + Up / Down | Fly up / down |
 | B + Left / Right | Select previous / next inventory item |
 | B + Y | Previous weapon |
-
-**Options menu**
-
-- **MOVEMENT** — `WALK` (default) or `RUN`. The Pocket has no dedicated
-  run button, so this sets the baseline movement speed.
-- **REFRESH** — `VRR` (default) or `FIXED` display refresh.
 
 ## 🛡️ Hexen
 
