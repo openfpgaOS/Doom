@@ -43,6 +43,9 @@ byte *R_GetWallTexture2D(int texnum);
 // GPU affine-sprite path.  spritelump is vis->patch (relative index).
 byte *R_GetSpriteTexture2D(int spritelump);
 
+// Post-aware 2D block for the GPU param-masked-midtexture path.
+byte *R_GetMaskedTexture2D(int texnum);
+
 
 // I/O, setting up the stuff.
 void R_InitData (void);

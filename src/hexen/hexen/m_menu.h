@@ -1,16 +1,27 @@
 /* m_menu.h — openfpgaOS Hexen bridge (not upstream chocolate-doom).
  * Backs the display refresh-mode API the shim (shim/i_video.c) queries;
  * also included by mn_menu.c, h2_main.c and of_hexen_compat.c for the
- * shared refresh_mode. */
+ * shared refresh_mode.
+ *
+ * Mirrors the Doom module's semantics (cdoom/doom/m_menu.c): VRR and
+ * FIXED are display-paced interpolating modes; analog video out forces
+ * PAL/NTSC (fixed broadcast cadence, no interpolation).  The old bridge
+ * hard-coded "never interpolates" from the software-renderer era — that
+ * silently disabled the uncapped pipeline for this game. */
 #ifndef OF_HEXEN_M_MENU_BRIDGE_H
 #define OF_HEXEN_M_MENU_BRIDGE_H
 
 #include "doomtype.h"
+#ifndef OF_PC
+#include "of_analogizer.h"
+#endif
 
-/* VRR interpolation flag; defined in of_hexen_compat.c, always 0. */
+/* VRR interpolation flag the shim updates each frame; defined in
+ * of_hexen_compat.c. */
 extern int frame_interpolation;
 
-/* Display refresh policy; defined in of_hexen_compat.c, defaults to VRR. */
+/* Display refresh policy; defined in of_hexen_compat.c, defaults to
+ * VRR.  Toggled in the Options menu. */
 extern int refresh_mode;
 
 /* Mirror the Doom module's REFRESH_MODE_* values (cdoom/doom/m_menu.h). */
@@ -22,16 +33,58 @@ enum
     REFRESH_MODE_VRR   = 6
 };
 
+#define HEXEN_ANLG_VIDEO_YC_PAL      0x4u
+#define HEXEN_ANLG_VIDEO_POCKET_OFF  0x8u
+
+static inline int M_NormalizeRefreshMode(int mode)
+{
+    return mode == REFRESH_MODE_VRR ? REFRESH_MODE_VRR : REFRESH_MODE_FIXED;
+}
+
+static inline int M_AnalogizerRefreshMode(void)
+{
+#ifndef OF_PC
+    of_analogizer_state_t state;
+
+    if (of_analogizer_state(&state) < 0 || !state.enabled)
+        return -1;
+
+    if ((state.video_mode & ~HEXEN_ANLG_VIDEO_POCKET_OFF)
+        == HEXEN_ANLG_VIDEO_YC_PAL)
+    {
+        return REFRESH_MODE_PAL;
+    }
+
+    return REFRESH_MODE_NTSC;
+#else
+    return -1;
+#endif
+}
+
 static inline int M_EffectiveRefreshMode(void)
 {
-    return refresh_mode == REFRESH_MODE_VRR ? REFRESH_MODE_VRR
-                                            : REFRESH_MODE_NTSC;
+    int analogizer_mode = M_AnalogizerRefreshMode();
+
+    if (analogizer_mode >= 0)
+        return analogizer_mode;
+
+    return M_NormalizeRefreshMode(refresh_mode);
 }
 
 static inline boolean M_RefreshModeUsesInterpolation(int mode)
 {
-    (void) mode;
-    return false;
+    switch (mode)
+    {
+        case REFRESH_MODE_FIXED:
+        case REFRESH_MODE_VRR:
+            return true;
+        case REFRESH_MODE_PAL:
+        case REFRESH_MODE_NTSC:
+            return false;
+        default:
+            return M_NormalizeRefreshMode(mode) == REFRESH_MODE_FIXED
+                || M_NormalizeRefreshMode(mode) == REFRESH_MODE_VRR;
+    }
 }
 
 #endif /* OF_HEXEN_M_MENU_BRIDGE_H */

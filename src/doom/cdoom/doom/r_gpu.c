@@ -209,8 +209,9 @@ void R_GPU_WallTiersEnd(void) { }
 boolean R_GPU_SpriteBegin(const byte *tex2d, int tex_height, int tex_width,
                           fixed_t texturemid, fixed_t iscale,
                           fixed_t startfrac, fixed_t xiscale, int x1,
-                          int light)
+                          int light, int cmap_slot)
 {
+    (void)cmap_slot;
     (void)tex2d;
     (void)tex_height;
     (void)tex_width;
@@ -232,6 +233,28 @@ boolean R_GPU_SpritePost(int x, int yl, int yh)
 void R_GPU_SpriteEnd(void) { }
 void R_GPU_BeginCPUSprite(void) { }
 void R_GPU_EndCPUSprite(void) { }
+boolean R_GPU_MaskedBegin(const byte *blk, int tex_height, int widthmask,
+                          fixed_t texturemid, int x1, int x2,
+                          fixed_t scale1, fixed_t scalestep,
+                          fixed_t distance, fixed_t offset,
+                          unsigned int centerangle)
+{
+    (void)blk; (void)tex_height; (void)widthmask; (void)texturemid;
+    (void)x1; (void)x2; (void)scale1; (void)scalestep;
+    (void)distance; (void)offset; (void)centerangle;
+    return false;
+}
+boolean R_GPU_MaskedPost(int x, int yl, int yh)
+{
+    (void)x; (void)yl; (void)yh;
+    return false;
+}
+void R_GPU_MaskedEnd(void) { }
+int R_GPU_TranslationSlot(const byte *translation)
+{
+    (void)translation;
+    return -1;
+}
 boolean R_GPU_DeferLumpRelease(int lumpnum)
 {
     (void)lumpnum;
@@ -344,6 +367,7 @@ static of_gpu_param_span_record_t gpu_sprite_records[GPU_SPRITE_MAX_RECORDS];
 static int gpu_sprite_record_count;
 static int gpu_sprite_active;
 static int gpu_use_sprite_param;
+static int gpu_masked_active;   /* param-masked range open */
 static uint32_t gpu_fb_row_addr[SCREENHEIGHT];
 static uint32_t gpu_cpu_dirty_lines[GPU_FB_CACHE_WORDS];
 static uint32_t gpu_cpu_valid_lines[GPU_FB_CACHE_WORDS];
@@ -360,6 +384,60 @@ static void gpu_flush_sprite_batch(void);
 static void gpu_flush_draw_batches(void);
 static void gpu_release_deferred_lumps(void);
 static void gpu_prepare_for_gpu_write(void);
+
+/* ================================================================
+ * Translated columns on the GPU: compose translation->colormap into
+ * spare palookup slots (slot 0 = plain colormaps).  A translated
+ * sprite then rides the affine sprite surface with colormap_id=slot —
+ * the palookup applies translation AND light in one lookup, matching
+ * software's dc_colormap[dc_translation[texel]] exactly.
+ * ================================================================ */
+#define GPU_TRANSL_SLOT_BASE 1
+#define GPU_TRANSL_MAX 3
+static const byte *gpu_transl_tables[GPU_TRANSL_MAX];
+static int gpu_transl_count;
+
+static void gpu_upload_translated_palookup(int slot, const byte *transl)
+{
+    uint8_t *dst = &_gpu_palookup_storage[(uint32_t)slot
+                                          * OF_GPU_PALOOKUP_STRIDE];
+    int rows = gpu_colormap_rows;
+
+    for (int r = 0; r < rows; r++)
+        for (int i = 0; i < 256; i++)
+            dst[r * 256 + i] = colormaps[r * 256 + transl[i]];
+    if ((uint32_t)rows * 256u < OF_GPU_PALOOKUP_STRIDE)
+        memset(dst + rows * 256, 0,
+               OF_GPU_PALOOKUP_STRIDE - (uint32_t)rows * 256u);
+
+    of_cache_flush_range(dst, OF_GPU_PALOOKUP_STRIDE);
+}
+
+static void gpu_register_translations(void)
+{
+    gpu_transl_count = 0;
+    if (translationtables == NULL || gpu_colormap_rows <= 0)
+        return;
+
+    for (int i = 0; i < GPU_TRANSL_MAX
+         && GPU_TRANSL_SLOT_BASE + i < OF_GPU_PALOOKUP_SLOTS; i++)
+    {
+        const byte *t = translationtables + i * 256;
+
+        gpu_upload_translated_palookup(GPU_TRANSL_SLOT_BASE + i, t);
+        gpu_transl_tables[i] = t;
+        gpu_transl_count = i + 1;
+    }
+}
+
+int R_GPU_TranslationSlot(const byte *translation)
+{
+    for (int i = 0; i < gpu_transl_count; i++)
+        if (gpu_transl_tables[i] == translation)
+            return GPU_TRANSL_SLOT_BASE + i;
+    return -1;
+}
+
 static void gpu_set_framebuffer_base(uint8_t *base);
 
 #define GPU_SVC_INDEX(field) \
@@ -1597,6 +1675,7 @@ void R_GPU_Init(void)
     gpu_sprite_record_count = 0;
     gpu_sprite_active = 0;
     gpu_use_sprite_param = 0;
+    gpu_masked_active = 0;
     for (int t = 0; t < GPU_WALL_TIERS; t++)
     {
         gpu_wall_tiers[t].active = 0;
@@ -1709,6 +1788,7 @@ void R_GPU_Init(void)
      * Doom's palette remap rows into the fabric palookup table. */
     of_cache_flush();
     gpu_upload_palookup(0, colormaps, (uint32_t)cmap_size);
+    gpu_register_translations();
     gpu_upload_fuzz_translucency();
     of_cache_flush_range(gpu_fuzz_source_tex, sizeof(gpu_fuzz_source_tex));
     GPU_TEX_FLUSH = 1;
@@ -1759,6 +1839,7 @@ void R_GPU_Shutdown(void)
     gpu_sprite_record_count = 0;
     gpu_sprite_active = 0;
     gpu_use_sprite_param = 0;
+    gpu_masked_active = 0;
     gpu_reset_cpu_cache_tracking();
     gpu_present = 0;
 }
@@ -2000,6 +2081,7 @@ boolean R_GPU_PresentFrame(void)
     gpu_wall_tiers[0].active = 0;
     gpu_wall_tiers[1].active = 0;
     gpu_sprite_active = 0;
+    gpu_masked_active = 0;
     gpu_draw_fb = NULL;
     gpu_draw_render_base = NULL;
     gpu_reset_cpu_cache_tracking();
@@ -2652,7 +2734,7 @@ void R_GPU_WallTiersEnd(void)
 boolean R_GPU_SpriteBegin(const byte *tex2d, int tex_height, int tex_width,
                           fixed_t texturemid, fixed_t iscale,
                           fixed_t startfrac, fixed_t xiscale, int x1,
-                          int light)
+                          int light, int cmap_slot)
 {
     /* Shares the AXIS_Y walker the wall probe validated. */
     if (!gpu_use_sprite_param || !gpu_present || !gpu_frame_active ||
@@ -2661,6 +2743,8 @@ boolean R_GPU_SpriteBegin(const byte *tex2d, int tex_height, int tex_width,
     if (tex2d == NULL || light < 0 || light > 63)
         return false;
     if (tex_height <= 0 || tex_height > 0xFFFF || tex_width <= 0)
+        return false;
+    if (cmap_slot < 0 || cmap_slot >= OF_GPU_PALOOKUP_SLOTS)
         return false;
 
     if (!gpu_write_prepared)
@@ -2680,7 +2764,7 @@ boolean R_GPU_SpriteBegin(const byte *tex2d, int tex_height, int tex_width,
     gpu_sprite_params.tex_w_mask = 0xFFFF;  /* ranges enforced by clamps */
     gpu_sprite_params.tex_h_mask = 0xFFFF;
     gpu_sprite_params.flags = OF_GPU_SPAN_COLORMAP;
-    gpu_sprite_params.colormap_id = 0;
+    gpu_sprite_params.colormap_id = (uint8_t)cmap_slot;
     gpu_sprite_params.attr_mode = OF_GPU_PARAM_ATTR_AFFINE;
     gpu_sprite_params.span_axis = OF_GPU_PARAM_AXIS_Y;
     gpu_sprite_params.z_mode = OF_GPU_PARAM_Z_NONE;
@@ -2746,6 +2830,63 @@ void R_GPU_SpriteEnd(void)
     gpu_flush_sprite_batch();
     gpu_sprite_active = 0;
 }
+
+/* ================================================================
+ * Param-masked midtextures: reuse the wall tier machinery during the
+ * masked/sprite phase.  Unlike the solid phase, masked surfaces
+ * interleave with sprites back-to-front, so Begin flushes the staged
+ * column/sprite work first and End emits before the next surface.
+ * Posts append through R_GPU_MaskedPost (light band from spryscale).
+ * ================================================================ */
+
+boolean R_GPU_MaskedBegin(const byte *blk, int tex_height, int widthmask,
+                          fixed_t texturemid, int x1, int x2,
+                          fixed_t scale1, fixed_t scalestep,
+                          fixed_t distance, fixed_t offset,
+                          unsigned int centerangle)
+{
+    gpu_masked_active = 0;
+
+    if (blk == NULL)
+        return false;
+    if (!gpu_use_wall_param || !gpu_present || !gpu_frame_active ||
+        I_VideoBuffer == NULL)
+        return false;
+
+    gpu_flush_affine_batch();
+    gpu_flush_column_batch();
+    gpu_flush_sprite_batch();
+
+    if (!R_GPU_WallSegBegin(x1, x2, scale1, scalestep,
+                            distance, offset, centerangle))
+        return false;
+    if (!R_GPU_WallTierBegin(0, blk, tex_height, widthmask, texturemid))
+    {
+        gpu_wall_seg_valid = 0;
+        return false;
+    }
+
+    gpu_masked_active = 1;
+    return true;
+}
+
+boolean R_GPU_MaskedPost(int x, int yl, int yh)
+{
+    if (!gpu_masked_active)
+        return false;
+
+    return R_GPU_WallTierColumn(0, x, yl, yh, spryscale);
+}
+
+void R_GPU_MaskedEnd(void)
+{
+    if (!gpu_masked_active)
+        return;
+
+    R_GPU_WallTiersEnd();
+    gpu_masked_active = 0;
+}
+
 
 
 /* Bracket a CPU-drawn sprite (translated columns in MP have no GPU

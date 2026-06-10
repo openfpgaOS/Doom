@@ -97,7 +97,7 @@ void R_GPU_WallTiersEnd(void);
 boolean R_GPU_SpriteBegin(const byte *tex2d, int tex_height, int tex_width,
                           fixed_t texturemid, fixed_t iscale,
                           fixed_t startfrac, fixed_t xiscale, int x1,
-                          int light);
+                          int light, int cmap_slot);
 boolean R_GPU_SpritePost(int x, int yl, int yh);
 void R_GPU_SpriteEnd(void);
 
@@ -105,6 +105,21 @@ void R_GPU_SpriteEnd(void);
  * (translated player sprites in MP).  See r_gpu.c for the failure mode. */
 void R_GPU_BeginCPUSprite(void);
 void R_GPU_EndCPUSprite(void);
+
+/* Param-masked midtextures: wall-tier machinery during the masked
+ * phase; geometry comes from the drawseg stash (gpu_m*).  Posts append
+ * via R_GPU_MaskedPost; Begin false = keep column emission. */
+boolean R_GPU_MaskedBegin(const byte *blk, int tex_height, int widthmask,
+                          fixed_t texturemid, int x1, int x2,
+                          fixed_t scale1, fixed_t scalestep,
+                          fixed_t distance, fixed_t offset,
+                          unsigned int centerangle);
+boolean R_GPU_MaskedPost(int x, int yl, int yh);
+void R_GPU_MaskedEnd(void);
+
+/* Palookup slot (>=1) for a translation table, or -1 if not resident.
+ * Pass as SpriteBegin's cmap_slot so translated sprites draw GPU-side. */
+int R_GPU_TranslationSlot(const byte *translation);
 
 boolean R_GPU_DeferLumpRelease(int lumpnum);
 

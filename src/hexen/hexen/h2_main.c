@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include "h2def.h"
+#include "d_loop.h"
 #include "r_gpu.h"
 #include "ct_chat.h"
 #include "d_iwad.h"
@@ -915,9 +916,86 @@ void H2_GameLoop(void)
         // Frame syncronous IO operations
         I_StartFrame();
 
-        // Process one or more tics
-        // Will run at least one tic
-        TryRunTics();
+        // Uncapped frame interpolation (openfpgaOS): mirror the Doom
+        // core.  When eligible, TryRunTics is non-blocking, the loop
+        // renders every iteration, and the renderer lerps with the
+        // sub-tic phase below.
+        {
+            static int frame_interp_initialized = 0;
+            static int frame_interpolation = 0;
+            boolean simulation_paused;
+            boolean uncapped_ok;
+
+            if (!frame_interp_initialized)
+            {
+                frame_interpolation = M_RefreshModeUsesInterpolation(
+                    M_EffectiveRefreshMode());
+                if (M_ParmExists("-capped") || M_ParmExists("-nointerp"))
+                    frame_interpolation = 0;
+                frame_interp_initialized = 1;
+            }
+
+            simulation_paused = paused
+                                || (!netgame
+                                    && MenuActive
+                                    && !demoplayback
+                                    && players[consoleplayer].viewz != 1);
+
+            uncapped_ok = frame_interpolation
+                          && !simulation_paused
+                          && !demorecording
+                          && !netgame
+                          && !singletics;
+
+            r_interpolate = uncapped_ok;
+            tryruntics_nonblocking = uncapped_ok;
+
+            TryRunTics();
+
+            if (uncapped_ok)
+            {
+                int frac = I_GetTimeFrac();
+
+                if (frac >= 0)
+                {
+                    fractionaltic = (fixed_t)frac;
+                }
+                else
+                {
+                    /* Anchor the sub-tic phase to gametic so a 35 Hz
+                     * boundary falling between TryRunTics and this
+                     * sample can't snap the view backward (same fix as
+                     * the Doom core's rotation hiccup). */
+                    static int      interp_anchor_tic = -1;
+                    static uint64_t interp_anchor_us  = 0;
+                    uint64_t now_us = I_GetTimeUS();
+                    uint64_t into_tic_us =
+                        ((now_us * TICRATE) % 1000000ULL) / TICRATE;
+                    uint64_t dt_us;
+
+                    if (gametic != interp_anchor_tic)
+                    {
+                        interp_anchor_tic = gametic;
+                        interp_anchor_us  = now_us > into_tic_us
+                                          ? now_us - into_tic_us : 0;
+                    }
+
+                    dt_us = now_us > interp_anchor_us
+                          ? now_us - interp_anchor_us : 0;
+
+                    if (dt_us >= 1000000ULL / TICRATE)
+                        fractionaltic = FRACUNIT;
+                    else
+                        fractionaltic = (fixed_t)((dt_us * TICRATE
+                                                   * FRACUNIT) / 1000000ULL);
+                }
+            }
+            else
+            {
+                r_interpolate = false;
+                fractionaltic = 0;
+            }
+        }
 
         // Move positional sounds
         S_UpdateSounds(players[displayplayer].mo);

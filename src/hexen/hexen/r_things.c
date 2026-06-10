@@ -346,9 +346,13 @@ void R_DrawMaskedColumn(column_t * column, signed int baseclip)
 
         if (dc_yl <= dc_yh)
         {
-            // Affine sprite surface: the post reduces to a {x, ytop,
-            // count} record (active only between SpriteBegin/End).
-            if (R_GPU_SpritePost(dc_x, dc_yl, dc_yh))
+            // Param-masked / affine-sprite surfaces: the post reduces
+            // to a {x, ytop, count} record while one is active.
+            if (R_GPU_MaskedPost(dc_x, dc_yl, dc_yh))
+            {
+                /* recorded */
+            }
+            else if (R_GPU_SpritePost(dc_x, dc_yl, dc_yh))
             {
                 /* recorded */
             }
@@ -478,7 +482,7 @@ void R_DrawVisSprite(vissprite_t * vis, int x1, int x2)
                                                dc_texturemid, dc_iscale,
                                                vis->startfrac, vis->xiscale,
                                                vis->x1, slight,
-                                               colfunc == tlcolfunc);
+                                               colfunc == tlcolfunc, 0);
         }
     }
 
@@ -522,6 +526,8 @@ void R_DrawVisSprite(vissprite_t * vis, int x1, int x2)
 
 void R_ProjectSprite(mobj_t * thing)
 {
+    fixed_t interp_x, interp_y, interp_z;
+    angle_t interp_angle;
     fixed_t trx, try;
     fixed_t gxt, gyt;
     fixed_t tx, tz;
@@ -545,8 +551,31 @@ void R_ProjectSprite(mobj_t * thing)
 //
 // transform the origin point
 //
-    trx = thing->x - viewx;
-    try = thing->y - viewy;
+    // Frame interpolation (openfpgaOS): lerp the thing between tics
+    // with the same fractionaltic the view uses.
+    if (r_interpolate)
+    {
+        int32_t adiff = (int32_t)(thing->angle - thing->oldangle);
+
+        interp_x = thing->oldx + FixedMul(thing->x - thing->oldx,
+                                          fractionaltic);
+        interp_y = thing->oldy + FixedMul(thing->y - thing->oldy,
+                                          fractionaltic);
+        interp_z = thing->oldz + FixedMul(thing->z - thing->oldz,
+                                          fractionaltic);
+        interp_angle = thing->oldangle
+            + (angle_t)(((int64_t)adiff * fractionaltic) >> FRACBITS);
+    }
+    else
+    {
+        interp_x = thing->x;
+        interp_y = thing->y;
+        interp_z = thing->z;
+        interp_angle = thing->angle;
+    }
+
+    trx = interp_x - viewx;
+    try = interp_y - viewy;
 
     gxt = FixedMul(trx, viewcos);
     gyt = -FixedMul(try, viewsin);
@@ -580,8 +609,8 @@ void R_ProjectSprite(mobj_t * thing)
 
     if (sprframe->rotate)
     {                           // choose a different rotation based on player view
-        ang = R_PointToAngle(thing->x, thing->y);
-        rot = (ang - thing->angle + (unsigned) (ANG45 / 2) * 9) >> 29;
+        ang = R_PointToAngle(interp_x, interp_y);
+        rot = (ang - interp_angle + (unsigned) (ANG45 / 2) * 9) >> 29;
         lump = sprframe->lump[rot];
         flip = (boolean) sprframe->flip[rot];
     }
@@ -613,8 +642,8 @@ void R_ProjectSprite(mobj_t * thing)
     vis->scale = xscale << detailshift;
     vis->gx = thing->x;
     vis->gy = thing->y;
-    vis->gz = thing->z;
-    vis->gzt = thing->z + spritetopoffset[lump];
+    vis->gz = interp_z;
+    vis->gzt = interp_z + spritetopoffset[lump];
     if (thing->flags & MF_TRANSLATION)
     {
         if (thing->player)
@@ -724,6 +753,7 @@ int PSpriteSY[NUMCLASSES][NUMWEAPONS] = {
 
 void R_DrawPSprite(pspdef_t * psp)
 {
+    fixed_t draw_sx, draw_sy;
     fixed_t tx;
     int x1, x2;
     spritedef_t *sprdef;
@@ -756,7 +786,18 @@ void R_DrawPSprite(pspdef_t * psp)
 //
 // calculate edges of the shape
 //
-    tx = psp->sx - 160 * FRACUNIT;
+    if (r_interpolate)
+    {
+        draw_sx = psp->oldsx + FixedMul(psp->sx - psp->oldsx, fractionaltic);
+        draw_sy = psp->oldsy + FixedMul(psp->sy - psp->oldsy, fractionaltic);
+    }
+    else
+    {
+        draw_sx = psp->sx;
+        draw_sy = psp->sy;
+    }
+
+    tx = draw_sx - 160 * FRACUNIT;
 
     tx -= spriteoffset[lump];
     if (viewangleoffset)
@@ -786,7 +827,7 @@ void R_DrawPSprite(pspdef_t * psp)
     vis->psprite = true;
     vis->floorclip = 0;
     vis->texturemid = (BASEYCENTER << FRACBITS) + FRACUNIT / 2
-        - (psp->sy - spritetopoffset[lump]);
+        - (draw_sy - spritetopoffset[lump]);
     if (viewheight == SCREENHEIGHT)
     {
         vis->texturemid -= PSpriteSY[viewplayer->class]

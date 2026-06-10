@@ -1691,6 +1691,18 @@ void P_UnArchivePlayers(void)
         players[i].mo = NULL;   // will be set when unarc thinker
         players[i].message = NULL;
         players[i].attacker = NULL;
+        // Frame interpolation (openfpgaOS): no old state in the save.
+        players[i].oldviewz = players[i].viewz;
+        players[i].oldlookdir = players[i].lookdir;
+        {
+            int j;
+
+            for (j = 0; j < NUMPSPRITES; j++)
+            {
+                players[i].psprites[j].oldsx = players[i].psprites[j].sx;
+                players[i].psprites[j].oldsy = players[i].psprites[j].sy;
+            }
+        }
     }
 }
 
@@ -1874,6 +1886,11 @@ void P_UnArchiveThinkers(void)
             case tc_mobj:
                 mobj = Z_Malloc(sizeof(*mobj), PU_LEVEL, NULL);
                 saveg_read_mobj_t(mobj);
+                // Frame interpolation (openfpgaOS): no old state in save.
+                mobj->oldx = mobj->x;
+                mobj->oldy = mobj->y;
+                mobj->oldz = mobj->z;
+                mobj->oldangle = mobj->angle;
                 mobj->target = NULL;
                 P_SetThingPosition(mobj);
                 mobj->info = &mobjinfo[mobj->type];

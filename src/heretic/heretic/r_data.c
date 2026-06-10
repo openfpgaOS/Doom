@@ -297,6 +297,7 @@ byte *R_GetColumn(int tex, int col)
 
 static byte **gpu_wall_tex2d;
 static int gpu_wall_tex2d_budget;
+static byte **gpu_masked_tex2d;
 
 byte *R_GetWallTexture2D(int texnum)
 {
@@ -334,6 +335,71 @@ byte *R_GetWallTexture2D(int texnum)
     return block;
 }
 
+
+/* Post-aware 2D block for the GPU param-masked path: unlike the wall
+ * cache (linear memcpy - post offsets collapse), this decodes column
+ * posts at their topdelta rows like the sprite atlas.  Restricted to
+ * textures whose columns are all patch-backed (multipatch masked =
+ * vanilla medusa - those keep the column fallback) and height <= 128
+ * (the tier path's vtex &127 wrap).  Shares the wall cache budget. */
+byte *R_GetMaskedTexture2D(int texnum)
+{
+    texture_t *texture;
+    byte *block;
+    int width;
+    int height;
+    int size;
+    int x;
+
+    if (gpu_masked_tex2d == NULL)
+        return NULL;
+    if (gpu_masked_tex2d[texnum] != NULL)
+        return gpu_masked_tex2d[texnum];
+
+    texture = textures[texnum];
+    width = texturewidthmask[texnum] + 1;
+    if (width > texture->width)
+        width = texture->width;
+    height = texture->height;
+    if (height <= 0 || height > 128)
+        return NULL;
+
+    for (x = 0; x < width; x++)
+        if (texturecolumnlump[texnum][x] <= 0)
+            return NULL;
+
+    size = width * height + GPU_WALL_TEX2D_PAD;
+    if (size > gpu_wall_tex2d_budget)
+        return NULL;
+
+    block = Z_Malloc(size, PU_LEVEL, &gpu_masked_tex2d[texnum]);
+    gpu_wall_tex2d_budget -= size;
+    memset(block, 0, size);
+
+    for (x = 0; x < width; x++)
+    {
+        const column_t *column = (const column_t *)
+            (R_GetColumn(texnum, x) - 3);
+
+        while (column->topdelta != 0xff)
+        {
+            int len = column->length;
+            int top = column->topdelta;
+
+            if (top + len > height)
+                len = height - top;
+            if (len > 0)
+                memcpy(block + x * height + top,
+                       (const byte *)column + 3, len);
+            column = (const column_t *)
+                ((const byte *)column + column->length + 4);
+        }
+    }
+
+    R_GPU_TextureDataUpdated(block, (unsigned int)size);
+
+    return block;
+}
 
 /* Flat 2D sprite block for the GPU affine-sprite path (ported from the
  * Doom core): patch posts decoded column-major (column x at
@@ -489,6 +555,8 @@ void R_InitTextures(void)
     gpu_wall_tex2d = Z_Malloc(numtextures * sizeof(*gpu_wall_tex2d), PU_STATIC, 0);
     memset(gpu_wall_tex2d, 0, numtextures * sizeof(*gpu_wall_tex2d));
     gpu_wall_tex2d_budget = GPU_WALL_TEX2D_BUDGET;
+    gpu_masked_tex2d = Z_Malloc(numtextures * sizeof(*gpu_masked_tex2d), PU_STATIC, 0);
+    memset(gpu_masked_tex2d, 0, numtextures * sizeof(*gpu_masked_tex2d));
     textureheight = Z_Malloc(numtextures * sizeof(fixed_t), PU_STATIC, 0);
 
     for (i = 0; i < numtextures; i++, directory++)

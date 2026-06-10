@@ -69,6 +69,7 @@ short *maskedtexturecol;
 
 void R_RenderMaskedSegRange(drawseg_t * ds, int x1, int x2)
 {
+    boolean masked_gpu;
     unsigned index;
     column_t *col;
     int lightnum;
@@ -127,6 +128,21 @@ void R_RenderMaskedSegRange(drawseg_t * ds, int x1, int x2)
 
     if (fixedcolormap)
         dc_colormap = fixedcolormap;
+
+    // Param-masked path: the GPU evaluates the wall planes, posts
+    // reduce to {x, ytop, count} records (openfpgaOS).
+    masked_gpu = false;
+    if (detailshift == 0)
+    {
+        masked_gpu = R_GPU_MaskedBegin(R_GetMaskedTexture2D(texnum),
+                                       textureheight[texnum] >> FRACBITS,
+                                       texturewidthmask[texnum],
+                                       dc_texturemid,
+                                       x1, x2, spryscale, rw_scalestep,
+                                       ds->gpu_mdistance, ds->gpu_moffset,
+                                       ds->gpu_mcenterangle);
+    }
+
 //
 // draw the columns
 //
@@ -159,6 +175,8 @@ void R_RenderMaskedSegRange(drawseg_t * ds, int x1, int x2)
         spryscale += rw_scalestep;
     }
 
+    if (masked_gpu)
+        R_GPU_MaskedEnd();
 }
 
 /*
@@ -623,6 +641,14 @@ void R_StoreWallRange(int start, int stop)
             rw_offset = -rw_offset;
         rw_offset += sidedef->textureoffset + curline->offset;
         rw_centerangle = ANG90 + viewangle - rw_normalangle;
+
+        // Stash for the param-masked path (openfpgaOS).
+        if (maskedtexture)
+        {
+            ds_p->gpu_moffset = rw_offset;
+            ds_p->gpu_mdistance = rw_distance;
+            ds_p->gpu_mcenterangle = rw_centerangle;
+        }
 
         //
         // calculate light table

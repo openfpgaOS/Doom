@@ -375,9 +375,13 @@ void R_DrawMaskedColumn (column_t* column)
 	    dc_texturemid = basetexturemid - (column->topdelta<<FRACBITS);
 	    // dc_source = (byte *)column + 3 - column->topdelta;
 
-	    // Affine sprite surface: the post reduces to a {x, ytop,
-	    // count} record (active only between R_GPU_SpriteBegin/End).
-	    if (R_GPU_SpritePost(dc_x, dc_yl, dc_yh))
+	    // Param-masked / affine-sprite surfaces: the post reduces to
+	    // a {x, ytop, count} record while one of them is active.
+	    if (R_GPU_MaskedPost(dc_x, dc_yl, dc_yh))
+	    {
+		/* recorded */
+	    }
+	    else if (R_GPU_SpritePost(dc_x, dc_yl, dc_yh))
 	    {
 		/* recorded */
 	    }
@@ -420,6 +424,8 @@ R_DrawVisSprite
     boolean		fuzz_gpu_batch = false;
     boolean		sprite_gpu;
     boolean		cpu_sprite;
+    int			sprite_light;
+    int			sprite_slot;
 	
 	
     /* Cache the sprite patch PU_LEVEL, not PU_CACHE.  R_DrawVisSprite runs
@@ -463,16 +469,23 @@ R_DrawVisSprite
     if (!dc_colormap && R_GPU_CanDrawFuzz())
 	fuzz_gpu_batch = R_GPU_BeginFuzzSpans();
 
-    // CPU-drawn sprite (translated columns, MP): keep its cached FB
-    // writes coherent with surrounding GPU work.
-    cpu_sprite = (colfunc == transcolfunc);
-    if (cpu_sprite)
-	R_GPU_BeginCPUSprite();
+    // CPU-drawn sprite (translated columns without a resident slot):
+    // keep its cached FB writes coherent with surrounding GPU work.
+    cpu_sprite = false;
 
     // Affine sprite surface: one param command for the whole sprite;
-    // the post walk below only appends records.
+    // the post walk below only appends records.  Translated sprites
+    // ride the same surface with a composed palookup slot.
     sprite_gpu = false;
-    if (maskedcolormaprow >= 0)
+    sprite_light = maskedcolormaprow;
+    sprite_slot = 0;
+    if (sprite_light < 0 && colfunc == transcolfunc && detailshift == 0)
+    {
+	sprite_slot = R_GPU_TranslationSlot(dc_translation);
+	if (sprite_slot > 0)
+	    sprite_light = R_GPU_ColormapRow((const byte *)dc_colormap);
+    }
+    if (sprite_light >= 0 && sprite_slot >= 0)
     {
 	const byte *tex2d = R_GetSpriteTexture2D(vis->patch);
 
@@ -481,8 +494,12 @@ R_DrawVisSprite
 					   patchwidth, dc_texturemid,
 					   dc_iscale, vis->startfrac,
 					   vis->xiscale, vis->x1,
-					   maskedcolormaprow);
+					   sprite_light, sprite_slot);
     }
+
+    cpu_sprite = (colfunc == transcolfunc && !sprite_gpu);
+    if (cpu_sprite)
+	R_GPU_BeginCPUSprite();
 
     for (dc_x=vis->x1 ; dc_x<=vis->x2 ; dc_x++, frac += vis->xiscale)
     {

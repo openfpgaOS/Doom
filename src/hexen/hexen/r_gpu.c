@@ -65,6 +65,11 @@ boolean R_GPU_DrawColumnDirect(int x, int yl, int yh, const byte *source,
     return false;
 }
 boolean R_GPU_DrawTLColumn(void) { return false; }
+boolean R_GPU_DrawSkyColumn(int x, int yl, int yh, const byte *source)
+{
+    (void)x; (void)yl; (void)yh; (void)source;
+    return false;
+}
 boolean R_GPU_TLEnabled(void) { return false; }
 void R_GPU_TLSpriteSync(void) { }
 boolean R_GPU_CanDrawFuzz(void) { return false; }
@@ -213,11 +218,11 @@ void R_GPU_WallTiersEnd(void) { }
 boolean R_GPU_SpriteBegin(const byte *tex2d, int tex_height, int tex_width,
                           fixed_t texturemid, fixed_t iscale,
                           fixed_t startfrac, fixed_t xiscale, int x1,
-                          int light, boolean translucent)
+                          int light, boolean translucent, int cmap_slot)
 {
     (void)tex2d; (void)tex_height; (void)tex_width; (void)texturemid;
     (void)iscale; (void)startfrac; (void)xiscale; (void)x1;
-    (void)light; (void)translucent;
+    (void)light; (void)translucent; (void)cmap_slot;
     return false;
 }
 boolean R_GPU_SpritePost(int x, int yl, int yh)
@@ -228,6 +233,23 @@ boolean R_GPU_SpritePost(int x, int yl, int yh)
 void R_GPU_SpriteEnd(void) { }
 void R_GPU_BeginCPUSprite(void) { }
 void R_GPU_EndCPUSprite(void) { }
+boolean R_GPU_MaskedBegin(const byte *blk, int tex_height, int widthmask,
+                          fixed_t texturemid, int x1, int x2,
+                          fixed_t scale1, fixed_t scalestep,
+                          fixed_t distance, fixed_t offset,
+                          unsigned int centerangle)
+{
+    (void)blk; (void)tex_height; (void)widthmask; (void)texturemid;
+    (void)x1; (void)x2; (void)scale1; (void)scalestep;
+    (void)distance; (void)offset; (void)centerangle;
+    return false;
+}
+boolean R_GPU_MaskedPost(int x, int yl, int yh)
+{
+    (void)x; (void)yl; (void)yh;
+    return false;
+}
+void R_GPU_MaskedEnd(void) { }
 boolean R_GPU_DeferLumpRelease(int lumpnum)
 {
     (void)lumpnum;
@@ -342,6 +364,7 @@ static of_gpu_param_span_record_t gpu_sprite_records[GPU_SPRITE_MAX_RECORDS];
 static int gpu_sprite_record_count;
 static int gpu_sprite_active;
 static int gpu_use_sprite_param;
+static int gpu_masked_active;   /* param-masked range open */
 
 static uint32_t gpu_fb_row_addr[SCREENHEIGHT];
 static uint32_t gpu_cpu_dirty_lines[GPU_FB_CACHE_WORDS];
@@ -1596,6 +1619,7 @@ void R_GPU_Init(void)
     gpu_sprite_record_count = 0;
     gpu_sprite_active = 0;
     gpu_use_sprite_param = 0;
+    gpu_masked_active = 0;
     for (int t = 0; t < GPU_WALL_TIERS; t++)
     {
         gpu_wall_tiers[t].active = 0;
@@ -1745,6 +1769,7 @@ void R_GPU_Shutdown(void)
     gpu_sprite_record_count = 0;
     gpu_sprite_active = 0;
     gpu_use_sprite_param = 0;
+    gpu_masked_active = 0;
     gpu_reset_cpu_cache_tracking();
     gpu_present = 0;
 }
@@ -1986,6 +2011,7 @@ boolean R_GPU_PresentFrame(void)
     gpu_wall_tiers[0].active = 0;
     gpu_wall_tiers[1].active = 0;
     gpu_sprite_active = 0;
+    gpu_masked_active = 0;
     gpu_draw_fb = NULL;
     gpu_draw_render_base = NULL;
     gpu_reset_cpu_cache_tracking();
@@ -2055,6 +2081,38 @@ boolean R_GPU_DrawTLColumn(void)
                    dc_iscale, (uint8_t)light,
                    OF_GPU_SPAN_COLORMAP | OF_GPU_SPAN_TRANSLUC, 0,
                    1, 0, 127);
+
+    R_Perf_CountGpuColumn((unsigned int)count);
+    return true;
+}
+
+
+/* Raven sky columns: vanilla inlines a direct CPU framebuffer loop
+ * here (colfunc is commented out upstream because R_DrawColumn's &127
+ * wrap breaks the 200-tall Raven skies).  Mid-frame CPU framebuffer
+ * writes are unsynchronised against the GPU - their cache lines evict
+ * at random and stamp sky spans over GPU-drawn walls and sprites.
+ * Emit the same copy as a raw GPU column instead: source is the
+ * pre-offset pointer, t walks 0,1,2,... (tstep = 1 texel/pixel), no
+ * colormap - byte-identical to the CPU loop, including its
+ * out-of-range reads at extreme look pitches. */
+boolean R_GPU_DrawSkyColumn(int x, int yl, int yh, const byte *source)
+{
+    int count = yh - yl + 1;
+    int screen_x = x + viewwindowx;
+    int screen_yl = yl + viewwindowy;
+    int screen_yh = yh + viewwindowy;
+
+    if (!gpu_present || !gpu_frame_active || I_VideoBuffer == NULL)
+        return false;
+    if (screen_x < 0 || screen_x >= SCREENWIDTH ||
+        screen_yl < 0 || screen_yh >= SCREENHEIGHT)
+        return false;
+    if (count <= 0 || count > 4095 || source == NULL)
+        return false;
+
+    gpu_add_column(screen_x, screen_yl, count, source, 0, FRACUNIT, 0,
+                   0, 0, 1, 0, 0xFFFF);
 
     R_Perf_CountGpuColumn((unsigned int)count);
     return true;
@@ -2688,7 +2746,7 @@ void R_GPU_WallTiersEnd(void)
 boolean R_GPU_SpriteBegin(const byte *tex2d, int tex_height, int tex_width,
                           fixed_t texturemid, fixed_t iscale,
                           fixed_t startfrac, fixed_t xiscale, int x1,
-                          int light, boolean translucent)
+                          int light, boolean translucent, int cmap_slot)
 {
     /* Shares the AXIS_Y walker the wall probe validated. */
     if (!gpu_use_sprite_param || !gpu_present || !gpu_frame_active ||
@@ -2699,6 +2757,8 @@ boolean R_GPU_SpriteBegin(const byte *tex2d, int tex_height, int tex_width,
     if (tex_height <= 0 || tex_height > 0xFFFF || tex_width <= 0)
         return false;
     if (translucent && (gpu_tl_disabled || tinttable == NULL))
+        return false;
+    if (cmap_slot < 0 || cmap_slot >= OF_GPU_PALOOKUP_SLOTS)
         return false;
 
     if (!gpu_write_prepared)
@@ -2720,7 +2780,7 @@ boolean R_GPU_SpriteBegin(const byte *tex2d, int tex_height, int tex_width,
     gpu_sprite_params.flags = OF_GPU_SPAN_COLORMAP;
     if (translucent)
         gpu_sprite_params.flags |= OF_GPU_SPAN_TRANSLUC;
-    gpu_sprite_params.colormap_id = 0;
+    gpu_sprite_params.colormap_id = (uint8_t)cmap_slot;
     gpu_sprite_params.attr_mode = OF_GPU_PARAM_ATTR_AFFINE;
     gpu_sprite_params.span_axis = OF_GPU_PARAM_AXIS_Y;
     gpu_sprite_params.z_mode = OF_GPU_PARAM_Z_NONE;
@@ -2784,6 +2844,63 @@ void R_GPU_SpriteEnd(void)
     gpu_flush_sprite_batch();
     gpu_sprite_active = 0;
 }
+
+/* ================================================================
+ * Param-masked midtextures: reuse the wall tier machinery during the
+ * masked/sprite phase.  Unlike the solid phase, masked surfaces
+ * interleave with sprites back-to-front, so Begin flushes the staged
+ * column/sprite work first and End emits before the next surface.
+ * Posts append through R_GPU_MaskedPost (light band from spryscale).
+ * ================================================================ */
+
+boolean R_GPU_MaskedBegin(const byte *blk, int tex_height, int widthmask,
+                          fixed_t texturemid, int x1, int x2,
+                          fixed_t scale1, fixed_t scalestep,
+                          fixed_t distance, fixed_t offset,
+                          unsigned int centerangle)
+{
+    gpu_masked_active = 0;
+
+    if (blk == NULL)
+        return false;
+    if (!gpu_use_wall_param || !gpu_present || !gpu_frame_active ||
+        I_VideoBuffer == NULL)
+        return false;
+
+    gpu_flush_affine_batch();
+    gpu_flush_column_batch();
+    gpu_flush_sprite_batch();
+
+    if (!R_GPU_WallSegBegin(x1, x2, scale1, scalestep,
+                            distance, offset, centerangle))
+        return false;
+    if (!R_GPU_WallTierBegin(0, blk, tex_height, widthmask, texturemid))
+    {
+        gpu_wall_seg_valid = 0;
+        return false;
+    }
+
+    gpu_masked_active = 1;
+    return true;
+}
+
+boolean R_GPU_MaskedPost(int x, int yl, int yh)
+{
+    if (!gpu_masked_active)
+        return false;
+
+    return R_GPU_WallTierColumn(0, x, yl, yh, spryscale);
+}
+
+void R_GPU_MaskedEnd(void)
+{
+    if (!gpu_masked_active)
+        return;
+
+    R_GPU_WallTiersEnd();
+    gpu_masked_active = 0;
+}
+
 
 
 /* Bracket a CPU-drawn sprite (translated / alt-TL columns have no GPU

@@ -515,6 +515,13 @@ void R_DrawPlanes(void)
                             >> ANGLETOSKYSHIFT;
                         source = R_GetColumn(skyTexture, angle + offset)
                             + SKYTEXTUREMIDSHIFTED + (dc_yl - centery);
+
+                        // GPU sky column (openfpgaOS): vanilla's inline
+                        // CPU loop leaks unsynchronised cache lines
+                        // over the GPU-drawn frame.
+                        if (R_GPU_DrawSkyColumn(x, dc_yl, dc_yh, source))
+                            continue;
+
                         dest = ylookup[dc_yl] + columnofs[x];
                         do
                         {

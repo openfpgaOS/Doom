@@ -228,6 +228,11 @@ typedef struct mobj_s
     short tid;                  // thing identifier
     byte special;               // special
     byte args[5];               // special arguments
+
+    // Frame interpolation (openfpgaOS): pre-tic state the renderer
+    // lerps from during sub-tic frames.
+    fixed_t oldx, oldy, oldz;
+    angle_t oldangle;
 } mobj_t;
 
 // each sector has a degenmobj_t in it's center for sound origin purposes
@@ -362,6 +367,7 @@ typedef struct pspdef_s
     state_t *state;             // a NULL state means not active
     int tics;
     fixed_t sx, sy;
+    fixed_t oldsx, oldsy;       // frame interpolation (openfpgaOS)
 } pspdef_t;
 
 /* Old Heretic key type
@@ -573,6 +579,10 @@ typedef struct player_s
     int morphTics;              // player is a pig if > 0
     unsigned int jumpTics;      // delay the next jump for a moment
     unsigned int worldTimer;    // total time the player's been playing
+
+    // Frame interpolation (openfpgaOS)
+    fixed_t oldviewz;
+    int oldlookdir;
 } player_t;
 
 #define CF_NOCLIP		1

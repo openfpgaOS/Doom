@@ -108,6 +108,7 @@ R_RenderMaskedSegRange
     int		texnum;
     rendersegcache_t *cache;
     side_t      *side;
+    boolean	masked_gpu;
     byte**	column_table;
     int		widthmask;
     
@@ -174,7 +175,20 @@ R_RenderMaskedSegRange
     {
 	maskedcolormaprow = -1;
     }
-    
+
+    // Param-masked path: the GPU evaluates the wall planes, posts
+    // reduce to {x, ytop, count} records (openfpgaOS).
+    masked_gpu = false;
+    if (detailshift == 0)
+    {
+	masked_gpu = R_GPU_MaskedBegin(R_GetMaskedTexture2D(texnum),
+				       textureheight[texnum] >> FRACBITS,
+				       widthmask, dc_texturemid,
+				       x1, x2, spryscale, rw_scalestep,
+				       ds->gpu_mdistance, ds->gpu_moffset,
+				       ds->gpu_mcenterangle);
+    }
+
     // draw the columns
     for (dc_x = x1 ; dc_x <= x2 ; dc_x++)
     {
@@ -204,6 +218,9 @@ R_RenderMaskedSegRange
 	}
 	spryscale += rw_scalestep;
     }
+
+    if (masked_gpu)
+	R_GPU_MaskedEnd();
 
     maskedcolormaprow = -1;
 	
@@ -713,7 +730,9 @@ OF_FASTTEXT void R_RenderSegLoop (void)
     R_PERF_DETAIL_END(R_PERF_DETAIL_BSP_SEG_LOOP, perf_start);
 }
 
-OF_FASTTEXT static void R_RenderPlaneSegLoop(void)
+/* Not OF_FASTTEXT: APP_BRAM is full; the planes-only loop is lighter
+ * than the textured loop and the 32 KB I$ holds it fine. */
+static void R_RenderPlaneSegLoop(void)
 {
     int			yl;
     int			yh;
@@ -1166,6 +1185,14 @@ R_StoreWallRange
 
 	rw_offset += side_textureoffset + seg_offset;
 	rw_centerangle = ANG90 + viewangle - rw_normalangle;
+
+	// Stash for the param-masked path (openfpgaOS).
+	if (maskedtexture)
+	{
+	    ds_p->gpu_moffset = rw_offset;
+	    ds_p->gpu_mdistance = rw_distance;
+	    ds_p->gpu_mcenterangle = rw_centerangle;
+	}
     }
 
     

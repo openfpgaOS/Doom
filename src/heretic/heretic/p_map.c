@@ -212,6 +212,11 @@ boolean P_TeleportMove(mobj_t * thing, fixed_t x, fixed_t y)
     thing->x = x;
     thing->y = y;
 
+    // Frame interpolation (openfpgaOS): never lerp across a teleport.
+    thing->oldx = thing->x;
+    thing->oldy = thing->y;
+    thing->oldz = thing->z;
+
     P_SetThingPosition(thing);
 
     return true;

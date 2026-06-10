@@ -190,6 +190,11 @@ typedef struct mobj_s
     int lastlook;               // player number last looked for
 
     mapthing_t spawnpoint;      // for nightmare respawn
+
+    // Frame interpolation (openfpgaOS): pre-tic state the renderer
+    // lerps from during sub-tic frames.
+    fixed_t oldx, oldy, oldz;
+    angle_t oldangle;
 } mobj_t;
 
 // each sector has a degenmobj_t in it's center for sound origin purposes
@@ -298,6 +303,7 @@ typedef struct pspdef_s
     state_t *state;             // a NULL state means not active
     int tics;
     fixed_t sx, sy;
+    fixed_t oldsx, oldsy;       // frame interpolation (openfpgaOS)
 } pspdef_t;
 
 typedef enum
@@ -470,6 +476,9 @@ typedef struct player_s
     int chickenPeck;            // chicken peck countdown
     mobj_t *rain1;              // active rain maker 1
     mobj_t *rain2;              // active rain maker 2
+    // Frame interpolation (openfpgaOS)
+    fixed_t oldviewz;
+    int oldlookdir;
 } player_t;
 
 #define CF_NOCLIP		1

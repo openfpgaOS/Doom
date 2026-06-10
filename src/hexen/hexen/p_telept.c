@@ -117,6 +117,11 @@ boolean P_Teleport(mobj_t * thing, fixed_t x, fixed_t y, angle_t angle,
             thing->reactiontime = 18;
         }
         thing->angle = angle;
+        // Frame interpolation (openfpgaOS): snap, never lerp a teleport.
+        thing->oldx = thing->x;
+        thing->oldy = thing->y;
+        thing->oldz = thing->z;
+        thing->oldangle = thing->angle;
     }
     if (thing->flags2 & MF2_FLOORCLIP)
     {

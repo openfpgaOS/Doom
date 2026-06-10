@@ -25,6 +25,8 @@ int R_GPU_CurrentDrawSlot(void);
 
 boolean R_GPU_DrawColumn(void);
 boolean R_GPU_DrawTLColumn(void);
+/* Raven sky: raw texel column from a pre-offset source pointer. */
+boolean R_GPU_DrawSkyColumn(int x, int yl, int yh, const byte *source);
 boolean R_GPU_TLEnabled(void);  /* false under -nogputl (CPU TL columns) */
 /* Drain the GPU before a translucent sprite: TL columns READ the
  * framebuffer, and pixels written by immediately-preceding commands may
@@ -102,7 +104,7 @@ void R_GPU_WallTiersEnd(void);
 boolean R_GPU_SpriteBegin(const byte *tex2d, int tex_height, int tex_width,
                           fixed_t texturemid, fixed_t iscale,
                           fixed_t startfrac, fixed_t xiscale, int x1,
-                          int light, boolean translucent);
+                          int light, boolean translucent, int cmap_slot);
 boolean R_GPU_SpritePost(int x, int yl, int yh);
 void R_GPU_SpriteEnd(void);
 
@@ -110,6 +112,17 @@ void R_GPU_SpriteEnd(void);
  * (translated / alt-TL).  See r_gpu.c for the failure mode. */
 void R_GPU_BeginCPUSprite(void);
 void R_GPU_EndCPUSprite(void);
+
+/* Param-masked midtextures: wall-tier machinery during the masked
+ * phase; geometry comes from the drawseg stash (gpu_m*).  Posts append
+ * via R_GPU_MaskedPost; Begin false = keep column emission. */
+boolean R_GPU_MaskedBegin(const byte *blk, int tex_height, int widthmask,
+                          fixed_t texturemid, int x1, int x2,
+                          fixed_t scale1, fixed_t scalestep,
+                          fixed_t distance, fixed_t offset,
+                          unsigned int centerangle);
+boolean R_GPU_MaskedPost(int x, int yl, int yh);
+void R_GPU_MaskedEnd(void);
 
 boolean R_GPU_DeferLumpRelease(int lumpnum);
 

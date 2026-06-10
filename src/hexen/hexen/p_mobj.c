@@ -1054,6 +1054,20 @@ static void PlayerLandedOnThing(mobj_t * mo, mobj_t * onmobj)
 
 void P_MobjThinker(thinker_t *thinker)
 {
+
+    // Frame interpolation (openfpgaOS): snapshot the pre-tic state.
+    // Player mobjs are snapshotted in P_PlayerThink, which runs first.
+    {
+        mobj_t *imo = (mobj_t *) thinker;
+
+        if (imo->player == NULL)
+        {
+            imo->oldx = imo->x;
+            imo->oldy = imo->y;
+            imo->oldz = imo->z;
+            imo->oldangle = imo->angle;
+        }
+    }
     mobj_t *mobj = (mobj_t *) thinker;
     mobj_t *onmo;
 /*
@@ -1248,6 +1262,12 @@ mobj_t *P_SpawnMobj(fixed_t x, fixed_t y, fixed_t z, mobjtype_t type)
     }
 
     mobj->thinker.function = P_MobjThinker;
+    // Frame interpolation (openfpgaOS): no pre-spawn state to lerp from.
+    mobj->oldx = mobj->x;
+    mobj->oldy = mobj->y;
+    mobj->oldz = mobj->z;
+    mobj->oldangle = mobj->angle;
+
     P_AddThinker(&mobj->thinker);
     return (mobj);
 }

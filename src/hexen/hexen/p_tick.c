@@ -50,6 +50,39 @@ thinker_t thinkercap;           // The head and tail of the thinker list
 //
 //==========================================================================
 
+// Frame interpolation (openfpgaOS): snapshot pre-tic sector heights and
+// collect movers so the renderer can lerp plane heights per frame.
+static void P_SnapshotSectorInterpolation(void)
+{
+    int i;
+
+    for (i = 0; i < numsectors; i++)
+    {
+        sectors[i].oldfloorheight = sectors[i].floorheight;
+        sectors[i].oldceilingheight = sectors[i].ceilingheight;
+    }
+}
+
+static void P_UpdateSectorInterpolationList(void)
+{
+    int i;
+
+    numinterpolatedsectors = 0;
+    if (interpolatedsectors == NULL)
+        return;
+
+    for (i = 0; i < numsectors; i++)
+    {
+        sector_t *sec = &sectors[i];
+
+        if (sec->oldfloorheight != sec->floorheight
+         || sec->oldceilingheight != sec->ceilingheight)
+        {
+            interpolatedsectors[numinterpolatedsectors++] = sec;
+        }
+    }
+}
+
 void P_Ticker(void)
 {
     int i;
@@ -58,6 +91,9 @@ void P_Ticker(void)
     {
         return;
     }
+
+    P_SnapshotSectorInterpolation();
+
     for (i = 0; i < maxplayers; i++)
     {
         if (playeringame[i])
@@ -75,6 +111,7 @@ void P_Ticker(void)
     RunThinkers();
     P_UpdateSpecials();
     P_AnimateSurfaces();
+    P_UpdateSectorInterpolationList();
     leveltime++;
 }
 

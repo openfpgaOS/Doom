@@ -82,6 +82,10 @@ typedef struct
     void *specialdata;          // thinker_t for reversable actions
     int linecount;
     struct line_s **lines;      // [linecount] size
+
+    // Frame interpolation (openfpgaOS)
+    fixed_t oldfloorheight, oldceilingheight;
+    fixed_t renderfloorheight, renderceilingheight;
 } sector_t;
 
 typedef struct
@@ -230,6 +234,11 @@ typedef struct drawseg_s
     short *sprtopclip;          // adjusted so [x1] is first value
     short *sprbottomclip;       // adjusted so [x1] is first value
     short *maskedtexturecol;    // adjusted so [x1] is first value
+    // Param-masked path (openfpgaOS): wall-pass geometry stashed so
+    // R_RenderMaskedSegRange can rebuild the perspective planes.
+    fixed_t gpu_moffset;
+    fixed_t gpu_mdistance;
+    unsigned gpu_mcenterangle;
 } drawseg_t;
 
 #define SIL_NONE        0
@@ -404,10 +413,17 @@ extern int TransTextureStart;
 extern int TransTextureEnd;
 extern lighttable_t **walllights;
 extern byte *walllightrows;
+
+// Frame interpolation (openfpgaOS)
+extern boolean r_interpolate;
+extern fixed_t fractionaltic;
+extern int numinterpolatedsectors;
+extern sector_t **interpolatedsectors;
 extern byte *planezlightrow;
 void R_RetargetBuffer(void);
 byte *R_GetWallTexture2D(int texnum);  // flat 2D block for param-walls
 byte *R_GetSpriteTexture2D(int spritelump);  // flat 2D sprite block
+byte *R_GetMaskedTexture2D(int texnum);   // post-aware block for masked midtex
 
 
 void R_RenderMaskedSegRange(drawseg_t * ds, int x1, int x2);

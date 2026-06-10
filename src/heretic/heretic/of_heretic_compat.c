@@ -4,7 +4,8 @@
 
 #include "m_menu.h"
 
-/* VRR interpolation flag read by the shim. Heretic never interpolates. */
+/* VRR interpolation flag; the shim recomputes it each I_StartFrame from
+ * the effective refresh mode (see m_menu.h bridge). */
 int frame_interpolation = 0;
 
 /* Display refresh policy; toggled in Options. Defaults to VRR like Doom. */

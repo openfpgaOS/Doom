@@ -441,6 +441,15 @@ void R_DrawPlanes(void)
                     dc_x = x;
                     dc_source = R_GetColumn(skytexture, angle);
 
+                    // GPU sky column (openfpgaOS): vanilla's inline CPU
+                    // loop leaks unsynchronised cache lines over the
+                    // GPU-drawn frame.  Same bytes, GPU-ordered.
+                    if (R_GPU_DrawSkyColumn(dc_x, dc_yl, dc_yh,
+                                            dc_source
+                                            + (dc_texturemid >> FRACBITS)
+                                            + (dc_yl - centery)))
+                        continue;
+
                     count = dc_yh - dc_yl;
                     if (count < 0)
                         return;

@@ -62,6 +62,12 @@ angle_t xtoviewangle[SCREENWIDTH + 1];
 lighttable_t *scalelight[LIGHTLEVELS][MAXLIGHTSCALE];
 lighttable_t *scalelightfixed[MAXLIGHTSCALE];
 lighttable_t *zlight[LIGHTLEVELS][MAXLIGHTZ];
+// Frame interpolation (openfpgaOS)
+boolean r_interpolate = false;
+fixed_t fractionaltic = 0;
+int numinterpolatedsectors = 0;
+sector_t **interpolatedsectors = NULL;
+
 byte scalelightrow[LIGHTLEVELS][MAXLIGHTSCALE];
 byte scalelightfixedrow[MAXLIGHTSCALE];
 byte zlightrow[LIGHTLEVELS][MAXLIGHTZ];
@@ -731,12 +737,33 @@ void R_SetupFrame(player_t * player)
     viewplayer = player;
     // haleyjd: removed WATCOMC
     // haleyjd FIXME: viewangleoffset handling?
-    viewangle = player->mo->angle + viewangleoffset;
+    // Interpolate the camera between tics so the view moves smoothly
+    // at display rate instead of snapping to tic boundaries (openfpgaOS).
+    if (r_interpolate)
+    {
+        mobj_t *mo = player->mo;
+        int32_t adiff = (int32_t)(mo->angle - mo->oldangle);
+
+        viewangle = mo->oldangle
+                  + (angle_t)(((int64_t)adiff * fractionaltic) >> FRACBITS)
+                  + viewangleoffset;
+    }
+    else
+    {
+        viewangle = player->mo->angle + viewangleoffset;
+    }
     tableAngle = viewangle >> ANGLETOFINESHIFT;
     if (player->chickenTics && player->chickenPeck)
     {                           // Set chicken attack view position
         viewx = player->mo->x + player->chickenPeck * finecosine[tableAngle];
         viewy = player->mo->y + player->chickenPeck * finesine[tableAngle];
+    }
+    else if (r_interpolate)
+    {                           // Normal view position, interpolated
+        mobj_t *mo = player->mo;
+
+        viewx = mo->oldx + FixedMul(mo->x - mo->oldx, fractionaltic);
+        viewy = mo->oldy + FixedMul(mo->y - mo->oldy, fractionaltic);
     }
     else
     {                           // Normal view position
@@ -744,9 +771,21 @@ void R_SetupFrame(player_t * player)
         viewy = player->mo->y;
     }
     extralight = player->extralight;
-    viewz = player->viewz;
+    if (r_interpolate)
+    {
+        int lookdir = player->oldlookdir
+                    + (int)(((int64_t)(player->lookdir - player->oldlookdir)
+                             * fractionaltic) >> FRACBITS);
 
-    tempCentery = viewheight / 2 + (player->lookdir) * screenblocks / 10;
+        viewz = player->oldviewz
+              + FixedMul(player->viewz - player->oldviewz, fractionaltic);
+        tempCentery = viewheight / 2 + lookdir * screenblocks / 10;
+    }
+    else
+    {
+        viewz = player->viewz;
+        tempCentery = viewheight / 2 + (player->lookdir) * screenblocks / 10;
+    }
     if (centery != tempCentery)
     {
         centery = tempCentery;
@@ -808,6 +847,43 @@ void R_SetupFrame(player_t * player)
 ==============
 */
 
+static void R_BeginSectorInterpolation(void)
+{
+    int i;
+
+    if (!r_interpolate)
+        return;
+
+    for (i = 0; i < numinterpolatedsectors; i++)
+    {
+        sector_t *sec = interpolatedsectors[i];
+
+        sec->renderfloorheight = sec->floorheight;
+        sec->renderceilingheight = sec->ceilingheight;
+        sec->floorheight = sec->oldfloorheight
+            + FixedMul(sec->floorheight - sec->oldfloorheight, fractionaltic);
+        sec->ceilingheight = sec->oldceilingheight
+            + FixedMul(sec->ceilingheight - sec->oldceilingheight,
+                       fractionaltic);
+    }
+}
+
+static void R_EndSectorInterpolation(void)
+{
+    int i;
+
+    if (!r_interpolate)
+        return;
+
+    for (i = 0; i < numinterpolatedsectors; i++)
+    {
+        sector_t *sec = interpolatedsectors[i];
+
+        sec->floorheight = sec->renderfloorheight;
+        sec->ceilingheight = sec->renderceilingheight;
+    }
+}
+
 void R_RenderPlayerView(player_t * player)
 {
     R_SetupFrame(player);
@@ -815,11 +891,13 @@ void R_RenderPlayerView(player_t * player)
     R_ClearDrawSegs();
     R_ClearPlanes();
     R_ClearSprites();
+    R_BeginSectorInterpolation();
     NetUpdate();                // check for new console commands
     R_RenderBSPNode(numnodes - 1);      // the head node is the last node output
     NetUpdate();                // check for new console commands
     R_DrawPlanes();
     NetUpdate();                // check for new console commands
     R_DrawMasked();
+    R_EndSectorInterpolation();
     NetUpdate();                // check for new console commands
 }

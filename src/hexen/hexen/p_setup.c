@@ -250,6 +250,10 @@ void P_LoadSubsectors(int lump)
 
     numsubsectors = W_LumpLength(lump) / sizeof(mapsubsector_t);
     subsectors = Z_Malloc(numsubsectors * sizeof(subsector_t), PU_LEVEL, 0);
+    // Frame interpolation (openfpgaOS): per-level mover list.
+    numinterpolatedsectors = 0;
+    interpolatedsectors = Z_Malloc(numsectors * sizeof(*interpolatedsectors),
+                                   PU_LEVEL, &interpolatedsectors);
     data = W_CacheLumpNum(lump, PU_STATIC);
 
     ms = (mapsubsector_t *) data;

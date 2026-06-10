@@ -334,7 +334,13 @@ typedef struct drawseg_s
     short*		sprtopclip;		
     short*		sprbottomclip;	
     short*		maskedtexturecol;
-    
+
+    // Param-masked path (openfpgaOS): wall-pass geometry stashed so
+    // R_RenderMaskedSegRange can rebuild the perspective planes.
+    fixed_t		gpu_moffset;
+    fixed_t		gpu_mdistance;
+    unsigned		gpu_mcenterangle;
+
 } drawseg_t;
 
 

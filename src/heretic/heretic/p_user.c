@@ -530,6 +530,23 @@ boolean P_UndoPlayerChicken(player_t * player)
 
 void P_PlayerThink(player_t * player)
 {
+    // Frame interpolation (openfpgaOS): snapshot pre-tic view state.
+    {
+        int i;
+
+        player->mo->oldx = player->mo->x;
+        player->mo->oldy = player->mo->y;
+        player->mo->oldz = player->mo->z;
+        player->mo->oldangle = player->mo->angle;
+        player->oldviewz = player->viewz;
+        player->oldlookdir = player->lookdir;
+        for (i = 0; i < NUMPSPRITES; i++)
+        {
+            player->psprites[i].oldsx = player->psprites[i].sx;
+            player->psprites[i].oldsy = player->psprites[i].sy;
+        }
+    }
+
     ticcmd_t *cmd;
     weapontype_t newweapon;
 
