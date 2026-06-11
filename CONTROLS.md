@@ -1,7 +1,7 @@
 # 🎮 Controls
 
-Default Analogue Pocket button maps for the two openfpgaOS cores in this
-repo. Both are remappable in the Pocket's own controller-config UI; the
+Default Analogue Pocket button maps for the openfpgaOS cores in this
+repo. All are remappable in the Pocket's own controller-config UI; the
 tables below are the shipped defaults.
 
 ## 💥 Doom
@@ -22,52 +22,70 @@ tables below are the shipped defaults.
 
 ## 🐉 Heretic
 
-The Pocket has fewer buttons than Heretic needs, so **B is a modifier**:
-tap it to use/open, or hold it and press another button for the chorded
-action below.
+Heretic follows the Doom layout. The extra Heretic actions (fly,
+inventory) live on **shoulder chords**: hold L1 to strafe with the
+D-pad, hold R1 and press another button for the actions below.
 
 | Button | In game | In menus |
 | --- | --- | --- |
 | D-pad | Move / turn | Navigate |
 | A | Fire | Confirm |
 | B (tap) | Use / open | Back |
+| B (hold) | Run | — |
 | X | Use inventory item | — |
 | Y | Next weapon | — |
-| L1 / R1 | Strafe left / right | — |
+| L1 (hold) | Strafe modifier | — |
+| R1 (hold) | Action modifier | — |
+| L2 | Use / open | Back |
+| R2 | Fire | Confirm |
 | Start | Menu | Close menu |
 | Select | Automap | — |
 
-**Hold B + …**
+**Hold L1 + …**
 
 | Chord | Action |
 | --- | --- |
-| B + Up / Down | Fly up / down |
-| B + Left / Right | Select previous / next inventory item |
-| B + Y | Previous weapon |
+| L1 + Left / Right | Strafe left / right |
+
+**Hold R1 + …**
+
+| Chord | Action |
+| --- | --- |
+| R1 + Up / Down | Fly up / down |
+| R1 + Left / Right | Select previous / next inventory item |
+| R1 + Y | Previous weapon |
 
 ## 🛡️ Hexen
 
-Like Heretic, the Pocket has fewer buttons than Hexen needs, so **B is a
-modifier**: tap it to use/open, or hold it and press another button for the
-chorded action below. Hexen adds jumping, so the shoulder buttons jump and
-strafe moves onto a B-hold chord.
+Same scheme as Heretic. Hexen adds jumping, which takes X, so item use
+moves to Y and the weapon cycle goes onto the R1 chords.
 
 | Button | In game | In menus |
 | --- | --- | --- |
 | D-pad | Move / turn | Navigate |
 | A | Fire | Confirm |
 | B (tap) | Use / open | Back |
-| X | Use inventory item | — |
-| Y | Next weapon | — |
-| L / R | Jump | — |
+| B (hold) | Run | — |
+| X | Jump | — |
+| Y | Use inventory item | — |
+| L1 (hold) | Strafe modifier | — |
+| R1 (hold) | Action modifier | — |
+| L2 | Use / open | Back |
+| R2 | Fire | Confirm |
 | Start | Menu | Close menu |
 | Select | Automap | — |
 
-**Hold B + …**
+**Hold L1 + …**
 
 | Chord | Action |
 | --- | --- |
-| B + Up / Down | Fly up / down |
-| B + Left / Right | Strafe left / right |
-| B + Y | Previous weapon |
-| B + L / R | Select previous / next inventory item |
+| L1 + Left / Right | Strafe left / right |
+
+**Hold R1 + …**
+
+| Chord | Action |
+| --- | --- |
+| R1 + Up / Down | Fly up / down |
+| R1 + Left / Right | Select previous / next inventory item |
+| R1 + X | Next weapon |
+| R1 + Y | Previous weapon |

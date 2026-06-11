@@ -9,8 +9,8 @@
                     { "id": 1,  "name": "Use / Open",    "key": "pad_btn_b" },
                     { "id": 2,  "name": "Use Item",      "key": "pad_btn_x" },
                     { "id": 3,  "name": "Next Weapon",   "key": "pad_btn_y" },
-                    { "id": 10, "name": "Strafe Left",   "key": "pad_trig_l" },
-                    { "id": 11, "name": "Strafe Right",  "key": "pad_trig_r" },
+                    { "id": 10, "name": "Strafe Mod",    "key": "pad_trig_l" },
+                    { "id": 11, "name": "Action Mod",    "key": "pad_trig_r" },
                     { "id": 20, "name": "Menu",          "key": "pad_btn_start" },
                     { "id": 21, "name": "Automap",       "key": "pad_btn_select" }
                 ]
