@@ -75,11 +75,12 @@ Files the port adds on top of stock chocolate-doom (each opens with a one-line
 ## 🎮 Controls (`shim/i_input.c`, guarded by `#ifdef OF_<GAME>`)
 
 - **Doom** (`#else` branch) — a straightforward `BTN_MAP` table; B-hold = run; L2/R2 = use/fire.
-- **Heretic + Hexen** share a `#if defined(OF_HERETIC) || defined(OF_HEXEN)` joystick block: A = fire/confirm, B = back **only while a menu is up**. Critically, `key_fire` stays at its **default (RCTRL)** — do **not** remap it to `KEY_ENTER` like the Doom branch does, because X posts `key_useartifact` (ENTER) in these games, so `key_fire = ENTER` makes **X fire as well as use an item** (the "A and X both attack" bug).
-- **Heretic** (`#ifdef OF_HERETIC`) — A fire, B tap = use / hold = modifier, X use artifact, Y next weapon, B+Y prev weapon, B+L/R cycle inventory, B+Up/Down fly.
-- **Hexen** (`#elif defined(OF_HEXEN)`) — adds jumping. A fire, B tap = use / hold (`HEX_MOD_HOLD_MS` = 100 ms) = modifier, X use artifact, Y next weapon (B+Y prev), L/R jump (B+L / B+R strafe), B+Up/Down fly, B+Left/Right cycle inventory, Start menu, Select map. `hex_emit()` swaps the key a held D-pad/Y/L/R is emitting when the modifier engages mid-hold.
+- **Heretic + Hexen** carry **two layouts** gated on `control_scheme` (an Options toggle; see below). `I_PollInput` and the shared `#if defined(OF_HERETIC) || defined(OF_HEXEN)` joystick block both branch on it — **edit one branch, check the other.**
+  - **DEFAULT** (`CONTROL_SCHEME_DEFAULT`) — the unified map: A/R2 fire, L2 use, B tap = use / hold = run (`update_b_button`), L1 = strafe modifier, R1 = action modifier (fly / inventory / weapon chords). Heretic X = use artifact, Y = next weapon; Hexen X = jump, Y = use artifact, R1+X = next weapon.
+  - **DISCO** (`CONTROL_SCHEME_DISCO`) — the B-modifier map: A fire, B back **only while a menu is up**, B tap = use / hold (`HER/HEX_MOD_HOLD_MS`) = modifier (fly / inventory / B+Y prev weapon), L1/R1 = strafe (Heretic) or jump with B+L/R strafe (Hexen); L2/R2 unused.
+- Either scheme keeps `key_fire` at its **default (RCTRL)** — do **not** remap it to `KEY_ENTER` like the Doom branch does, because X posts `key_useartifact` (ENTER) in these games, so `key_fire = ENTER` makes **X fire as well as use an item** (the "A and X both attack" bug).
 
-`CONTROLS.md` documents the **shipped defaults only** — controls, no Options-menu / settings rows (those were deliberately removed; "settings, not controls").
+`CONTROLS.md` documents the DEFAULT map; `DISCO_CONTROLS.md` the DISCO one. Controls only — no Options-menu / settings rows ("settings, not controls").
 
 ## 🎚️ Options menu (per-game `m_menu.c` / `mn_menu.c`, persisted in `<Game>.cfg`)
 

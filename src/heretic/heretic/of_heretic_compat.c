@@ -11,6 +11,10 @@ int frame_interpolation = 0;
 /* Display refresh policy; toggled in Options. Defaults to VRR like Doom. */
 int refresh_mode = REFRESH_MODE_VRR;
 
+/* Pocket button layout; toggled in Options. Defaults to the unified DEFAULT
+ * map (DISCO selects the B-modifier map). Read by the shim. */
+int control_scheme = CONTROL_SCHEME_DEFAULT;
+
 /* Pacing stubs the shim links against. Heretic uses the stock software
  * renderer, so report no over-budget time and ignore frame events. */
 unsigned int R_Perf_PacingCurrentPrepareUS(void) { return 0; }

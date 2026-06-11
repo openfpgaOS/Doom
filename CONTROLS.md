@@ -4,6 +4,10 @@ Default Analogue Pocket button maps for the openfpgaOS cores in this
 repo. All are remappable in the Pocket's own controller-config UI; the
 tables below are the shipped defaults.
 
+🕺 Heretic and Hexen also ship a second layout, **DISCO**, selected from
+`Options > MORE… > CONTROLS`. It keeps the chords on **B** instead of the
+shoulders — see [DISCO_CONTROLS.md](DISCO_CONTROLS.md).
+
 ## 💥 Doom
 
 | Button | In game | In menus |
