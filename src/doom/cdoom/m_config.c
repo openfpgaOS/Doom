@@ -572,6 +572,16 @@ static default_t	doom_defaults_list[] =
     CONFIG_VARIABLE_INT(refresh_mode),
 
     //!
+    // @game heretic hexen
+    //
+    // openfpgaOS Pocket button layout.  0 = DEFAULT (the unified
+    // Doom/Quake/Duke3D map), 1 = DISCO (the B-modifier map).
+    // Toggled in the Options menu; only Heretic and Hexen read it.
+    //
+
+    CONFIG_VARIABLE_INT(control_scheme),
+
+    //!
     // Number of sounds that will be played simultaneously.
     //
 

@@ -29,6 +29,9 @@
 #include "doomtype.h"
 #include "doomstat.h"
 #include "m_fixed.h"
+#if defined(OF_HERETIC) || defined(OF_HEXEN)
+#include "m_menu.h"   /* control_scheme + CONTROL_SCHEME_* (DEFAULT / DISCO) */
+#endif
 
 #include <string.h>
 
@@ -341,11 +344,21 @@ static void post_joystick_axes(const of_input_state_t *s, uint32_t buttons)
     memset(&ev, 0, sizeof(ev));
     ev.type = ev_joystick;
 #if defined(OF_HERETIC) || defined(OF_HEXEN)
-    /* Heretic/Hexen: A and R2 = fire (menu confirm), L2 = use (menu back).
-     * B's tap-use / hold-run / menu-back lives in update_b_button(). */
-    ev.data1 = joystick_button_mask(joybfire,
-                                    (buttons & (OF_BTN_A | OF_BTN_R2)) != 0)
-             | joystick_button_mask(joybuse, (buttons & OF_BTN_L2) != 0);
+    if (control_scheme == CONTROL_SCHEME_DISCO)
+    {
+        /* DISCO: A = fire/confirm; B = back, but only while a menu is up. */
+        ev.data1 = joystick_button_mask(joybfire, (buttons & OF_BTN_A) != 0)
+                 | joystick_button_mask(joybuse,
+                                        (buttons & OF_BTN_B) != 0 && menuactive);
+    }
+    else
+    {
+        /* DEFAULT: A and R2 = fire (menu confirm), L2 = use (menu back).
+         * B's tap-use / hold-run / menu-back lives in update_b_button(). */
+        ev.data1 = joystick_button_mask(joybfire,
+                                        (buttons & (OF_BTN_A | OF_BTN_R2)) != 0)
+                 | joystick_button_mask(joybuse, (buttons & OF_BTN_L2) != 0);
+    }
 #else
     ev.data1 = joystick_button_mask(joybuse, (buttons & OF_BTN_L2) != 0)
              | joystick_button_mask(joybfire, (buttons & OF_BTN_R2) != 0);
@@ -471,16 +484,25 @@ void I_ReadMouse(void) { /* openfpgaOS: no mouse */ }
 
 #ifdef OF_HERETIC
 
-/* Heretic Pocket buttons — aligned with the Doom/Quake/Duke3D ports:
- * A fire, B tap = use/open + hold = run, X use item, Y next weapon,
- * L1 = strafe modifier (hold + D-pad left/right strafes), R1 = action
- * modifier (hold + D-pad up/down flies, left/right cycles inventory,
- * + Y previous weapon), L2 use, R2 fire, START menu, SELECT map.
+/* Heretic Pocket buttons, by Options > CONTROLS scheme:
+ *   DEFAULT — A fire, B tap use / hold run, X use item, Y next weapon, L1
+ *     strafe mod (+ D-pad L/R), R1 action mod (+ D-pad U/D fly, L/R inventory,
+ *     + Y prev weapon), L2 use, R2 fire, START menu, SELECT map.
+ *   DISCO — A fire, B tap use / hold mod (+ D-pad fly/inventory, + Y prev
+ *     weapon), X use item, Y next weapon, L1/R1 strafe; L2/R2 unused.
  * A / R2 / L2 drive fire/use via the joystick event (see axes above). */
+
+/* Hold B this long for the DISCO modifier; a quick tap stays Use. */
+#define HER_MOD_HOLD_MS 150
 
 /* Key each held D-pad / Y is emitting, so toggling a modifier mid-hold can
  * swap it (release old, press new). */
 static int her_key_up, her_key_down, her_key_left, her_key_right, her_key_y;
+
+/* DISCO B-modifier state. */
+static int her_b_down;
+static int her_b_chord;
+static unsigned int her_b_press_ms;
 
 static void her_emit(int *slot, int key)   /* key 0 = released */
 {
@@ -506,22 +528,66 @@ void I_PollInput(void)
     uint32_t up   = ~curr &  prev_buttons;
 
     update_tap_use_release();
-    update_b_button(curr);
 
-    /* Shoulder modifiers, parked while a menu is up so the D-pad keeps
-     * navigating.  The action modifier wins where both apply. */
-    int smod = !menuactive && (curr & OF_BTN_L1) != 0;
-    int amod = !menuactive && (curr & OF_BTN_R1) != 0;
+    if (control_scheme == CONTROL_SCHEME_DISCO)
+    {
+        /* DISCO: B tap = use / hold = modifier; L1/R1 = direct strafe. */
+        int b = (curr & OF_BTN_B) != 0;
+        if (b && !her_b_down)
+        {
+            her_b_down = 1;
+            her_b_chord = 0;
+            her_b_press_ms = of_time_ms();
+        }
 
-    her_emit(&her_key_up,    (curr & OF_BTN_UP)    ? (amod ? key_flyup   : KEY_UPARROW)   : 0);
-    her_emit(&her_key_down,  (curr & OF_BTN_DOWN)  ? (amod ? key_flydown : KEY_DOWNARROW) : 0);
-    her_emit(&her_key_left,  (curr & OF_BTN_LEFT)
-             ? (amod ? key_invleft  : smod ? key_strafeleft  : KEY_LEFTARROW)  : 0);
-    her_emit(&her_key_right, (curr & OF_BTN_RIGHT)
-             ? (amod ? key_invright : smod ? key_straferight : KEY_RIGHTARROW) : 0);
-    her_emit(&her_key_y,     (curr & OF_BTN_Y)
-             ? (amod ? key_prevweapon : key_nextweapon) : 0);
+        /* Modifier engages only after a short hold, never while a menu is up. */
+        int mod = b && !menuactive
+               && (unsigned int)(of_time_ms() - her_b_press_ms) >= HER_MOD_HOLD_MS;
 
+        her_emit(&her_key_up,    (curr & OF_BTN_UP)    ? (mod ? key_flyup     : KEY_UPARROW)    : 0);
+        her_emit(&her_key_down,  (curr & OF_BTN_DOWN)  ? (mod ? key_flydown   : KEY_DOWNARROW)  : 0);
+        her_emit(&her_key_left,  (curr & OF_BTN_LEFT)  ? (mod ? key_invleft   : KEY_LEFTARROW)  : 0);
+        her_emit(&her_key_right, (curr & OF_BTN_RIGHT) ? (mod ? key_invright  : KEY_RIGHTARROW) : 0);
+        her_emit(&her_key_y,     (curr & OF_BTN_Y)     ? (mod ? key_prevweapon : key_nextweapon) : 0);
+
+        if (mod && (curr & (OF_BTN_UP | OF_BTN_DOWN | OF_BTN_LEFT | OF_BTN_RIGHT | OF_BTN_Y)))
+            her_b_chord = 1;
+
+        if (down & OF_BTN_L1)     post_key(key_strafeleft, 1);
+        if (up   & OF_BTN_L1)     post_key(key_strafeleft, 0);
+        if (down & OF_BTN_R1)     post_key(key_straferight, 1);
+        if (up   & OF_BTN_R1)     post_key(key_straferight, 0);
+
+        /* B released as a quick tap that never engaged the modifier -> Use. */
+        if (!b && her_b_down)
+        {
+            her_b_down = 0;
+            if (!her_b_chord
+             && (unsigned int)(of_time_ms() - her_b_press_ms) < B_TAP_USE_MS)
+                start_tap_use();
+        }
+    }
+    else
+    {
+        /* DEFAULT: B tap = use / hold = run; L1 strafe-mod, R1 action-mod,
+         * parked while a menu is up so the D-pad keeps navigating.  The action
+         * modifier wins where both apply. */
+        update_b_button(curr);
+
+        int smod = !menuactive && (curr & OF_BTN_L1) != 0;
+        int amod = !menuactive && (curr & OF_BTN_R1) != 0;
+
+        her_emit(&her_key_up,    (curr & OF_BTN_UP)    ? (amod ? key_flyup   : KEY_UPARROW)   : 0);
+        her_emit(&her_key_down,  (curr & OF_BTN_DOWN)  ? (amod ? key_flydown : KEY_DOWNARROW) : 0);
+        her_emit(&her_key_left,  (curr & OF_BTN_LEFT)
+                 ? (amod ? key_invleft  : smod ? key_strafeleft  : KEY_LEFTARROW)  : 0);
+        her_emit(&her_key_right, (curr & OF_BTN_RIGHT)
+                 ? (amod ? key_invright : smod ? key_straferight : KEY_RIGHTARROW) : 0);
+        her_emit(&her_key_y,     (curr & OF_BTN_Y)
+                 ? (amod ? key_prevweapon : key_nextweapon) : 0);
+    }
+
+    /* X = use item and START/SELECT are identical in both schemes. */
     if (down & OF_BTN_X)      post_key(key_useartifact, 1);
     if (up   & OF_BTN_X)      post_key(key_useartifact, 0);
     if (down & OF_BTN_START)  post_key(KEY_ESCAPE, 1);
@@ -536,18 +602,27 @@ void I_PollInput(void)
 
 #elif defined(OF_HEXEN)
 
-/* Hexen Pocket buttons — aligned with the Doom/Quake/Duke3D ports:
- * A fire, B tap = use/open + hold = run, X jump, Y use item,
- * L1 = strafe modifier (hold + D-pad left/right strafes), R1 = action
- * modifier (hold + D-pad up/down flies, left/right cycles inventory,
- * + X next weapon, + Y previous weapon), L2 use, R2 fire, START menu,
- * SELECT map.  A / R2 / L2 drive fire/use via the joystick event (see
- * axes above). */
+/* Hexen Pocket buttons, by Options > CONTROLS scheme:
+ *   DEFAULT — A fire, B tap use / hold run, X jump, Y use item, L1 strafe mod
+ *     (+ D-pad L/R), R1 action mod (+ D-pad U/D fly, L/R inventory, + X next
+ *     weapon, + Y prev weapon), L2 use, R2 fire, START menu, SELECT map.
+ *   DISCO — A fire, B tap use / hold mod, X use item, Y next weapon (B+Y prev),
+ *     L/R jump (B+L/R strafe), B+D-pad U/D fly, B+D-pad L/R inventory; L2/R2
+ *     unused.
+ * A / R2 / L2 drive fire/use via the joystick event (see axes above). */
 
-/* Key each held D-pad / X / Y is emitting, so toggling a modifier mid-hold
- * can swap it (release old, press new). */
+/* Hold B this long for the DISCO modifier; a quick tap stays Use. */
+#define HEX_MOD_HOLD_MS 100
+
+/* Key each held D-pad / X / Y / L / R is emitting, so toggling a modifier
+ * mid-hold can swap it (release old, press new). */
 static int hex_key_up, hex_key_down, hex_key_left, hex_key_right;
-static int hex_key_x, hex_key_y;
+static int hex_key_x, hex_key_y, hex_key_l, hex_key_r;
+
+/* DISCO B-modifier state. */
+static int hex_b_down;
+static int hex_b_chord;
+static unsigned int hex_b_press_ms;
 
 static void hex_emit(int *slot, int key)   /* key 0 = released */
 {
@@ -573,23 +648,68 @@ void I_PollInput(void)
     uint32_t up   = ~curr &  prev_buttons;
 
     update_tap_use_release();
-    update_b_button(curr);
 
-    /* Shoulder modifiers, parked while a menu is up so the D-pad keeps
-     * navigating.  The action modifier wins where both apply. */
-    int smod = !menuactive && (curr & OF_BTN_L1) != 0;
-    int amod = !menuactive && (curr & OF_BTN_R1) != 0;
+    if (control_scheme == CONTROL_SCHEME_DISCO)
+    {
+        /* DISCO: B tap = use / hold = modifier; L/R = jump (B+L/R strafe);
+         * X = use item; Y = next weapon (B+Y prev). */
+        int b = (curr & OF_BTN_B) != 0;
+        if (b && !hex_b_down)
+        {
+            hex_b_down = 1;
+            hex_b_chord = 0;
+            hex_b_press_ms = of_time_ms();
+        }
 
-    hex_emit(&hex_key_up,    (curr & OF_BTN_UP)    ? (amod ? key_flyup   : KEY_UPARROW)   : 0);
-    hex_emit(&hex_key_down,  (curr & OF_BTN_DOWN)  ? (amod ? key_flydown : KEY_DOWNARROW) : 0);
-    hex_emit(&hex_key_left,  (curr & OF_BTN_LEFT)
-             ? (amod ? key_invleft  : smod ? key_strafeleft  : KEY_LEFTARROW)  : 0);
-    hex_emit(&hex_key_right, (curr & OF_BTN_RIGHT)
-             ? (amod ? key_invright : smod ? key_straferight : KEY_RIGHTARROW) : 0);
-    hex_emit(&hex_key_x,     (curr & OF_BTN_X)
-             ? (amod ? key_nextweapon : key_jump) : 0);
-    hex_emit(&hex_key_y,     (curr & OF_BTN_Y)
-             ? (amod ? key_prevweapon : key_useartifact) : 0);
+        /* Modifier engages only after a short hold, never while a menu is up. */
+        int mod = b && !menuactive
+               && (unsigned int)(of_time_ms() - hex_b_press_ms) >= HEX_MOD_HOLD_MS;
+
+        hex_emit(&hex_key_up,    (curr & OF_BTN_UP)    ? (mod ? key_flyup      : KEY_UPARROW)    : 0);
+        hex_emit(&hex_key_down,  (curr & OF_BTN_DOWN)  ? (mod ? key_flydown    : KEY_DOWNARROW)  : 0);
+        hex_emit(&hex_key_left,  (curr & OF_BTN_LEFT)  ? (mod ? key_strafeleft  : KEY_LEFTARROW)  : 0);
+        hex_emit(&hex_key_right, (curr & OF_BTN_RIGHT) ? (mod ? key_straferight : KEY_RIGHTARROW) : 0);
+        hex_emit(&hex_key_y,     (curr & OF_BTN_Y)     ? (mod ? key_prevweapon  : key_nextweapon) : 0);
+        hex_emit(&hex_key_l,     (curr & OF_BTN_L1)    ? (mod ? key_invleft     : key_jump)       : 0);
+        hex_emit(&hex_key_r,     (curr & OF_BTN_R1)    ? (mod ? key_invright    : key_jump)       : 0);
+
+        if (mod && (curr & (OF_BTN_UP | OF_BTN_DOWN | OF_BTN_LEFT | OF_BTN_RIGHT
+                          | OF_BTN_Y | OF_BTN_L1 | OF_BTN_R1)))
+            hex_b_chord = 1;
+
+        if (down & OF_BTN_X)      post_key(key_useartifact, 1);
+        if (up   & OF_BTN_X)      post_key(key_useartifact, 0);
+
+        /* B released as a quick tap that never engaged the modifier -> Use. */
+        if (!b && hex_b_down)
+        {
+            hex_b_down = 0;
+            if (!hex_b_chord
+             && (unsigned int)(of_time_ms() - hex_b_press_ms) < B_TAP_USE_MS)
+                start_tap_use();
+        }
+    }
+    else
+    {
+        /* DEFAULT: B tap = use / hold = run; L1 strafe-mod, R1 action-mod,
+         * parked while a menu is up so the D-pad keeps navigating.  The action
+         * modifier wins where both apply. */
+        update_b_button(curr);
+
+        int smod = !menuactive && (curr & OF_BTN_L1) != 0;
+        int amod = !menuactive && (curr & OF_BTN_R1) != 0;
+
+        hex_emit(&hex_key_up,    (curr & OF_BTN_UP)    ? (amod ? key_flyup   : KEY_UPARROW)   : 0);
+        hex_emit(&hex_key_down,  (curr & OF_BTN_DOWN)  ? (amod ? key_flydown : KEY_DOWNARROW) : 0);
+        hex_emit(&hex_key_left,  (curr & OF_BTN_LEFT)
+                 ? (amod ? key_invleft  : smod ? key_strafeleft  : KEY_LEFTARROW)  : 0);
+        hex_emit(&hex_key_right, (curr & OF_BTN_RIGHT)
+                 ? (amod ? key_invright : smod ? key_straferight : KEY_RIGHTARROW) : 0);
+        hex_emit(&hex_key_x,     (curr & OF_BTN_X)
+                 ? (amod ? key_nextweapon : key_jump) : 0);
+        hex_emit(&hex_key_y,     (curr & OF_BTN_Y)
+                 ? (amod ? key_prevweapon : key_useartifact) : 0);
+    }
 
     if (down & OF_BTN_START)  post_key(KEY_ESCAPE, 1);
     if (up   & OF_BTN_START)  post_key(KEY_ESCAPE, 0);

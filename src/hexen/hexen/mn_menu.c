@@ -116,6 +116,7 @@ static void SCSaveGame(int option);
 static void SCMessages(int option);
 static void SCSwapRunWalk(int option);
 static void SCRefreshMode(int option);
+static void SCControlScheme(int option);
 static void SCEndGame(int option);
 static void SCInfo(int option);
 static void DrawMainMenu(void);
@@ -282,13 +283,14 @@ static MenuItem_t Options2Items[] = {
     {ITT_LRFUNC, "SFX VOLUME", SCSfxVolume, 0, MENU_NONE},
     {ITT_EMPTY, NULL, NULL, 0, MENU_NONE},
     {ITT_LRFUNC, "MUSIC VOLUME", SCMusicVolume, 0, MENU_NONE},
-    {ITT_EMPTY, NULL, NULL, 0, MENU_NONE}
+    {ITT_EMPTY, NULL, NULL, 0, MENU_NONE},
+    {ITT_EFUNC, "CONTROLS : ", SCControlScheme, 0, MENU_NONE}
 };
 
 static Menu_t Options2Menu = {
     90, 20,
     DrawOptions2Menu,
-    6, Options2Items,
+    7, Options2Items,
     0,
     MENU_OPTIONS
 };
@@ -793,6 +795,8 @@ static void DrawOptions2Menu(void)
     DrawSlider(&Options2Menu, 1, 9, screenblocks - 3);
     DrawSlider(&Options2Menu, 3, 16, snd_MaxVolume);
     DrawSlider(&Options2Menu, 5, 16, snd_MusicVolume);
+    MN_DrTextB(control_scheme == CONTROL_SCHEME_DISCO ? "DISCO" : "DEFAULT",
+               210, 140);
 }
 
 //---------------------------------------------------------------------------
@@ -868,6 +872,13 @@ static void SCRefreshMode(int option)
     refresh_mode = refresh_mode == REFRESH_MODE_VRR
                  ? REFRESH_MODE_FIXED
                  : REFRESH_MODE_VRR;
+    S_StartSound(NULL, SFX_CHAT);
+    M_SaveDefaults();
+}
+
+static void SCControlScheme(int option)
+{
+    control_scheme ^= 1;
     S_StartSound(NULL, SFX_CHAT);
     M_SaveDefaults();
 }

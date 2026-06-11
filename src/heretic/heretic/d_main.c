@@ -780,6 +780,7 @@ void D_BindVariables(void)
     M_BindIntVariable("vanilla_demo_limit",     &vanilla_demo_limit);
     M_BindIntVariable("swap_run_walk",          &swap_run_walk);
     M_BindIntVariable("refresh_mode",           &refresh_mode);
+    M_BindIntVariable("control_scheme",         &control_scheme);
     M_BindIntVariable("show_endoom",            &show_endoom);
     M_BindIntVariable("graphical_startup",      &graphical_startup);
 

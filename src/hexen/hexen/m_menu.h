@@ -33,6 +33,17 @@ enum
     REFRESH_MODE_VRR   = 6
 };
 
+/* Pocket button layout; defined in of_hexen_compat.c, defaults to DEFAULT.
+ * Read by the shim (shim/i_input.c), toggled in the Options menu.  DEFAULT is
+ * the unified Doom/Quake/Duke3D map; DISCO is the B-modifier map. */
+extern int control_scheme;
+
+enum
+{
+    CONTROL_SCHEME_DEFAULT = 0,
+    CONTROL_SCHEME_DISCO   = 1
+};
+
 #define HEXEN_ANLG_VIDEO_YC_PAL      0x4u
 #define HEXEN_ANLG_VIDEO_POCKET_OFF  0x8u
 
