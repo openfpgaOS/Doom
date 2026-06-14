@@ -115,6 +115,30 @@
                 ]
             },
             {
+                "name": "Analogizer 15kHz Timing",
+                "id": 61,
+                "type": "list",
+                "enabled": true,
+                "persist": true,
+                "address": "0xF7000000",
+                "defaultval": 0,
+                "mask": "0xFFF3FFFF",
+                "options": [
+                    {
+                        "value": "0x00000000",
+                        "name": "240p"
+                    },
+                    {
+                        "value": "0x00040000",
+                        "name": "480i NTSC"
+                    },
+                    {
+                        "value": "0x00080000",
+                        "name": "576i PAL"
+                    }
+                ]
+            },
+            {
                 "name": "Pocket LCD",
                 "id": 70,
                 "type": "list",

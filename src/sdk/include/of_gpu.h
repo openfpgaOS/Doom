@@ -477,16 +477,24 @@ static inline void _gpu_note_ring_free(uint32_t ring_free) {
 }
 
 static inline void _gpu_cbo_flush_line(void *addr) {
+#ifdef OF_GPU_CAPTURE
+    (void)addr;  /* host capture build: no RISC-V cbo.flush */
+#else
     __asm__ volatile(".insn i 0x0F, 2, x0, %0, 2" :: "r"(addr) : "memory");
+#endif
 }
 
 static inline void _gpu_flush_cmd_cache_range(void *addr, uint32_t bytes) {
+#ifdef OF_GPU_CAPTURE
+    (void)addr; (void)bytes;  /* host capture build: no cbo/fence */
+#else
     __asm__ volatile("fence" ::: "memory");
     uintptr_t a = (uintptr_t)addr & ~(uintptr_t)(OF_GPU_CACHE_LINE_BYTES - 1u);
     uintptr_t end = (uintptr_t)addr + bytes;
     for (; a < end; a += OF_GPU_CACHE_LINE_BYTES)
         _gpu_cbo_flush_line((void *)a);
     __asm__ volatile("fence" ::: "memory");
+#endif
 }
 
 static inline void _gpu_drain_cmd_writeback(uint32_t bytes) {
@@ -507,7 +515,9 @@ static inline void _gpu_drain_cmd_writeback(uint32_t bytes) {
     sink ^= p[words - 1u];
 
     __asm__ volatile("" :: "r"(sink) : "memory");
+#ifndef OF_GPU_CAPTURE
     __asm__ volatile("fence" ::: "memory");
+#endif
 }
 
 static inline void _gpu_flush_cmd_stream(void) {
@@ -1276,6 +1286,13 @@ _gpu_emit_param_span_list(const of_gpu_param_span_list_t *p,
             return;
 #endif
     }
+
+#ifdef OF_GPU_CAPTURE
+    /* Additive, flag-gated capture hook (sim/PC instrumentation only).
+     * Decodes the exact records about to be packed onto the wire. Does NOT
+     * alter the emit path; defined by the capture harness. */
+    OF_GPU_CAPTURE_HOOK(p, records, record_count);
+#endif
 
     control = ((uint32_t)p->flags & 0xFFu)
             | (((uint32_t)p->colormap_id & 0x0Fu) << 8)

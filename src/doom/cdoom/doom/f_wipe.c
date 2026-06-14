@@ -313,7 +313,16 @@ wipe_ScreenWipe
     V_MarkRect(0, 0, width, height);
     rc = (*wipes[wipeno*3+1])(width, height, ticks);
     if (wipe_scr != I_VideoBuffer)
+    {
+	// Direct-framebuffer mode keeps the GPU draw buffer in cached memory:
+	// CPU writes only reach the scanout if their lines are marked dirty so
+	// R_GPU_PresentFrame() flushes them.  This raw memcpy bypasses the V_
+	// draw path that normally marks them, so mark the whole screen for CPU
+	// access first -- otherwise every wipe frame past the first flips stale
+	// RAM and the melt appears to crawl at a couple of FPS.
+	R_GPU_PrepareForCPUAccess();
 	memcpy(I_VideoBuffer, wipe_scr, width*height*sizeof(*wipe_scr));
+    }
     //  V_DrawBlock(x, y, 0, width, height, wipe_scr); // DEBUG
 
     // final stuff
