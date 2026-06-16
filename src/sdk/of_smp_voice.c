@@ -29,6 +29,19 @@
 #define SMP_VOICE_ENABLE_TICK_STATS 0
 #endif
 
+/* Hung-voice guard.  A LOOPING voice never self-terminates: it stops only
+ * when its volume envelope reaches ENV_DONE, which requires a note-off
+ * (-> ENV_RELEASE).  If that note-off is dropped -- e.g. an iMUSE jump or
+ * track change skips it -- the voice loops in ENV_SUSTAIN forever (the
+ * "stuck notes" heard in DOTT / Fate of Atlantis MIDI).  smp_voice_tick
+ * force-releases any voice parked in SUSTAIN past this cap so a hung note
+ * can never drone indefinitely.  At the 1 kHz tick rate 8000 = 8 s --
+ * generous enough not to chop legitimately long held notes/pads; voices in
+ * RELEASE or DECAY are never touched. */
+#ifndef SMP_VOICE_MAX_SUSTAIN_TICKS
+#define SMP_VOICE_MAX_SUSTAIN_TICKS 8000u
+#endif
+
 /* ------------------------------------------------------------------ */
 /* Static state                                                       */
 /* ------------------------------------------------------------------ */
@@ -910,6 +923,16 @@ void smp_voice_tick(void)
         if (z) {
             if (z->vib_lfo_to_pitch) lfo_advance(&v->vib_lfo);
             if (z->mod_lfo_to_pitch) lfo_advance(&v->mod_lfo);
+        }
+
+        /* Hung-voice guard (see SMP_VOICE_MAX_SUSTAIN_TICKS): a looping voice
+         * whose note-off was dropped loops in ENV_SUSTAIN forever.  Force a
+         * release once it has been parked there past the cap, so a stuck note
+         * always fades out instead of droning indefinitely. */
+        if (z && v->vol_env.stage == ENV_SUSTAIN &&
+            (uint32_t)(tick_counter - v->age) > SMP_VOICE_MAX_SUSTAIN_TICKS) {
+            env_start_release(&v->vol_env, z->vol_release_ticks);
+            env_start_release(&v->mod_env, z->mod_release_ticks);
         }
 
         if (v->vol_env.stage == ENV_DONE) {

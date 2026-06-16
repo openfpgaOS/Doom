@@ -248,6 +248,7 @@ static uint32_t _gpu_base;
 #define GPU_TEX_FLUSH           OF_GPU_REG(0x28)  /* W: flush texture cache */
 #define GPU_DMA_KICK            OF_GPU_REG(0x2C)  /* W: write 1 to fire DMA pull from (SRC, LEN) */
 #define GPU_PALOOKUP_BASE       OF_GPU_REG(0x30)  /* W/R: SDRAM byte base for palookup slots */
+#define GPU_CRAM0_TEX_ENABLE    OF_GPU_REG(0x38)  /* W/R: bit0=route texture-cache fills to CRAM0 (Pocket) */
 
 /* GPU_STATUS bit definitions */
 #define GPU_STATUS_BUSY        0x1u
@@ -477,24 +478,16 @@ static inline void _gpu_note_ring_free(uint32_t ring_free) {
 }
 
 static inline void _gpu_cbo_flush_line(void *addr) {
-#ifdef OF_GPU_CAPTURE
-    (void)addr;  /* host capture build: no RISC-V cbo.flush */
-#else
     __asm__ volatile(".insn i 0x0F, 2, x0, %0, 2" :: "r"(addr) : "memory");
-#endif
 }
 
 static inline void _gpu_flush_cmd_cache_range(void *addr, uint32_t bytes) {
-#ifdef OF_GPU_CAPTURE
-    (void)addr; (void)bytes;  /* host capture build: no cbo/fence */
-#else
     __asm__ volatile("fence" ::: "memory");
     uintptr_t a = (uintptr_t)addr & ~(uintptr_t)(OF_GPU_CACHE_LINE_BYTES - 1u);
     uintptr_t end = (uintptr_t)addr + bytes;
     for (; a < end; a += OF_GPU_CACHE_LINE_BYTES)
         _gpu_cbo_flush_line((void *)a);
     __asm__ volatile("fence" ::: "memory");
-#endif
 }
 
 static inline void _gpu_drain_cmd_writeback(uint32_t bytes) {
@@ -515,9 +508,7 @@ static inline void _gpu_drain_cmd_writeback(uint32_t bytes) {
     sink ^= p[words - 1u];
 
     __asm__ volatile("" :: "r"(sink) : "memory");
-#ifndef OF_GPU_CAPTURE
     __asm__ volatile("fence" ::: "memory");
-#endif
 }
 
 static inline void _gpu_flush_cmd_stream(void) {
@@ -932,6 +923,24 @@ static inline void of_gpu_set_framebuffer(uint32_t addr, uint16_t stride) {
     _gpu_state_valid |= OF_GPU_STATE_FB;
 }
 
+/* Route texture-cache line fills to CRAM0 (Pocket only) instead of SDRAM.
+ *
+ * When enabled, a bound texture's `addr` is interpreted as a CRAM0 byte offset:
+ * upload the texel bytes to the CRAM0 CPU window (OF_TARGET_CRAM0_BASE + offset,
+ * uncached) and set of_gpu_texture_t.addr to that same offset.  The GPU then
+ * fetches texels from CRAM0 through the on-chip async-PSRAM adapter, freeing
+ * SDRAM bandwidth for the framebuffer / z / blend.  Bandwidth-bound, so it suits
+ * small or static textures; mix by toggling around draws.
+ *
+ * MUST be called only while the GPU is idle (no in-flight texture fill) — it
+ * switches the fill-response domain, so toggling mid-burst is undefined.  Drain
+ * with a fence first.  Flush the texture cache (GPU_TEX_FLUSH) after toggling so
+ * stale SDRAM/CRAM0 lines are not reused.  No-op on targets without CRAM0. */
+static inline void of_gpu_set_cram0_textures(int enable) {
+    GPU_CRAM0_TEX_ENABLE = enable ? 1u : 0u;
+    GPU_TEX_FLUSH = 1u;
+}
+
 static inline void of_gpu_bind_texture(const of_gpu_texture_t *tex) {
     uint32_t dims = ((uint32_t)tex->width << 16) | tex->height;
     if ((_gpu_state_valid & OF_GPU_STATE_TEXTURE) &&
@@ -1286,13 +1295,6 @@ _gpu_emit_param_span_list(const of_gpu_param_span_list_t *p,
             return;
 #endif
     }
-
-#ifdef OF_GPU_CAPTURE
-    /* Additive, flag-gated capture hook (sim/PC instrumentation only).
-     * Decodes the exact records about to be packed onto the wire. Does NOT
-     * alter the emit path; defined by the capture harness. */
-    OF_GPU_CAPTURE_HOOK(p, records, record_count);
-#endif
 
     control = ((uint32_t)p->flags & 0xFFu)
             | (((uint32_t)p->colormap_id & 0x0Fu) << 8)
@@ -1692,6 +1694,7 @@ static inline void of_gpu_set_framebuffer(uint32_t addr, uint16_t stride) {
     (void)addr; (void)stride;
 }
 static inline void of_gpu_bind_texture(const of_gpu_texture_t *tex)       { (void)tex; }
+static inline void of_gpu_set_cram0_textures(int enable)                  { (void)enable; }
 static inline void of_gpu_clear(uint32_t flags, uint16_t color)           { (void)flags; (void)color; }
 static inline void of_gpu_clear_rect(uint32_t addr, uint16_t w, uint16_t h,
                                      uint8_t color) {

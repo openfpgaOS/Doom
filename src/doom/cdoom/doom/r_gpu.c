@@ -2017,14 +2017,19 @@ void R_GPU_TextureDataUpdated(void *ptr, unsigned int size)
     if (!gpu_present || ptr == NULL || size == 0)
         return;
 
-    /* Texture-cache invalidation is only safe while the GPU is idle.  This
-     * path is cold: it runs when Doom loads a lump or builds a composite
-     * texture, not for every already-cached texel fetch. */
-    gpu_finish_pending();
+
+    /* Publish the new texels to RAM for the GPU's DMA reads -- that is all a
+     * first-sighting upload needs: the GPU has no stale texture-cache entry
+     * for new data, so it DMAs the flushed RAM correctly.  We deliberately do
+     * NOT issue GPU_TEX_FLUSH (a whole-cache invalidate) here: doing so per
+     * upload nuked the warm texture cache, so the first ~8 frames after a
+     * level load / menu close rendered cold (~70ms vs ~6ms).  The level-load
+     * R_GPU_TextureDataFlushAll() still does the one full invalidate; Doom
+     * never overwrites cached texture data mid-level, so no per-upload
+     * invalidate is needed. */
     cache_start = R_Perf_BeginStage();
     of_cache_flush_range(ptr, size);
     R_Perf_EndStage(R_PERF_STAGE_CACHE, cache_start);
-    GPU_TEX_FLUSH = 1;
 }
 
 void R_GPU_TextureDataFlushAll(void)
