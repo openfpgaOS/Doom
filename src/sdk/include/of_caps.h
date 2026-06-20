@@ -30,7 +30,7 @@ extern "C" {
 #include <stdint.h>
 
 #define OF_CAPS_MAGIC   0x43415053  /* 'CAPS' */
-#define OF_CAPS_VERSION 2
+#define OF_CAPS_VERSION 3
 /* The of_capabilities pointer is delivered to apps via the AT_OF_CAPS
  * auxv tag set up by the kernel ELF loader (see of_app_abi.h). Apps
  * never need to know where the struct lives -- they just call
@@ -134,6 +134,19 @@ extern "C" {
                                          * slots).  OS-internal; the OS
                                          * probes this bit and falls back to
                                          * SAVE_DT_SLOT on old bitstreams. */
+#define OF_HW_GPU_FAST_TEX  (1 << 25)   /* Dedicated fast texture memory
+                                         * present.  The OS resolves
+                                         * caps->tex_fast_size from this bit;
+                                         * apps just read tex_fast_size (or use
+                                         * of_texture.h, which falls back to
+                                         * SDRAM when it is 0).  Pocket OS30
+                                         * sets it; OS25 clears it. */
+#define OF_HW_GPU_XFORM_RGB (1 << 26)   /* GPU transform front-end truecolor +
+                                         * vertex cache + per-vertex lighting:
+                                         * 0x52 xform_tri_rgb, 0x53 load_verts,
+                                         * 0x54 draw_indexed_tri, 0x55
+                                         * set_light_state, 0x57 load_vert_lit.
+                                         * Pocket os30/SM64 sets it. */
 
 /* Convenience: all the GPU bits an app might care about for renderer choice. */
 #define OF_HW_GPU_LITE_MASK  (OF_HW_GPU_SPAN | OF_HW_GPU_FRAGPIPE)
@@ -175,6 +188,12 @@ struct of_capabilities {
     uint32_t sdram_base;            /* CPU base of cached SDRAM */
     uint32_t sdram_uncached_base;   /* CPU base of D-cache-bypass alias */
     uint32_t gpu_base;              /* GPU MMIO window base (0 = no GPU) */
+
+    /* v3: dedicated fast texture memory (a target-specific sync-burst chip).
+     * Bytes available, 0 = none (textures stay in SDRAM, e.g. MiSTer).
+     * Addressed by GPU byte offset [0, tex_fast_size); upload via the GPU's
+     * fast-texture upload regs.  The of_texture.h API hides this entirely. */
+    uint32_t tex_fast_size;
 };
 
 #ifndef OF_PC

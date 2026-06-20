@@ -332,6 +332,13 @@ extern const struct of_services_table *_of_svc_ptr;
 
 #define OF_SVC (_of_svc_ptr)
 
+#else /* OF_PC — no OS service table on the desktop.  OF_SVC is a null
+       * pointer of the right type so `if (OF_SVC && OF_SVC->...)` checks
+       * typecheck and short-circuit (the soft renderer / SDL video path
+       * runs instead of the GPU service path). */
+
+#define OF_SVC ((const struct of_services_table *)0)
+
 #endif /* OF_PC */
 
 #ifdef __cplusplus

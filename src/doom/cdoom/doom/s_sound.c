@@ -703,6 +703,16 @@ void S_ChangeMusic(int musicnum, int looping)
 
     music->data = W_CacheLumpNum(music->lumpnum, PU_STATIC);
 
+#ifdef OF_DOOM
+    // Hand the lump name to the PCM music path so it can stream
+    // common/ost/<LUMP>.pcm when that override file exists.
+    {
+        char ostbuf[9];
+        M_snprintf(ostbuf, sizeof(ostbuf), "d_%s", DEH_String(music->name));
+        I_SetMusicTrackName(ostbuf);
+    }
+#endif
+
     handle = I_RegisterSong(music->data, W_LumpLength(music->lumpnum));
     music->handle = handle;
     I_PlaySong(handle, looping);

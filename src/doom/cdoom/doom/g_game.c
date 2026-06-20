@@ -2556,11 +2556,12 @@ void G_DoPlayDemo (void)
 	netdemo = true;
     }
 
-    // don't spend a lot of time in loadlevel 
-    precache = false;
-    G_InitNew (skill, episode, map); 
-    precache = true; 
-    starttime = I_GetTime (); 
+    /* The GPU renderer needs the level's textures precached even for demos --
+     * skipping it (vanilla's load-time shortcut) leaves the demo drawing on the
+     * CPU.  Precache it: a slightly longer demo load buys full-speed playback. */
+    precache = true;
+    G_InitNew (skill, episode, map);
+    starttime = I_GetTime ();
 
     usergame = false; 
     demoplayback = true; 

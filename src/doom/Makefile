@@ -45,6 +45,7 @@ SRCS_CXX    =
 CFLAGS  = -Ishim -Icdoom -Icdoom/doom
 CFLAGS += -DDISABLE_SDL2MIXER -DDISABLE_SDL2NET
 CFLAGS += -DSMP_MAX_VOICES=20
+CFLAGS += -DOF_DOOM   # selects the Doom-only shim paths (e.g. i_pcmmusic.c)
 CFLAGS += -Wno-unused-parameter -Wno-unused-function
 CFLAGS += -Wno-unused-variable -Wno-sign-compare
 CFLAGS += -Wno-missing-field-initializers -Wno-unused-but-set-variable

@@ -182,6 +182,17 @@ boolean I_OpenFPGASaveRead(const char *name, byte *buffer,
     FILE *fp;
     uint32_t payload_size;
 
+#ifdef OF_DOOM
+    {
+        extern int i_pcm_active;
+        if (i_pcm_active)
+        {
+            extern void I_PCM_DrainAsync(void);
+            I_PCM_DrainAsync();   /* free the slot bridge before this blocking I/O */
+        }
+    }
+#endif
+
     fp = fopen(name, "rb");
     if (fp == NULL)
     {
@@ -217,6 +228,17 @@ boolean I_OpenFPGASaveReadHeader(const char *name, byte *buffer,
     FILE *fp;
     uint32_t payload_size;
 
+#ifdef OF_DOOM
+    {
+        extern int i_pcm_active;
+        if (i_pcm_active)
+        {
+            extern void I_PCM_DrainAsync(void);
+            I_PCM_DrainAsync();
+        }
+    }
+#endif
+
     fp = fopen(name, "rb");
     if (fp == NULL)
     {
@@ -241,6 +263,17 @@ boolean I_OpenFPGASaveWrite(const char *name, const byte *buffer,
     uint8_t header[SAVE_WRAP_HEADER_SIZE];
     FILE *fp;
     boolean ok;
+
+#ifdef OF_DOOM
+    {
+        extern int i_pcm_active;
+        if (i_pcm_active)
+        {
+            extern void I_PCM_DrainAsync(void);
+            I_PCM_DrainAsync();   /* free the slot bridge before the save write */
+        }
+    }
+#endif
 
     if (length == 0 || !save_payload_valid(buffer, length))
     {

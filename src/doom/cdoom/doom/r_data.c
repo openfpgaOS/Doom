@@ -494,8 +494,24 @@ int R_GetTextureWidthMask(int tex)
  * free, same lifetime as composites); a per-level byte budget caps
  * zone pressure — over budget, callers fall back to column emission.
  * ================================================================ */
-#define GPU_WALL_TEX2D_BUDGET (2 * 1024 * 1024)
-#define GPU_SPRITE_TEX2D_BUDGET (2 * 1024 * 1024)
+/* Per-level byte budgets for the GPU 2D texel blocks.  These are zone-bound:
+ * the block is built in the zone (it backs the upload + the CPU fallback), so
+ * the cap protects the 32 MB zone, NOT the (much larger) fast texture tier.
+ * Sized generously to use the fast tier -- a level only builds the textures it
+ * actually uses, so the cap just removes the old 2 MB ceiling that was spilling
+ * busy maps' overflow textures onto the CPU. */
+#define GPU_WALL_TEX2D_BUDGET (9 * 1024 * 1024)
+#define GPU_SPRITE_TEX2D_BUDGET (9 * 1024 * 1024)
+/* Masked 2-sided midtextures are a small subset (a handful of grate/fence/window
+ * textures per map); a modest cap covers them with room to spare. */
+#define GPU_MASKED_TEX2D_BUDGET (2 * 1024 * 1024)
+/* Once a level has built this many block bytes, guard each further block on
+ * real zone headroom (Z_FreeMemory) so a texture-heavy map can never OOM the
+ * unguarded composite/lump/gameplay allocations -- it just falls back to the
+ * CPU instead.  The first GPU_TEX2D_GUARD_FLOOR bytes are always safe (the old
+ * conservative budget), so typical maps pay no Z_FreeMemory cost. */
+#define GPU_TEX2D_GUARD_FLOOR (2 * 1024 * 1024)
+#define GPU_TEX2D_ZONE_RESERVE (8 * 1024 * 1024)
 /* vtex wraps &127 like R_DrawColumn; for texheight < 128 the GPU can
  * read up to 127 bytes past the last column — pad so it stays inside
  * the block (software reads the same out-of-column bytes). */
@@ -506,6 +522,17 @@ static int gpu_wall_tex2d_budget;
 static byte **gpu_sprite_tex2d;
 static int gpu_sprite_tex2d_budget;
 static byte **gpu_masked_tex2d;
+static int gpu_masked_tex2d_budget;
+static int gpu_tex2d_dropped;    /* textures over budget -> CPU (diagnostic) */
+
+/* True if building `size` more block bytes would leave the zone too tight for
+ * the rest of precache + gameplay.  Only consults Z_FreeMemory past the safe
+ * floor, so light maps stay fast to load. */
+static boolean R_Tex2DZoneTight(int used, int size)
+{
+    return used >= GPU_TEX2D_GUARD_FLOOR
+        && Z_FreeMemory() < size + GPU_TEX2D_ZONE_RESERVE;
+}
 
 byte *R_GetWallTexture2D(int texnum)
 {
@@ -528,8 +555,12 @@ byte *R_GetWallTexture2D(int texnum)
     height = texture->height;
     size = width * height + GPU_WALL_TEX2D_PAD;
 
-    if (size > gpu_wall_tex2d_budget)
+    if (size > gpu_wall_tex2d_budget
+        || R_Tex2DZoneTight(GPU_WALL_TEX2D_BUDGET - gpu_wall_tex2d_budget, size))
+    {
+        gpu_tex2d_dropped++;        /* over budget / zone tight -> CPU */
         return NULL;
+    }
 
     block = Z_Malloc(size, PU_LEVEL, &gpu_wall_tex2d[texnum]);
     gpu_wall_tex2d_budget -= size;
@@ -543,50 +574,83 @@ byte *R_GetWallTexture2D(int texnum)
     return block;
 }
 
-/* Post-aware 2D block for the GPU param-masked path: unlike the wall
- * cache (linear memcpy - post offsets collapse), this decodes column
- * posts at their topdelta rows like the sprite atlas.  Restricted to
- * textures whose columns are all patch-backed (multipatch masked =
- * vanilla medusa - those keep the column fallback) and height <= 128
- * (the tier path's vtex &127 wrap).  Shares the wall cache budget. */
+/* Flat 2D block for the GPU param-masked midtexture path: the texture's
+ * column_t posts decoded column-major (column x at block + x*height, each post's
+ * texels placed at its topdelta, transparent gaps zero).  The GPU masked path
+ * (R_GPU_MaskedBegin) draws only the post extents via {x,ytop,count} records, so
+ * the zeros are never sampled and the result is byte-identical to the CPU
+ * R_DrawMaskedColumn walk.
+ *
+ * Gated conservatively -- returns NULL (-> the CPU post walk draws it) unless the
+ * decode is provably byte-exact: a power-of-two height <= 256 (the GPU masked
+ * tier wraps vtex at the height, and R_DrawColumn samples posts with &127, which
+ * agree only for a pow2 height in that range), every column lump-backed (a real
+ * column_t to walk -- composited multipatch columns have no post structure), and
+ * no post taller than 128 (beyond that the CPU's &127 post sampling wraps and a
+ * linear block can't match).  Returning NULL here is also the kill switch: it
+ * reverts masked surfaces to the unconditional CPU path. */
 byte *R_GetMaskedTexture2D(int texnum)
 {
     texture_t *texture;
-    byte *block;
-    int width;
-    int height;
-    int size;
-    int x;
+    byte     **column_table;
+    byte      *block;
+    int        width;
+    int        height;
+    int        size;
+    int        x;
 
-    if (gpu_masked_tex2d == NULL)
+    if (gpu_masked_tex2d == NULL || texnum < 0 || texnum >= numtextures)
         return NULL;
     if (gpu_masked_tex2d[texnum] != NULL)
         return gpu_masked_tex2d[texnum];
 
     texture = textures[texnum];
+    height = texture->height;
+    if (height <= 0 || height > 256 || (height & (height - 1)) != 0)
+        return NULL;                    /* not a pow2 height in [1,256] -> CPU */
+
     width = texturewidthmask[texnum] + 1;
     if (width > texture->width)
         width = texture->width;
-    height = texture->height;
-    if (height <= 0 || height > 128)
-        return NULL;
-
-    for (x = 0; x < width; x++)
-        if (texturecolumnlump[texnum][x] <= 0)
-            return NULL;
-
     size = width * height + GPU_WALL_TEX2D_PAD;
-    if (size > gpu_wall_tex2d_budget)
+
+    if (size > gpu_masked_tex2d_budget
+        || R_Tex2DZoneTight(GPU_MASKED_TEX2D_BUDGET - gpu_masked_tex2d_budget, size))
+    {
+        gpu_tex2d_dropped++;            /* over budget / zone tight -> CPU */
         return NULL;
+    }
+
+    column_table = R_GetColumnTable(texnum);
+    if (column_table == NULL)
+        return NULL;
+
+    /* Validate every column is post-walkable (lump-backed, posts <= 128) before
+     * allocating, so a decline never leaks a block. */
+    for (x = 0; x < width; x++)
+    {
+        const column_t *column;
+
+        if (texturecolumnlump[texnum][x] <= 0)
+            return NULL;                /* composite column: no posts -> CPU */
+
+        column = (const column_t *)(column_table[x] - 3);
+        while (column->topdelta != 0xff)
+        {
+            if (column->length > 128)
+                return NULL;            /* CPU samples post &127 -> can't match */
+            column = (const column_t *)
+                ((const byte *)column + column->length + 4);
+        }
+    }
 
     block = Z_Malloc(size, PU_LEVEL, &gpu_masked_tex2d[texnum]);
-    gpu_wall_tex2d_budget -= size;
+    gpu_masked_tex2d_budget -= size;
     memset(block, 0, size);
 
     for (x = 0; x < width; x++)
     {
-        const column_t *column = (const column_t *)
-            (R_GetColumn(texnum, x) - 3);
+        const column_t *column = (const column_t *)(column_table[x] - 3);
 
         while (column->topdelta != 0xff)
         {
@@ -604,7 +668,6 @@ byte *R_GetMaskedTexture2D(int texnum)
     }
 
     R_GPU_TextureDataUpdated(block, (unsigned int)size);
-
     return block;
 }
 
@@ -635,8 +698,12 @@ byte *R_GetSpriteTexture2D(int spritelump)
         return NULL;
     size = width * height;
 
-    if (size > gpu_sprite_tex2d_budget)
+    if (size > gpu_sprite_tex2d_budget
+        || R_Tex2DZoneTight(GPU_SPRITE_TEX2D_BUDGET - gpu_sprite_tex2d_budget, size))
+    {
+        gpu_tex2d_dropped++;        /* over budget / zone tight -> CPU */
         return NULL;
+    }
 
     block = Z_Malloc(size, PU_LEVEL, &gpu_sprite_tex2d[spritelump]);
     gpu_sprite_tex2d_budget -= size;
@@ -797,6 +864,7 @@ void R_InitTextures (void)
     gpu_wall_tex2d_budget = GPU_WALL_TEX2D_BUDGET;
     gpu_masked_tex2d = Z_Malloc (numtextures * sizeof(*gpu_masked_tex2d), PU_STATIC, 0);
     memset (gpu_masked_tex2d, 0, numtextures * sizeof(*gpu_masked_tex2d));
+    gpu_masked_tex2d_budget = GPU_MASKED_TEX2D_BUDGET;
 
     //	Really complex printing shit...
     temp1 = W_GetNumForName (DEH_String("S_START"));  // P_???????
@@ -1082,6 +1150,123 @@ int R_TextureNumForName(const char *name)
 
 
 //
+// R_CreateTextures
+//  Register the level's texture set with the portable texture manager.
+//
+//  Runs at the end of R_PrecacheLevel, after every wall/sprite 2D block has been
+//  built in zone and every present flat cached.  Each block is handed to the GPU
+//  texture store (R_GPU_TexCreate*), which places it in the target's fast texture
+//  memory or leaves it in SDRAM -- the engine never knows which.  The pixels stay
+//  where the engine loaded them; the renderer later selects each texture by index
+//  (R_GPU_Use*Texture).
+//
+//  For walls we also redirect texturecolumnptr[t][x] -> block + x*height so the
+//  opaque column fallback and the sky column draw sample the same block as the
+//  param path (their texel offsets then resolve against the texture's GPU base).
+//  A texture used as a 2-sided midtexture is excluded: R_DrawMaskedColumn walks
+//  its column_t posts on the CPU, so it keeps its SDRAM column table.
+//
+static void R_CreateTextures (void)
+{
+    char *masked;
+    int   i;
+    int   x;
+
+    R_GPU_TexBeginLevel(numtextures, numflats, numspritelumps);
+    R_GPU_TexSetColormap();     // colormap co-located first (fast offset 0)
+
+    // A 2-sided midtexture keeps its SDRAM column table (CPU post walk).
+    masked = Z_Malloc(numtextures, PU_STATIC, NULL);
+    memset(masked, 0, numtextures);
+    for (i = 0; i < numlines; i++)
+    {
+        if (lines[i].backsector == NULL)
+            continue;                       // 1-sided: midtexture is opaque
+        for (x = 0; x < 2; x++)
+        {
+            int sn = lines[i].sidenum[x];
+            int mt;
+
+            if (sn < 0)
+                continue;
+            mt = sides[sn].midtexture;
+            if (mt > 0 && mt < numtextures)
+                masked[mt] = 1;
+        }
+    }
+
+    for (i = 0; i < numtextures; i++)
+    {
+        byte *blk = gpu_wall_tex2d[i];
+        int   w;
+        int   h;
+
+        if (blk == NULL)
+            continue;
+        w = texturewidthmask[i] + 1;
+        if (w > textures[i]->width)
+            w = textures[i]->width;
+        h = textures[i]->height;
+        R_GPU_TexCreateWall(i, blk, w, h,
+                            (unsigned int)(w * h) + GPU_WALL_TEX2D_PAD);
+        if (!masked[i] && texturecolumnptr[i] != NULL)
+            for (x = 0; x < w; x++)
+                texturecolumnptr[i][x] = blk + x * h;
+    }
+    /* 2-sided midtextures additionally get a post-decoded block (separate from
+     * the column-major wall block, which reads posts as garbage) so the GPU can
+     * draw them; R_GetMaskedTexture2D declines (-> CPU) where it can't be exact. */
+    for (i = 0; i < numtextures; i++)
+    {
+        byte *mblk;
+        int   w;
+        int   h;
+
+        if (!masked[i])
+            continue;
+        mblk = R_GetMaskedTexture2D(i);
+        if (mblk == NULL)
+            continue;
+        w = texturewidthmask[i] + 1;
+        if (w > textures[i]->width)
+            w = textures[i]->width;
+        h = textures[i]->height;
+        R_GPU_TexCreateMasked(i, mblk, w, h,
+                              (unsigned int)(w * h) + GPU_WALL_TEX2D_PAD);
+    }
+    for (i = 0; i < numspritelumps; i++)
+    {
+        byte    *blk = gpu_sprite_tex2d[i];
+        patch_t *p;
+        int      w;
+        int      h;
+
+        if (blk == NULL)
+            continue;
+        p = W_CacheLumpNum(firstspritelump + i, PU_LEVEL);
+        w = SHORT(p->width);
+        h = SHORT(p->height);
+        if (w <= 0 || h <= 0)
+            continue;
+        R_GPU_TexCreateSprite(i, blk, w, h, (unsigned int)(w * h));
+    }
+    for (i = 0; i < numflats; i++)
+    {
+        if (flatlumpdata[i] == NULL)
+            continue;
+        R_GPU_TexCreateFlat(i, flatlumpdata[i], 64, 64,
+                            (unsigned int)lumpinfo[firstflat + i]->size);
+    }
+
+    Z_Free(masked);
+    R_GPU_TexEndLevel();    // route the fast-texture domain now (GPU idle)
+
+    if (gpu_tex2d_dropped > 0)
+        printf("GPU textures: %d over budget -> CPU\n", gpu_tex2d_dropped);
+}
+
+
+//
 // R_PrecacheLevel
 // Preloads all relevant graphics for the level.
 //
@@ -1111,13 +1296,20 @@ void R_PrecacheLevel (void)
      * 2D wall/sprite texture caches restart from a full budget each level. */
     gpu_wall_tex2d_budget = GPU_WALL_TEX2D_BUDGET;
     gpu_sprite_tex2d_budget = GPU_SPRITE_TEX2D_BUDGET;
+    gpu_masked_tex2d_budget = GPU_MASKED_TEX2D_BUDGET;
+    gpu_tex2d_dropped = 0;
+
+    if (gpu_masked_tex2d != NULL)
+        memset(gpu_masked_tex2d, 0, numtextures * sizeof(*gpu_masked_tex2d));
 
     if (texturecolumnptr != NULL)
         memset(texturecolumnptr, 0, numtextures * sizeof(*texturecolumnptr));
 
-    if (demoplayback)
-	return;
-    
+    /* Vanilla skips precache during demo playback, but the GPU renderer needs
+     * the level's textures created (of_texture) and their 2D blocks prebuilt --
+     * without it a demo draws entirely on the CPU, and the lazy first-sighting
+     * builds drain the GPU mid-frame.  So precache for demos too. */
+
     // Precache flats.
     flatpresent = Z_Malloc(numflats, PU_STATIC, NULL);
     memset (flatpresent,0,numflats);	
@@ -1166,6 +1358,10 @@ void R_PrecacheLevel (void)
     //  a wall texture, with an episode dependend
     //  name.
     texturepresent[skytexture] = 1;
+    // Reveal each switch's pressed state first (else flipping it drops the
+    // screen-filling, up-close wall onto the slow CPU column path), THEN expand
+    // animations -- so an animated switch face also gets all its frames.
+    P_ExpandSwitchTexturePresence(texturepresent, numtextures);
     P_ExpandAnimatedTexturePresence(texturepresent, numtextures);
 	
     texturememory = 0;
@@ -1243,4 +1439,8 @@ void R_PrecacheLevel (void)
 
     Z_Free(spritepresent);
     R_GPU_TextureDataFlushAll();
+
+    /* Register the level's textures with the portable texture store (fast
+     * texture memory on Pocket, SDRAM on MiSTer -- decided per target). */
+    R_CreateTextures();
 }

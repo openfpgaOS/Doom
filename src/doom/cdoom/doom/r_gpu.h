@@ -10,6 +10,23 @@
 
 extern int r_gpu_enabled;
 
+/* Portable texture store (of_texture.h, owned by r_gpu.c).  The engine names no
+ * memory tier: r_data.c creates the level's textures by index at load time, and
+ * the renderer selects the active one by index before each textured draw.  Which
+ * tier they land in (fast texture chip on Pocket, SDRAM on MiSTer) is hidden. */
+void R_GPU_TexBeginLevel(int ntex, int nflat, int nsprite);
+void R_GPU_TexSetColormap(void);
+void R_GPU_TexCreateWall(int i, const void *pixels, int w, int h, unsigned int nbytes);
+void R_GPU_TexCreateFlat(int i, const void *pixels, int w, int h, unsigned int nbytes);
+void R_GPU_TexCreateSprite(int i, const void *pixels, int w, int h, unsigned int nbytes);
+void R_GPU_TexCreateMasked(int i, const void *pixels, int w, int h, unsigned int nbytes);
+void R_GPU_UseWallTexture(int i);
+void R_GPU_UseFlatTexture(int i);
+void R_GPU_UseSpriteTexture(int i);
+void R_GPU_UseMaskedTexture(int i);
+void R_GPU_UseNoTexture(void);
+void R_GPU_TexEndLevel(void);
+
 void R_GPU_Init(void);
 void R_GPU_Shutdown(void);
 void R_GPU_BeginDisplayFrame(void);

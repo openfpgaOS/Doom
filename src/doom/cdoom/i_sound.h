@@ -229,6 +229,21 @@ void I_PlaySong(void *handle, boolean looping);
 void I_StopSong(void);
 boolean I_MusicIsPlaying(void);
 
+#ifdef OF_DOOM
+// Optional streamed-PCM music: play common/ost/<LUMP>.pcm instead of the
+// MIDI lump when that file exists (i_pcmmusic.c). i_sound.c routes the music
+// chokepoints here whenever I_PCM_Active(); S_ChangeMusic feeds the name.
+void I_SetMusicTrackName(const char *name);
+int  I_PCM_TryPlay(boolean looping);
+int  I_PCM_Active(void);
+void I_PCM_Stop(void);
+void I_PCM_Poll(void);
+void I_PCM_SetVolume(int volume);
+void I_PCM_Pause(void);
+void I_PCM_Resume(void);
+void I_PCM_DrainAsync(void);   // retire in-flight music DMA before engine file I/O
+#endif
+
 extern int snd_sfxdevice;
 extern int snd_musicdevice;
 extern int snd_samplerate;

@@ -176,11 +176,18 @@ R_RenderMaskedSegRange
 	maskedcolormaprow = -1;
     }
 
-    // Param-masked path: the GPU evaluates the wall planes, posts
-    // reduce to {x, ytop, count} records (openfpgaOS).
+    // Param-masked path: select the texture's post-decoded block (declines to
+    // NULL when it can't be GPU-resident), so the GPU evaluates the wall planes
+    // and posts reduce to {x, ytop, count} records (openfpgaOS).  On any decline
+    // no texture stays bound, so R_DrawMaskedColumn's CPU post walk draws it.
+    // fixedcolormap (invuln) is NOT carried by the GPU masked path -- it lights
+    // from walllightrows (scale-based, set above), so leave it on the CPU, which
+    // honours dc_colormap = fixedcolormap.  (Opaque walls are unaffected:
+    // R_SetupFrame points walllightrows at the fixed row for them.)
     masked_gpu = false;
-    if (detailshift == 0)
+    if (detailshift == 0 && !fixedcolormap)
     {
+	R_GPU_UseMaskedTexture(texnum);
 	masked_gpu = R_GPU_MaskedBegin(R_GetMaskedTexture2D(texnum),
 				       textureheight[texnum] >> FRACBITS,
 				       widthmask, dc_texturemid,
@@ -188,6 +195,8 @@ R_RenderMaskedSegRange
 				       ds->gpu_mdistance, ds->gpu_moffset,
 				       ds->gpu_mcenterangle);
     }
+    if (!masked_gpu)
+	R_GPU_UseNoTexture();
 
     // draw the columns
     for (dc_x = x1 ; dc_x <= x2 ; dc_x++)
@@ -293,20 +302,29 @@ static void R_GPUWallTiersBegin(int x, int stopx,
 	return;
 
     if (midtexture)
+    {
+	R_GPU_UseWallTexture(midtexture);
 	*tier_mid = R_GPU_WallTierBegin(0,
 	    R_GetWallTexture2D(midtexture),
 	    textureheight[midtexture] >> FRACBITS,
 	    R_GetTextureWidthMask(midtexture), rw_midtexturemid);
+    }
     if (toptexture)
+    {
+	R_GPU_UseWallTexture(toptexture);
 	*tier_top = R_GPU_WallTierBegin(0,
 	    R_GetWallTexture2D(toptexture),
 	    textureheight[toptexture] >> FRACBITS,
 	    R_GetTextureWidthMask(toptexture), rw_toptexturemid);
+    }
     if (bottomtexture)
+    {
+	R_GPU_UseWallTexture(bottomtexture);
 	*tier_bottom = R_GPU_WallTierBegin(1,
 	    R_GetWallTexture2D(bottomtexture),
 	    textureheight[bottomtexture] >> FRACBITS,
 	    R_GetTextureWidthMask(bottomtexture), rw_bottomtexturemid);
+    }
 }
 
 static void R_DrawSegColumn(int x, byte **columns, int widthmask,
@@ -335,6 +353,7 @@ typedef struct
 {
     int x;
     int lanes;
+    int texnum;          /* GPU texture for this batch's lanes (one per batch) */
     int same_range;
     int yl[WALL_COLUMN_BATCH_LANES];
     int yh[WALL_COLUMN_BATCH_LANES];
@@ -354,6 +373,9 @@ static void R_FlushWallColumnBatch(wall_column_batch_t *batch)
 	return;
 
     boolean drawn;
+
+    /* Select this batch's GPU texture so the per-lane addresses resolve. */
+    R_GPU_UseWallTexture(batch->texnum);
 
     if (batch->same_range)
     {
@@ -511,6 +533,10 @@ OF_FASTTEXT void R_RenderSegLoop (void)
     do_markfloor = markfloor;
     upper_batch.lanes = 0;
     lower_batch.lanes = 0;
+    /* One texture per batch for the whole seg: upper = mid (1-sided) or top
+     * (2-sided), lower = bottom.  R_FlushWallColumnBatch selects it. */
+    upper_batch.texnum = midtexture ? midtexture : toptexture;
+    lower_batch.texnum = bottomtexture;
     mid_columns = NULL;
     top_columns = NULL;
     bottom_columns = NULL;

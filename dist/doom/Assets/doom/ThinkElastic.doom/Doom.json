@@ -10,6 +10,7 @@
             { "id": 2, "filename": "doom.ini" },
             { "id": 3, "filename": "doom.elf" },
             { "id": 4, "filename": "DOOM.WAD" },
+            { "id": 5, "filename": "DOOMMUS.WAD" },
             { "id": 7, "filename": "bank.ofsf" },
             { "id": 9, "filename": "doom/Doom.cfg" },
             { "id": 10, "filename": "doom/Doom_0.sav" },

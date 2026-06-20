@@ -10,6 +10,7 @@
             { "id": 2, "filename": "shareware.ini" },
             { "id": 3, "filename": "doom.elf" },
             { "id": 4, "filename": "doom.wad" },
+            { "id": 5, "filename": "DOOMMUS.WAD" },
             { "id": 7, "filename": "bank.ofsf" },
             { "id": 9, "filename": "shareware/Shareware.cfg" },
             { "id": 10, "filename": "shareware/Shareware_0.sav" },

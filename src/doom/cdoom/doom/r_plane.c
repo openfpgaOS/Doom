@@ -384,7 +384,10 @@ R_FindPlane
 //
 // R_CheckPlane
 //
-OF_FASTTEXT visplane_t*
+// Not OF_FASTTEXT: a per-visplane span-table merge/split (not a per-pixel loop).
+// Demoted to SDRAM text to keep APP_BRAM room for the per-frame R_DrawPlanes,
+// which now also selects the GPU texture per visplane.
+visplane_t*
 R_CheckPlane
 ( visplane_t*	pl,
   int		start,
@@ -533,6 +536,7 @@ OF_FASTTEXT void R_DrawPlanes (void)
 	    //  by INVUL inverse mapping.
 	    dc_colormap = colormaps;
 	    dc_texturemid = skytexturemid;
+	    R_GPU_UseWallTexture(skytexture);   // sky is a wall texture
 	    for (x=pl->minx ; x <= pl->maxx ; x++)
 	    {
 		dc_yl = pl->top[x];
@@ -554,7 +558,8 @@ OF_FASTTEXT void R_DrawPlanes (void)
         animated_flat = P_IsAnimatedFlat(flatnum);
         lumpnum = firstflat + flatnum;
 	ds_source = R_GetFlatData(flatnum, animated_flat);
-	
+	R_GPU_UseFlatTexture(flatnum);
+
 	planeheight = abs(pl->height-viewz);
 	light = (pl->lightlevel >> LIGHTSEGSHIFT)+extralight;
 

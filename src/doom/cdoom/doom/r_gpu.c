@@ -46,6 +46,33 @@ void R_GPU_TextureDataUpdated(void *ptr, unsigned int size)
     (void)size;
 }
 void R_GPU_TextureDataFlushAll(void) { }
+void R_GPU_TexBeginLevel(int ntex, int nflat, int nsprite)
+{
+    (void)ntex; (void)nflat; (void)nsprite;
+}
+void R_GPU_TexSetColormap(void) { }
+void R_GPU_TexCreateWall(int i, const void *p, int w, int h, unsigned int n)
+{
+    (void)i; (void)p; (void)w; (void)h; (void)n;
+}
+void R_GPU_TexCreateFlat(int i, const void *p, int w, int h, unsigned int n)
+{
+    (void)i; (void)p; (void)w; (void)h; (void)n;
+}
+void R_GPU_TexCreateSprite(int i, const void *p, int w, int h, unsigned int n)
+{
+    (void)i; (void)p; (void)w; (void)h; (void)n;
+}
+void R_GPU_TexCreateMasked(int i, const void *p, int w, int h, unsigned int n)
+{
+    (void)i; (void)p; (void)w; (void)h; (void)n;
+}
+void R_GPU_UseWallTexture(int i) { (void)i; }
+void R_GPU_UseFlatTexture(int i) { (void)i; }
+void R_GPU_UseSpriteTexture(int i) { (void)i; }
+void R_GPU_UseMaskedTexture(int i) { (void)i; }
+void R_GPU_UseNoTexture(void) { }
+void R_GPU_TexEndLevel(void) { }
 boolean R_GPU_PresentFrame(void) { return false; }
 boolean R_GPU_UsingDirectFramebuffer(void) { return false; }
 int R_GPU_CurrentDrawSlot(void) { return -1; }
@@ -266,8 +293,10 @@ boolean R_GPU_DeferLumpRelease(int lumpnum)
 #include "of_cache.h"
 #include "of_caps.h"
 #include "of_gpu.h"
+#include "of_texture.h"
 #include "of_video.h"
 #include "v_video.h"
+#include "z_zone.h"
 
 int r_gpu_enabled = 1;
 
@@ -320,8 +349,11 @@ static int gpu_use_column_list;
  * may be emitted in any order; everything flushes at EndPlaneSpans
  * before the next surface draws.  Only ever non-empty between
  * R_GPU_BeginPlaneSpans/EndPlaneSpans. */
-#define GPU_PLANE_BANDS 4
-#define GPU_PLANE_BAND_RECORDS 128
+#define GPU_PLANE_BANDS 8
+#define GPU_PLANE_BAND_RECORDS 512
+#if GPU_PLANE_BAND_RECORDS > OF_GPU_PARAM_SPAN_MAX_RECORDS
+#error "GPU_PLANE_BAND_RECORDS exceeds the param-span emitter's record clamp"
+#endif
 typedef struct {
     int light;               /* colormap row, -1 = unassigned */
     int count;
@@ -340,7 +372,10 @@ static int gpu_use_param_span;
  * non-empty between R_GPU_WallSegBegin/WallTiersEnd. */
 #define GPU_WALL_TIERS 2
 #define GPU_WALL_BANDS 2
-#define GPU_WALL_BAND_RECORDS 128
+#define GPU_WALL_BAND_RECORDS 512
+#if GPU_WALL_BAND_RECORDS > OF_GPU_PARAM_SPAN_MAX_RECORDS
+#error "GPU_WALL_BAND_RECORDS exceeds the param-span emitter's record clamp"
+#endif
 typedef struct {
     int light;               /* colormap row, -1 = unassigned */
     int count;
@@ -361,7 +396,10 @@ static float gpu_wall_texcol1;                    /* texcol at seg x1 (texels) *
 static int gpu_use_wall_param;
 /* Affine sprite batch (ATTR_AFFINE, AXIS_Y): single light per sprite,
  * one record per visible post.  Only non-empty between SpriteBegin/End. */
-#define GPU_SPRITE_MAX_RECORDS 256
+#define GPU_SPRITE_MAX_RECORDS 512
+#if GPU_SPRITE_MAX_RECORDS > OF_GPU_PARAM_SPAN_MAX_RECORDS
+#error "GPU_SPRITE_MAX_RECORDS exceeds the param-span emitter's record clamp"
+#endif
 static of_gpu_param_span_list_t gpu_sprite_params;
 static of_gpu_param_span_record_t gpu_sprite_records[GPU_SPRITE_MAX_RECORDS];
 static int gpu_sprite_record_count;
@@ -375,6 +413,59 @@ static uint8_t gpu_fuzz_source_tex[4] = { 0x80, 0x80, 0x80, 0x80 };
 static uint8_t gpu_fuzz_transluc_table[256 * 256];
 static uint8_t gpu_probe_fb[64] __attribute__((aligned(64)));
 static uint8_t gpu_probe_tex[64] __attribute__((aligned(64)));
+
+/* ---- Texture store (portable, via of_texture.h) -----------------------
+ * The engine never names a memory tier.  At level load r_data.c hands each
+ * world texture / flat / sprite block to R_GPU_TexCreate* (one of_texture_create
+ * each): on a target with a dedicated fast texture chip they stream into it, on
+ * SDRAM-only targets they stay in SDRAM in place -- of_texture.h hides which,
+ * so the same .elf runs on both.  During rendering the engine selects the active
+ * texture by index (R_GPU_Use*Texture); the per-lane/per-span tex_addr packed
+ * into each command record is the texture's GPU base plus the column's byte
+ * offset within it (offsets survive because of_texture_create uploads pixels
+ * contiguously).  A draw with no GPU texture -- masked posts, translated
+ * sprites, an un-created switch texture -- selects NULL, and the GPU path
+ * declines so the CPU/column fallback draws it. */
+static of_texture_t *wall_tex;        /* [gpu_tex_ntex]    by texture number   */
+static of_texture_t *flat_tex;        /* [gpu_tex_nflat]   by flat number      */
+static of_texture_t *sprite_tex;      /* [gpu_tex_nsprite] by sprite lump      */
+static of_texture_t *masked_tex;      /* [gpu_tex_nmasked] by texture number   */
+static int gpu_tex_ntex, gpu_tex_nflat, gpu_tex_nsprite, gpu_tex_nmasked;
+static int gpu_tex_created;           /* textures placed this level (diagnostic) */
+static uint32_t gpu_tex_cap;          /* fast-tier capacity captured at level load */
+
+static const of_texture_t *gpu_src_tex;  /* texture for the current draw, or NULL */
+static uint32_t gpu_src_delta;           /* GPU base - pixel base: addr = ptr + this */
+static int gpu_tex_domain = -1;          /* last bound fetch domain (-1 = unset)  */
+
+/* Make `tex` the source for subsequent per-lane addresses, flipping the GPU
+ * fetch domain only when the tier actually changes -- of_texture_create packs
+ * the statics together, so this binds once per frame.  NULL = no GPU texture,
+ * so the GPU draw paths decline and the CPU/column fallback runs. */
+static void gpu_tex_use(const of_texture_t *tex)
+{
+    gpu_src_tex = tex;
+    if (tex == NULL)
+        return;
+
+    /* addr(texel) = (uint32_t)texel + delta, one add per lane. */
+    gpu_src_delta = of_texture_gpu_addr(tex) - (uint32_t)(uintptr_t)tex->_src;
+
+    int fast = of_texture_in_fast_mem(tex);
+    if (fast != gpu_tex_domain)
+    {
+        of_texture_bind(tex);    /* drains + routes + moves the colormap on change */
+        gpu_tex_domain = fast;
+    }
+}
+
+/* GPU address of a texel in the current texture (its byte offset is preserved
+ * by the contiguous upload).  Only valid with gpu_src_tex != NULL (callers
+ * check first). */
+static inline uint32_t gpu_tex_addr(const void *texel)
+{
+    return (uint32_t)(uintptr_t)texel + gpu_src_delta;
+}
 
 static void gpu_flush_affine_batch(void);
 static void gpu_flush_column_batch(void);
@@ -1086,7 +1177,7 @@ gpu_add_affine_span(uint32_t fb_addr, int count,
                     uint16_t tex_width, uint16_t tex_w_mask,
                     uint16_t tex_h_mask, int is_column)
 {
-    uint32_t tex_addr = (uint32_t)(uintptr_t)source;
+    uint32_t tex_addr = gpu_tex_addr(source);
     unsigned int lane;
 
     if (!gpu_write_prepared)
@@ -1174,7 +1265,7 @@ gpu_column_list_add(uint32_t fb_addr, int count,
     lane = (unsigned int)gpu_column_batch_count;
     gpu_column_batch_count = (int)lane + 1;
     gpu_column_batch.fb_addr[lane] = fb_addr;
-    gpu_column_batch.tex_addr[lane] = (uint32_t)(uintptr_t)source;
+    gpu_column_batch.tex_addr[lane] = gpu_tex_addr(source);
     gpu_column_batch.count[lane] = (uint16_t)count;
     gpu_column_batch.t[lane] = t;
     gpu_column_batch.tstep[lane] = tstep;
@@ -1250,7 +1341,7 @@ gpu_add_wall_column_batch_same(int screen_x, int screen_yl, int count,
             lane = (unsigned int)gpu_column_batch_count;
             gpu_column_batch_count = (int)lane + 1;
             gpu_column_batch.fb_addr[lane] = fb_addr + (uint32_t)i;
-            gpu_column_batch.tex_addr[lane] = (uint32_t)(uintptr_t)source[i];
+            gpu_column_batch.tex_addr[lane] = gpu_tex_addr(source[i]);
             gpu_column_batch.count[lane] = (uint16_t)count;
             gpu_column_batch.t[lane] = t[i];
             gpu_column_batch.tstep[lane] = tstep[i];
@@ -1291,7 +1382,7 @@ gpu_add_wall_column_batch_same(int screen_x, int screen_yl, int count,
         lane = (unsigned int)gpu_affine_batch_count;
         gpu_affine_batch_count = (int)lane + 1;
         gpu_affine_batch.fb_addr[lane] = fb_addr + (uint32_t)i;
-        gpu_affine_batch.tex_addr[lane] = (uint32_t)(uintptr_t)source[i];
+        gpu_affine_batch.tex_addr[lane] = gpu_tex_addr(source[i]);
         gpu_affine_batch.count[lane] = (uint16_t)count;
         gpu_affine_batch.s[lane] = 0;
         gpu_affine_batch.t[lane] = t[i];
@@ -1351,7 +1442,7 @@ gpu_add_wall_column_batch_var(int screen_x, int lanes,
             gpu_column_batch_count = (int)lane + 1;
             gpu_column_batch.fb_addr[lane] =
                 gpu_fb_row_addr[screen_yl] + (uint32_t)(screen_x + i);
-            gpu_column_batch.tex_addr[lane] = (uint32_t)(uintptr_t)source[i];
+            gpu_column_batch.tex_addr[lane] = gpu_tex_addr(source[i]);
             gpu_column_batch.count[lane] = (uint16_t)count;
             gpu_column_batch.t[lane] = t[i];
             gpu_column_batch.tstep[lane] = tstep[i];
@@ -1395,7 +1486,7 @@ gpu_add_wall_column_batch_var(int screen_x, int lanes,
         gpu_affine_batch_count = (int)lane + 1;
         gpu_affine_batch.fb_addr[lane] =
             gpu_fb_row_addr[screen_yl] + (uint32_t)(screen_x + i);
-        gpu_affine_batch.tex_addr[lane] = (uint32_t)(uintptr_t)source[i];
+        gpu_affine_batch.tex_addr[lane] = gpu_tex_addr(source[i]);
         gpu_affine_batch.count[lane] = (uint16_t)count;
         gpu_affine_batch.s[lane] = 0;
         gpu_affine_batch.t[lane] = t[i];
@@ -1795,6 +1886,9 @@ void R_GPU_Init(void)
 
     gpu_present = 1;
 
+    /* Portable texture manager: picks the fast tier on Pocket, SDRAM on MiSTer. */
+    of_texture_init();
+
     gpu_draw_idx = of_video_acquire_next(-1, 0);
     gpu_flip_enabled = gpu_draw_idx >= 0;
 
@@ -2046,6 +2140,153 @@ void R_GPU_TextureDataFlushAll(void)
     GPU_TEX_FLUSH = 1;
 }
 
+/* ---- Texture store API (driven by R_CreateTextures in r_data.c) -------
+ * r_data.c owns no GPU/texture types: it drives the store by index through the
+ * wrappers below, which live in this TU (the one that includes of_texture.h). */
+
+static of_texture_t *gpu_tex_realloc(of_texture_t *arr, int *have, int want)
+{
+    if (want <= 0)
+        return arr;
+    if (arr == NULL || *have < want)
+    {
+        arr = Z_Malloc((size_t)want * sizeof(of_texture_t), PU_STATIC, NULL);
+        *have = want;
+    }
+    memset(arr, 0, (size_t)want * sizeof(of_texture_t));   /* _src=0 => not created */
+    return arr;
+}
+
+/* Begin a level's texture set: reset the fast allocator and clear the per-index
+ * handle tables (re-creating them if a new map has more textures). */
+void R_GPU_TexBeginLevel(int ntex, int nflat, int nsprite)
+{
+    if (!gpu_present)
+        return;
+
+    of_texture_reset();
+    gpu_src_tex = NULL;
+    gpu_tex_domain = -1;
+    gpu_tex_created = 0;
+    gpu_tex_cap = of_texture_budget_free();   /* full fast tier after reset */
+
+    wall_tex   = gpu_tex_realloc(wall_tex,   &gpu_tex_ntex,    ntex);
+    flat_tex   = gpu_tex_realloc(flat_tex,   &gpu_tex_nflat,   nflat);
+    sprite_tex = gpu_tex_realloc(sprite_tex, &gpu_tex_nsprite, nsprite);
+    masked_tex = gpu_tex_realloc(masked_tex, &gpu_tex_nmasked, ntex);  /* by texnum */
+}
+
+/* Co-locate the colormap (palookup) with the textures.  Call once per level,
+ * before creating textures, so it lands at offset 0 of the fast tier (16 KB
+ * aligned for the slot-strided palookup fetch).  Uploads the assembled palookup
+ * (colormap slot 0 + the translation slots) prepared at GPU init. */
+void R_GPU_TexSetColormap(void)
+{
+    if (gpu_present)
+        of_texture_set_colormap(_gpu_palookup_storage,
+                                (unsigned int)(gpu_transl_count + 1)
+                                    * OF_GPU_PALOOKUP_STRIDE);
+}
+
+void R_GPU_TexCreateWall(int i, const void *pixels, int w, int h,
+                         unsigned int nbytes)
+{
+    if (gpu_present && wall_tex && (unsigned)i < (unsigned)gpu_tex_ntex && pixels)
+    {
+        of_texture_create(&wall_tex[i], pixels, (uint16_t)w, (uint16_t)h, nbytes);
+        gpu_tex_created++;
+    }
+}
+
+void R_GPU_TexCreateFlat(int i, const void *pixels, int w, int h,
+                         unsigned int nbytes)
+{
+    if (gpu_present && flat_tex && (unsigned)i < (unsigned)gpu_tex_nflat && pixels)
+    {
+        of_texture_create(&flat_tex[i], pixels, (uint16_t)w, (uint16_t)h, nbytes);
+        gpu_tex_created++;
+    }
+}
+
+void R_GPU_TexCreateSprite(int i, const void *pixels, int w, int h,
+                           unsigned int nbytes)
+{
+    if (gpu_present && sprite_tex && (unsigned)i < (unsigned)gpu_tex_nsprite && pixels)
+    {
+        of_texture_create(&sprite_tex[i], pixels, (uint16_t)w, (uint16_t)h, nbytes);
+        gpu_tex_created++;
+    }
+}
+
+void R_GPU_TexCreateMasked(int i, const void *pixels, int w, int h,
+                           unsigned int nbytes)
+{
+    if (gpu_present && masked_tex && (unsigned)i < (unsigned)gpu_tex_nmasked && pixels)
+    {
+        of_texture_create(&masked_tex[i], pixels, (uint16_t)w, (uint16_t)h, nbytes);
+        gpu_tex_created++;
+    }
+}
+
+/* Select the active texture for subsequent draws by index.  An index with no
+ * created texture (or an out-of-range one) selects NULL, so the GPU path
+ * declines and the CPU/column fallback draws it. */
+void R_GPU_UseWallTexture(int i)
+{
+    gpu_tex_use((gpu_present && wall_tex && (unsigned)i < (unsigned)gpu_tex_ntex
+                 && wall_tex[i]._src) ? &wall_tex[i] : NULL);
+}
+
+void R_GPU_UseFlatTexture(int i)
+{
+    gpu_tex_use((gpu_present && flat_tex && (unsigned)i < (unsigned)gpu_tex_nflat
+                 && flat_tex[i]._src) ? &flat_tex[i] : NULL);
+}
+
+void R_GPU_UseSpriteTexture(int i)
+{
+    gpu_tex_use((gpu_present && sprite_tex && (unsigned)i < (unsigned)gpu_tex_nsprite
+                 && sprite_tex[i]._src) ? &sprite_tex[i] : NULL);
+}
+
+void R_GPU_UseMaskedTexture(int i)
+{
+    gpu_tex_use((gpu_present && masked_tex && (unsigned)i < (unsigned)gpu_tex_nmasked
+                 && masked_tex[i]._src) ? &masked_tex[i] : NULL);
+}
+
+/* No GPU texture for the next draw -> CPU/column fallback. */
+void R_GPU_UseNoTexture(void)
+{
+    gpu_src_tex = NULL;
+}
+
+/* Establish the fast-texture fetch domain at level load (GPU idle), so the
+ * first rendered frame doesn't pay a mid-frame domain-switch drain.  No-op on
+ * SDRAM-only targets (no domain to switch). */
+void R_GPU_TexEndLevel(void)
+{
+    int i;
+
+    if (!gpu_present || wall_tex == NULL)
+        return;
+    /* Coverage report: textures that fit the fast tier render on the GPU; the
+     * rest (over the 2D-block budget) fall back to the CPU.  A large free fast
+     * tier here means the budgets, not the fast memory, are the limit. */
+    if (gpu_tex_cap)
+        printf("GPU textures: %d placed, fast %u/%u KB used\n",
+               gpu_tex_created, (gpu_tex_cap - of_texture_budget_free()) >> 10,
+               gpu_tex_cap >> 10);
+
+    for (i = 0; i < gpu_tex_ntex; i++)
+        if (wall_tex[i]._src && of_texture_in_fast_mem(&wall_tex[i]))
+        {
+            gpu_tex_use(&wall_tex[i]);   /* routes fast + moves colormap, once */
+            gpu_src_tex = NULL;          /* first real Use selects the texture */
+            return;
+        }
+}
+
 boolean R_GPU_PresentFrame(void)
 {
     unsigned int present_start;
@@ -2113,6 +2354,11 @@ boolean R_GPU_DrawColumnDirect(int x, int yl, int yh, const byte *source,
 
 static boolean gpu_can_draw_fuzz(void)
 {
+    /* The fuzz column samples a static placeholder texture that is not
+     * registered with of_texture; when textures are routed to the fast tier the
+     * GPU cannot find it there, so fall back to the CPU fuzz column. */
+    if (gpu_tex_domain == 1)
+        return false;
     return gpu_present && gpu_frame_active && I_VideoBuffer != NULL;
 }
 
@@ -2187,6 +2433,10 @@ boolean R_GPU_DrawColumnLightDirect(int x, int yl, int yh, const byte *source,
         return false;
     if (light < 0 || light > 63)
         return false;
+    /* No GPU texture bound for this column (masked posts, translated sprite,
+     * un-created switch texture): let the CPU column draw it. */
+    if (gpu_src_tex == NULL)
+        return false;
 
     gpu_add_column(screen_x, screen_yl, count, source,
                    gpu_column_t_start_direct(yl, texturemid, iscale),
@@ -2225,6 +2475,10 @@ boolean R_GPU_DrawColumnLightBatchDirect(int x, int yl, int yh, int lanes,
             return false;
     }
 #endif
+
+    /* No GPU texture bound: let the CPU draw the batch. */
+    if (gpu_src_tex == NULL)
+        return false;
 
     gpu_add_wall_column_batch_same(screen_x, screen_yl, count, lanes,
                                    source, t, tstep, light);
@@ -2271,6 +2525,9 @@ boolean R_GPU_DrawColumnLightVarBatchDirect(int x, int lanes,
         pixels += (unsigned int)count;
     }
 
+    if (gpu_src_tex == NULL)
+        return false;
+
     gpu_add_wall_column_batch_var(screen_x, lanes, yl, yh,
                                   source, t, tstep, light);
 
@@ -2311,6 +2568,9 @@ boolean R_GPU_DrawSpanLightDirect(int y, int x1, int x2, const byte *source,
         return false;
     if (screen_x1 < 0 || screen_x2 >= SCREENWIDTH ||
         screen_y < 0 || screen_y >= SCREENHEIGHT)
+        return false;
+    /* No GPU flat bound: let the CPU span (R_DrawSpan) draw it. */
+    if (gpu_src_tex == NULL)
         return false;
 
     gpu_add_affine_span(gpu_fb_row_addr[screen_y] + (uint32_t)screen_x1, count, source,
@@ -2389,6 +2649,9 @@ boolean R_GPU_BeginPlaneSpans(const byte *source, fixed_t height_delta,
         return false;
     if (source == NULL || height_delta == 0)
         return false;
+    /* No GPU flat bound: decline so the per-span path / CPU R_DrawSpan draws it. */
+    if (gpu_src_tex == NULL)
+        return false;
     if (fixed_light > 63)
         return false;
 
@@ -2454,7 +2717,7 @@ boolean R_GPU_BeginPlaneSpans(const byte *source, fixed_t height_delta,
                              + (uint32_t)viewwindowx;
     gpu_plane_params.fb_major_step = SCREENWIDTH;
     gpu_plane_params.fb_minor_step = 1;
-    gpu_plane_params.tex_addr = (uint32_t)(uintptr_t)source;
+    gpu_plane_params.tex_addr = gpu_tex_addr(source);
     gpu_plane_params.tex_width = 64;
     gpu_plane_params.tex_w_mask = 63;
     gpu_plane_params.tex_h_mask = 63;
@@ -2496,24 +2759,23 @@ boolean R_GPU_PlaneSpanLight(int y, int x1, int x2, int light)
     if (count <= 0)
         return true;
 
-    band = &gpu_plane_bands[0];
-    if (band->light != light)
+    band = NULL;
+    for (int i = 0; i < GPU_PLANE_BANDS; i++)
     {
-        if (gpu_plane_bands[1].light == light)
-            band = &gpu_plane_bands[1];
-        else if (gpu_plane_bands[2].light == light)
-            band = &gpu_plane_bands[2];
-        else if (gpu_plane_bands[3].light == light)
-            band = &gpu_plane_bands[3];
-        else
+        if (gpu_plane_bands[i].light == light)
         {
-            /* Evict round-robin; bands are pixel-disjoint within the
-             * visplane, so emission order between them is free. */
-            band = &gpu_plane_bands[gpu_plane_band_rr];
-            gpu_plane_band_rr = (gpu_plane_band_rr + 1) & (GPU_PLANE_BANDS - 1);
-            gpu_flush_plane_band(band);
-            band->light = light;
+            band = &gpu_plane_bands[i];
+            break;
         }
+    }
+    if (band == NULL)
+    {
+        /* Evict round-robin; bands are pixel-disjoint within the
+         * visplane, so emission order between them is free. */
+        band = &gpu_plane_bands[gpu_plane_band_rr];
+        gpu_plane_band_rr = (gpu_plane_band_rr + 1) & (GPU_PLANE_BANDS - 1);
+        gpu_flush_plane_band(band);
+        band->light = light;
     }
 
     if (band->count >= GPU_PLANE_BAND_RECORDS)
@@ -2598,8 +2860,14 @@ boolean R_GPU_WallSegBegin(int x1, int x2, fixed_t scale1, fixed_t scalestep,
     return true;
 }
 
-boolean R_GPU_WallTierBegin(int tier, const byte *tex2d, int tex_height,
-                            int widthmask, fixed_t texturemid)
+/* Open a tier accumulator for the current seg.  vperiod is the vertical wrap
+ * period (texels): 128 for opaque walls (R_DrawColumn wraps vtex &127 regardless
+ * of texture height), or the texture height for masked midtextures (which clip,
+ * never wrap, so vtex must not be truncated below the texture height -- the
+ * column-major block stride is the height, so the mask = height-1 keeps each
+ * column's vtex inside its own column).  vperiod must be a power of two. */
+static boolean gpu_wall_tier_begin(int tier, const byte *tex2d, int tex_height,
+                                   int widthmask, fixed_t texturemid, int vperiod)
 {
     const float inv16 = 1.0f / 65536.0f;
     float f_org[3], f_du[3], f_dv[3];
@@ -2610,18 +2878,24 @@ boolean R_GPU_WallTierBegin(int tier, const byte *tex2d, int tex_height,
 
     if (!gpu_wall_seg_valid || tex2d == NULL)
         return false;
+    /* No GPU texture bound (un-created switch texture): decline so the column
+     * fallback / CPU draws it. */
+    if (gpu_src_tex == NULL)
+        return false;
     if ((unsigned int)tier >= GPU_WALL_TIERS)
         return false;
     if (tex_height <= 0 || tex_height > 0xFFFF ||
         widthmask < 0 || widthmask > 0xFFFF)
         return false;
+    if (vperiod <= 0 || (vperiod & (vperiod - 1)) != 0)
+        return false;                       /* non-pow2 period -> &mask is invalid */
 
     t = &gpu_wall_tiers[tier];
     proj = (float)centerxfrac * inv16;
 
-    /* vtex wraps &127 like R_DrawColumn, so texturemid rebases mod 128
-     * texels — texel-identical, keeps the Q29 shift small. */
-    tmr = texturemid & ((128 << FRACBITS) - 1);
+    /* vtex wraps &(vperiod-1) like R_DrawColumn, so texturemid rebases mod
+     * vperiod texels — texel-identical, keeps the Q29 shift small. */
+    tmr = texturemid & (((fixed_t)vperiod << FRACBITS) - 1);
     tm_f = (float)tmr * inv16;
 
     /* texcol rebases by a multiple of the texture's wrap period. */
@@ -2632,7 +2906,7 @@ boolean R_GPU_WallTierBegin(int tier, const byte *tex2d, int tex_height,
 
     /* attr0 = vtex*zi, attr1 = texcol*zi, attr2 = zi.  The texture roles
      * are swapped to fit the column-major 2D block: tex_width = column
-     * stride (texheight), w_mask = 127 vertical wrap, h_mask = width. */
+     * stride (texheight), w_mask = vperiod-1 vertical wrap, h_mask = width. */
     f_du[0] = tm_f * gpu_wall_zi_du;
     f_dv[0] = 1.0f / proj;
     f_org[0] = tm_f * gpu_wall_zi_org - (float)centery * f_dv[0];
@@ -2649,9 +2923,9 @@ boolean R_GPU_WallTierBegin(int tier, const byte *tex2d, int tex_height,
     t->params.fb_base = gpu_fb_row_addr[viewwindowy] + (uint32_t)viewwindowx;
     t->params.fb_major_step = 1;            /* AXIS_Y: per-column */
     t->params.fb_minor_step = SCREENWIDTH;  /* per-pixel walk = row stride */
-    t->params.tex_addr = (uint32_t)(uintptr_t)tex2d;
+    t->params.tex_addr = gpu_tex_addr(tex2d);
     t->params.tex_width = (uint16_t)tex_height;
-    t->params.tex_w_mask = 127;
+    t->params.tex_w_mask = (uint16_t)(vperiod - 1);
     t->params.tex_h_mask = (uint16_t)widthmask;
     t->params.flags = OF_GPU_SPAN_COLORMAP | OF_GPU_SPAN_PERSP;
     t->params.colormap_id = 0;
@@ -2665,6 +2939,14 @@ boolean R_GPU_WallTierBegin(int tier, const byte *tex2d, int tex_height,
     t->rr = 0;
     t->active = 1;
     return true;
+}
+
+boolean R_GPU_WallTierBegin(int tier, const byte *tex2d, int tex_height,
+                            int widthmask, fixed_t texturemid)
+{
+    /* Opaque walls wrap vtex at 128 (R_DrawColumn's &127), regardless of the
+     * texture's own height — keep that exact behaviour. */
+    return gpu_wall_tier_begin(tier, tex2d, tex_height, widthmask, texturemid, 128);
 }
 
 boolean R_GPU_WallTierColumn(int tier, int x, int yl, int yh, fixed_t scale)
@@ -2747,6 +3029,9 @@ boolean R_GPU_SpriteBegin(const byte *tex2d, int tex_height, int tex_width,
         return false;
     if (tex2d == NULL || light < 0 || light > 63)
         return false;
+    /* No GPU sprite bound: decline so the CPU sprite draws it. */
+    if (gpu_src_tex == NULL)
+        return false;
     if (tex_height <= 0 || tex_height > 0xFFFF || tex_width <= 0)
         return false;
     if (cmap_slot < 0 || cmap_slot >= OF_GPU_PALOOKUP_SLOTS)
@@ -2764,7 +3049,7 @@ boolean R_GPU_SpriteBegin(const byte *tex2d, int tex_height, int tex_width,
                               + (uint32_t)viewwindowx;
     gpu_sprite_params.fb_major_step = 1;            /* AXIS_Y: per-column */
     gpu_sprite_params.fb_minor_step = SCREENWIDTH;  /* walk = row stride */
-    gpu_sprite_params.tex_addr = (uint32_t)(uintptr_t)tex2d;
+    gpu_sprite_params.tex_addr = gpu_tex_addr(tex2d);
     gpu_sprite_params.tex_width = (uint16_t)tex_height;  /* column stride */
     gpu_sprite_params.tex_w_mask = 0xFFFF;  /* ranges enforced by clamps */
     gpu_sprite_params.tex_h_mask = 0xFFFF;
@@ -2854,6 +3139,10 @@ boolean R_GPU_MaskedBegin(const byte *blk, int tex_height, int widthmask,
 
     if (blk == NULL)
         return false;
+    /* The masked block + its GPU texture must be selected by the caller
+     * (R_GPU_UseMaskedTexture); with none, decline so the CPU post walk draws it. */
+    if (gpu_src_tex == NULL)
+        return false;
     if (!gpu_use_wall_param || !gpu_present || !gpu_frame_active ||
         I_VideoBuffer == NULL)
         return false;
@@ -2865,7 +3154,9 @@ boolean R_GPU_MaskedBegin(const byte *blk, int tex_height, int widthmask,
     if (!R_GPU_WallSegBegin(x1, x2, scale1, scalestep,
                             distance, offset, centerangle))
         return false;
-    if (!R_GPU_WallTierBegin(0, blk, tex_height, widthmask, texturemid))
+    /* Masked midtextures clip vertically (never wrap): the tier wraps vtex at the
+     * texture height, not 128.  R_GetMaskedTexture2D has gated the height pow2. */
+    if (!gpu_wall_tier_begin(0, blk, tex_height, widthmask, texturemid, tex_height))
     {
         gpu_wall_seg_valid = 0;
         return false;

@@ -753,11 +753,11 @@ void M_SaveSelect(int choice)
 
     saveSlot = choice;
     M_StringCopy(saveOldString,savegamestrings[choice], SAVESTRINGSIZE);
-    if (!strcmp(savegamestrings[choice], EMPTYSTRING))
-    {
-        savegamestrings[choice][0] = 0;
-        SetDefaultSaveName(choice);
-    }
+    // Default the field to the current location every time -- including when
+    // overwriting a slot that already has a name (where it keeps the level the
+    // slot was first saved at) -- so the description follows where you are now.
+    // saveOldString (captured above) still restores the old name if cancelled.
+    SetDefaultSaveName(choice);
     saveCharIndex = strlen(savegamestrings[choice]);
 }
 

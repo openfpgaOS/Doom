@@ -490,16 +490,24 @@ R_DrawVisSprite
 	const byte *tex2d = R_GetSpriteTexture2D(vis->patch);
 
 	if (tex2d != NULL)
+	{
+	    R_GPU_UseSpriteTexture(vis->patch);
 	    sprite_gpu = R_GPU_SpriteBegin(tex2d, SHORT(patch->height),
 					   patchwidth, dc_texturemid,
 					   dc_iscale, vis->startfrac,
 					   vis->xiscale, vis->x1,
 					   sprite_light, sprite_slot);
+	}
     }
 
     cpu_sprite = (colfunc == transcolfunc && !sprite_gpu);
     if (cpu_sprite)
 	R_GPU_BeginCPUSprite();
+
+    /* The sprite param path (R_GPU_SpritePost) samples the block bound at
+     * SpriteBegin; the per-post column fallback reads the patch lump (not a GPU
+     * texture), so select none for it -> CPU. */
+    R_GPU_UseNoTexture();
 
     for (dc_x=vis->x1 ; dc_x<=vis->x2 ; dc_x++, frac += vis->xiscale)
     {

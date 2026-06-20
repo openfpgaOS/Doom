@@ -118,7 +118,19 @@ static boolean load_sfx(sfxinfo_t *sfx)
     int16_t *pcm16 = malloc(samples * sizeof(int16_t));
     if (!pcm16) { W_ReleaseLumpNum(sfx->lumpnum); return false; }
     for (uint32_t i = 0; i < samples; i++)
+    {
+#ifdef OF_DOOM
+        /* 8-bit unsigned -> 16-bit signed, with the +50% master boost (mixer
+         * master already at 255), hard-clamped so loud SFX limit, not wrap.
+         * Doom core only — Heretic/Hexen keep stock SFX levels. */
+        int s = (((int)pcm8[i] - 128) << 8) * 15 / 10;
+        if (s > 32767)  s = 32767;
+        else if (s < -32768) s = -32768;
+        pcm16[i] = (int16_t)s;
+#else
         pcm16[i] = (int16_t)((pcm8[i] - 128) << 8);
+#endif
+    }
 
     W_ReleaseLumpNum(sfx->lumpnum);
 

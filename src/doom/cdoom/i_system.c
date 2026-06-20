@@ -60,11 +60,18 @@
  * with native malloc each Z_Free returned memory to libc, and after
  * level/demo churn the heap had no contiguous 40 KB slot left.
  *
- * 32 MiB gives PWADs enough lump-cache headroom to keep more level
- * resources resident and still fits inside the 48 MiB app SDRAM window
- * with room left for stack/runtime state (see src/sdk/app.ld).
- * Alignment to 8 bytes matches z_zone.c's header layout. */
+ * Sized to keep PWAD lump-cache headroom AND the per-level GPU 2D texture
+ * blocks resident, while fitting inside the 54 MiB app SDRAM window with room
+ * left for stack/runtime state (see src/sdk/app.ld).  Doom carries the GPU
+ * param renderer's 2D blocks (walls / sprites / masked, plus the switch +
+ * animation precache), so it gets the larger pool; Heretic/Hexen run the
+ * software renderer and keep the smaller one.  Alignment to 8 bytes matches
+ * z_zone.c's header layout. */
+#if defined(OF_HERETIC) || defined(OF_HEXEN)
 #define OF_ZONE_BYTES (32 * 1024 * 1024)
+#else
+#define OF_ZONE_BYTES (40 * 1024 * 1024)
+#endif
 /* Canary words immediately before/after the usable zone pool. If a
  * stray DMA, ISR stack overrun, or off-by-one scribbles over the zone
  * boundary, the canary flips and I_CheckZoneCanaries() will catch it

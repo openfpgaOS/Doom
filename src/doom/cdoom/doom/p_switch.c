@@ -136,6 +136,36 @@ void P_InitSwitchList(void)
 
 
 //
+// P_ExpandSwitchTexturePresence
+//  R_PrecacheLevel marks only the textures on sidedefs, i.e. each switch's
+//  CURRENT state.  P_ChangeSwitchTexture swaps a pressed switch to its paired
+//  texture, which is on no sidedef and so would never get a GPU 2D block --
+//  drawing it (a screen-filling wall when you stand right in front) would fall
+//  back to a slow CPU column draw.  Expand the present set so both states of any
+//  switch used on the level are precached (mirrors the animated-texture
+//  expansion).  Cheap: switch textures are small and few.
+//
+void P_ExpandSwitchTexturePresence(char *present, int count)
+{
+    int i;
+
+    if (present == NULL)
+        return;
+
+    for (i = 0; i < numswitches * 2; i += 2)
+    {
+        int a = switchlist[i];
+        int b = switchlist[i + 1];
+
+        if (a < 0 || b < 0 || a >= count || b >= count)
+            continue;
+        if (present[a] || present[b])
+            present[a] = present[b] = 1;
+    }
+}
+
+
+//
 // Start a button counting down till it turns off.
 //
 void

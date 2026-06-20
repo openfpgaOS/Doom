@@ -72,6 +72,18 @@ size_t W_StdC_Read(wad_file_t *wad, unsigned int offset,
     stdc_wad_file_t *stdc_wad;
     size_t result;
 
+#ifdef OF_DOOM
+    /* Free the single data-slot DMA bridge before this blocking read: a CD-music
+     * refill in flight on the same bridge would otherwise wedge it.  Inert
+     * unless CD music is the active source (MIDI/no-WAD play skips it). */
+    extern int i_pcm_active;
+    if (i_pcm_active)
+    {
+        extern void I_PCM_DrainAsync(void);
+        I_PCM_DrainAsync();
+    }
+#endif
+
     stdc_wad = (stdc_wad_file_t *) wad;
 
     // Jump to the specified position in the file.

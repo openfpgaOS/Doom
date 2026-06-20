@@ -311,6 +311,14 @@ void I_UpdateSound(void)
         sound_module->Update();
     }
 
+#ifdef OF_DOOM
+    if (I_PCM_Active())
+    {
+        I_PCM_Poll();   /* feeds the stream and the SFX mixer */
+        return;
+    }
+#endif
+
     if (active_music_module != NULL && active_music_module->Poll != NULL)
     {
         active_music_module->Poll();
@@ -399,6 +407,10 @@ void I_ShutdownMusic(void)
 
 void I_SetMusicVolume(int volume)
 {
+#ifdef OF_DOOM
+    I_PCM_SetVolume(volume);
+#endif
+
     if (music_module != NULL)
     {
         music_module->SetMusicVolume(volume);
@@ -412,6 +424,14 @@ void I_SetMusicVolume(int volume)
 
 void I_PauseSong(void)
 {
+#ifdef OF_DOOM
+    if (I_PCM_Active())
+    {
+        I_PCM_Pause();
+        return;
+    }
+#endif
+
     if (active_music_module != NULL)
     {
         active_music_module->PauseMusic();
@@ -420,6 +440,14 @@ void I_PauseSong(void)
 
 void I_ResumeSong(void)
 {
+#ifdef OF_DOOM
+    if (I_PCM_Active())
+    {
+        I_PCM_Resume();
+        return;
+    }
+#endif
+
     if (active_music_module != NULL)
     {
         active_music_module->ResumeMusic();
@@ -466,6 +494,13 @@ void I_UnRegisterSong(void *handle)
 
 void I_PlaySong(void *handle, boolean looping)
 {
+#ifdef OF_DOOM
+    if (I_PCM_TryPlay(looping))
+    {
+        return;   /* streaming common/ost/<LUMP>.pcm instead of the MIDI lump */
+    }
+#endif
+
     if (active_music_module != NULL)
     {
         active_music_module->PlaySong(handle, looping);
@@ -474,6 +509,14 @@ void I_PlaySong(void *handle, boolean looping)
 
 void I_StopSong(void)
 {
+#ifdef OF_DOOM
+    if (I_PCM_Active())
+    {
+        I_PCM_Stop();
+        return;
+    }
+#endif
+
     if (active_music_module != NULL)
     {
         active_music_module->StopSong();

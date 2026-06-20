@@ -223,10 +223,16 @@ endif
 #                             without rebuilding the whole SDK demo core).
 # CORE=sdk is intentionally rejected: the SDK demo core is the runtime,
 # not a single ELF, so there's nothing for the loader to push.
+#
+# The UART-push branch fires only when CORE is EXPLICITLY set (command line /
+# environment), NOT when it is merely the auto-discovered default custom core
+# — otherwise, in a game-port checkout where DEFAULT_CORE is non-empty, bare
+# `make debug` would silently push that core's ELF instead of just attaching.
+# Same CORE_EXPLICIT gate the `clean` target uses.
 debug:
 ifdef APP
 	$(MAKE) -C src/apps debug APP=$(APP)
-else ifdef CORE
+else ifneq ($(CORE_EXPLICIT),)
 ifeq ($(CORE),sdk)
 	@echo "make debug CORE=sdk is not supported — the SDK demo core is not a single ELF."
 	@echo "Use 'make debug APP=<sdk-app>' to push a single SDK app over UART instead."
