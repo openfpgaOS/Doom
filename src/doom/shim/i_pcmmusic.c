@@ -27,6 +27,7 @@
 #ifdef OF_DOOM
 
 #include "doomtype.h"
+#include "doomdef.h"      /* gameaction_t / ga_savegame / ga_loadgame */
 #include "i_sound.h"
 #include "w_wad.h"
 #include "w_file.h"
@@ -109,7 +110,7 @@ static int           cd_frames;         /* frames the in-flight read delivers */
 static unsigned      cd_read_off;       /* async read cursor within the lump */
 static volatile int  cd_done;           /* set by the completion IRQ callback */
 static volatile int  cd_result;         /* IRQ result: 0 ok, <0 error */
-static int           cd_menu_prev;      /* menuactive last Poll (edge detect) */
+static int           cd_menu_prev;      /* `quiet` (menu/save/load) last Poll, edge detect */
 
 /* Async DMA refill is ENABLED, but suspended while frame presentation is
  * stalled.  When the Analogue Pocket *system* menu opens, the Pocket owns the
@@ -463,7 +464,17 @@ void I_PCM_Poll(void)
     if (pcm_playing)
     {
         extern boolean menuactive;
-        int quiet = menuactive;     /* a menu can do blocking save/config slot I/O */
+        extern gameaction_t gameaction;
+        extern boolean sendsave;
+        /* Suspend async CD reads across the WHOLE save/load sequence, not just
+         * while the menu is up: the menu closes (menuactive=0) a few tics BEFORE
+         * G_DoSaveGame runs the blocking slot write, and a read issued in that
+         * gap collides with the save on the single data-slot bridge (GPU
+         * watchdog hang).  sendsave covers menu-confirm -> button; gameaction
+         * covers the tic the blocking save/load I/O actually executes. */
+        int quiet = menuactive || sendsave
+                 || gameaction == ga_savegame
+                 || gameaction == ga_loadgame;
         int pos, consumed, present_live;
         of_video_timing_t vt;
         uint32_t now_us = of_time_us();
