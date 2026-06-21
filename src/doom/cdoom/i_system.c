@@ -62,12 +62,12 @@
  *
  * Sized to keep PWAD lump-cache headroom AND the per-level GPU 2D texture
  * blocks resident, while fitting inside the 54 MiB app SDRAM window with room
- * left for stack/runtime state (see src/sdk/app.ld).  Doom carries the GPU
- * param renderer's 2D blocks (walls / sprites / masked, plus the switch +
- * animation precache), so it gets the larger pool; Heretic/Hexen run the
- * software renderer and keep the smaller one.  Alignment to 8 bytes matches
- * z_zone.c's header layout. */
-#if defined(OF_HERETIC) || defined(OF_HEXEN)
+ * left for stack/runtime state (see src/sdk/app.ld).  Doom and Hexen carry the
+ * GPU param renderer's 2D blocks (walls / sprites / masked, plus switch +
+ * animation precache) and get the larger pool; Heretic keeps the smaller one
+ * (its tex budgets are unchanged).  Alignment to 8 bytes matches z_zone.c's
+ * header layout. */
+#if defined(OF_HERETIC)
 #define OF_ZONE_BYTES (32 * 1024 * 1024)
 #else
 #define OF_ZONE_BYTES (40 * 1024 * 1024)

@@ -480,11 +480,10 @@ void R_DrawPlanes(void)
         }
 
         //
-        // regular flat
-        //
-        lumpnum = firstflat + flattranslation[pl->picnum];
-
-        tempSource = W_CacheLumpNum(lumpnum, PU_STATIC);
+        // regular flat: persistent per-level data (loaded + flushed once at
+        // precache) so it isn't re-cached/released per frame -- that churn drains
+        // the GPU on rotation (hiccups).
+        tempSource = R_GetFlatData(flattranslation[pl->picnum], true);
 
         switch (pl->special)
         {

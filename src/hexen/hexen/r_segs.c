@@ -18,6 +18,7 @@
 #include "h2def.h"
 #include "i_system.h"
 #include "r_local.h"
+#include "of_fastram.h"
 #include "r_gpu.h"
 
 // OPTIMIZE: closed two sided lines as single sided
@@ -194,7 +195,7 @@ void R_RenderMaskedSegRange(drawseg_t * ds, int x1, int x2)
 #define HEIGHTBITS      12
 #define HEIGHTUNIT      (1<<HEIGHTBITS)
 
-void R_RenderSegLoop(void)
+OF_FASTTEXT void R_RenderSegLoop(void)
 {
     angle_t angle;
     unsigned index;
@@ -411,7 +412,7 @@ void R_RenderSegLoop(void)
 ======================
 */
 
-void R_StoreWallRange(int start, int stop)
+OF_FASTTEXT void R_StoreWallRange(int start, int stop)
 {
     fixed_t hyp;
     fixed_t sineval;

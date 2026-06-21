@@ -287,12 +287,37 @@ byte *R_GetColumn(int tex, int col)
  * free); a per-level byte budget caps zone pressure - over budget,
  * callers fall back to column emission.
  * ================================================================ */
-#define GPU_WALL_TEX2D_BUDGET (2 * 1024 * 1024)
+#define GPU_WALL_TEX2D_BUDGET (9 * 1024 * 1024)
+#define GPU_MASKED_TEX2D_BUDGET (2 * 1024 * 1024)
+/* Past this many built block bytes, guard each further block on real zone
+ * headroom (Z_FreeMemory) so a texture-heavy hub can't OOM the unguarded
+ * composite/lump/gameplay allocations -- it falls back to the CPU column path
+ * instead.  The first GUARD_FLOOR bytes are always safe (the old conservative
+ * budget), so typical maps pay no Z_FreeMemory cost. */
+#define GPU_TEX2D_GUARD_FLOOR (2 * 1024 * 1024)
+#define GPU_TEX2D_ZONE_RESERVE (8 * 1024 * 1024)
 #define GPU_WALL_TEX2D_PAD 128
 
 static byte **gpu_wall_tex2d;
 static int gpu_wall_tex2d_budget;
 static byte **gpu_masked_tex2d;
+static int gpu_masked_tex2d_budget;
+static int gpu_tex2d_dropped;    /* blocks over budget / zone-tight -> CPU (diag) */
+
+/* Per-level persistent flat data (PU_LEVEL, flushed once at precache).  Without
+ * it R_DrawPlanes re-caches + deferred-releases each visible flat every frame,
+ * which churns the purgeable cache and drains the GPU on rotation (hiccups).
+ * Mirrors the Doom core's flatlumpdata[]. */
+static byte **flatlumpdata;
+
+/* True if building `size` more block bytes would leave the zone too tight for
+ * the rest of precache + gameplay.  Only consults Z_FreeMemory past the safe
+ * floor, so light maps stay fast to load. */
+static boolean R_Tex2DZoneTight(int used, int size)
+{
+    return used >= GPU_TEX2D_GUARD_FLOOR
+        && Z_FreeMemory() < size + GPU_TEX2D_ZONE_RESERVE;
+}
 
 byte *R_GetWallTexture2D(int texnum)
 {
@@ -315,8 +340,12 @@ byte *R_GetWallTexture2D(int texnum)
     height = texture->height;
     size = width * height + GPU_WALL_TEX2D_PAD;
 
-    if (size > gpu_wall_tex2d_budget)
+    if (size > gpu_wall_tex2d_budget
+        || R_Tex2DZoneTight(GPU_WALL_TEX2D_BUDGET - gpu_wall_tex2d_budget, size))
+    {
+        gpu_tex2d_dropped++;
         return NULL;
+    }
 
     block = Z_Malloc(size, PU_LEVEL, &gpu_wall_tex2d[texnum]);
     gpu_wall_tex2d_budget -= size;
@@ -356,7 +385,10 @@ byte *R_GetMaskedTexture2D(int texnum)
     if (width > texture->width)
         width = texture->width;
     height = texture->height;
-    if (height <= 0 || height > 128)
+    /* The masked tier wraps vtex at the texture height (not 128), so it must be
+     * a power of two for the &(height-1) mask + mod-height rebase to be exact;
+     * non-pow2 (or >128) declines to the CPU post walk. */
+    if (height <= 0 || height > 128 || (height & (height - 1)) != 0)
         return NULL;
 
     for (x = 0; x < width; x++)
@@ -364,11 +396,15 @@ byte *R_GetMaskedTexture2D(int texnum)
             return NULL;
 
     size = width * height + GPU_WALL_TEX2D_PAD;
-    if (size > gpu_wall_tex2d_budget)
+    if (size > gpu_masked_tex2d_budget
+        || R_Tex2DZoneTight(GPU_MASKED_TEX2D_BUDGET - gpu_masked_tex2d_budget, size))
+    {
+        gpu_tex2d_dropped++;
         return NULL;
+    }
 
     block = Z_Malloc(size, PU_LEVEL, &gpu_masked_tex2d[texnum]);
-    gpu_wall_tex2d_budget -= size;
+    gpu_masked_tex2d_budget -= size;
     memset(block, 0, size);
 
     for (x = 0; x < width; x++)
@@ -401,7 +437,7 @@ byte *R_GetMaskedTexture2D(int texnum)
  * block + x*height, transparent texels zero).  Records cover only post
  * extents, so the zeros are never sampled except at clamped boundary
  * roundings. */
-#define GPU_SPRITE_TEX2D_BUDGET (2 * 1024 * 1024)
+#define GPU_SPRITE_TEX2D_BUDGET (9 * 1024 * 1024)
 
 static byte **gpu_sprite_tex2d;
 static int gpu_sprite_tex2d_budget;
@@ -429,8 +465,12 @@ byte *R_GetSpriteTexture2D(int spritelump)
         return NULL;
     size = width * height;
 
-    if (size > gpu_sprite_tex2d_budget)
+    if (size > gpu_sprite_tex2d_budget
+        || R_Tex2DZoneTight(GPU_SPRITE_TEX2D_BUDGET - gpu_sprite_tex2d_budget, size))
+    {
+        gpu_tex2d_dropped++;
         return NULL;
+    }
 
     block = Z_Malloc(size, PU_LEVEL, &gpu_sprite_tex2d[spritelump]);
     gpu_sprite_tex2d_budget -= size;
@@ -535,6 +575,7 @@ void R_InitTextures(void)
     gpu_wall_tex2d_budget = GPU_WALL_TEX2D_BUDGET;
     gpu_masked_tex2d = Z_Malloc(numtextures * sizeof(*gpu_masked_tex2d), PU_STATIC, 0);
     memset(gpu_masked_tex2d, 0, numtextures * sizeof(*gpu_masked_tex2d));
+    gpu_masked_tex2d_budget = GPU_MASKED_TEX2D_BUDGET;
     textureheight = Z_Malloc(numtextures * sizeof(fixed_t), PU_STATIC, 0);
 
     for (i = 0; i < numtextures; i++, directory++)
@@ -624,6 +665,36 @@ void R_InitFlats(void)
     flattranslation = Z_Malloc((numflats + 1) * sizeof(int), PU_STATIC, 0);
     for (i = 0; i < numflats; i++)
         flattranslation[i] = i;
+
+    flatlumpdata = Z_Malloc(numflats * sizeof(*flatlumpdata), PU_STATIC, 0);
+    memset(flatlumpdata, 0, numflats * sizeof(*flatlumpdata));
+}
+
+//
+// R_GetFlatData
+//  Persistent flat lump data the GPU plane path samples directly.  Precached
+//  flats return their resident (already-flushed) pointer; an un-precached flat
+//  loads on demand and is flushed for the GPU's DMA reads.  `permanent` keeps it
+//  PU_LEVEL + cached so it is never re-fetched/re-flushed per frame.
+//
+byte *R_GetFlatData(int flatnum, boolean permanent)
+{
+    byte *data;
+    int lump;
+
+    if (flatnum < 0 || flatnum >= numflats)
+        I_Error("R_GetFlatData: bad flat %i", flatnum);
+
+    if (flatlumpdata[flatnum] != NULL)
+        return flatlumpdata[flatnum];
+
+    lump = firstflat + flatnum;
+    data = W_CacheLumpNum(lump, permanent ? PU_LEVEL : PU_STATIC);
+    R_GPU_TextureDataUpdated(data, (unsigned int)lumpinfo[lump]->size);
+    if (permanent)
+        flatlumpdata[flatnum] = data;
+
+    return data;
 }
 
 
@@ -791,6 +862,11 @@ void R_PrecacheLevel(void)
      * cache restarts from a full budget each level (openfpgaOS). */
     gpu_wall_tex2d_budget = GPU_WALL_TEX2D_BUDGET;
     gpu_sprite_tex2d_budget = GPU_SPRITE_TEX2D_BUDGET;
+    gpu_masked_tex2d_budget = GPU_MASKED_TEX2D_BUDGET;
+    gpu_tex2d_dropped = 0;
+    /* Previous level's PU_LEVEL flat lumps were freed; clear the stale pointers. */
+    if (flatlumpdata != NULL)
+        memset(flatlumpdata, 0, numflats * sizeof(*flatlumpdata));
 
     char *flatpresent;
     char *texturepresent;
@@ -813,6 +889,7 @@ void R_PrecacheLevel(void)
         flatpresent[sectors[i].floorpic] = 1;
         flatpresent[sectors[i].ceilingpic] = 1;
     }
+    P_ExpandAnimatedFlatPresence(flatpresent, numflats);
 
     flatmemory = 0;
     for (i = 0; i < numflats; i++)
@@ -820,7 +897,9 @@ void R_PrecacheLevel(void)
         {
             lump = firstflat + i;
             flatmemory += lumpinfo[lump]->size;
-            W_CacheLumpNum(lump, PU_CACHE);
+            /* Load + flush once, resident PU_LEVEL for the level so R_DrawPlanes
+             * never re-caches/releases it per frame (the rotation-hiccup churn). */
+            R_GetFlatData(i, true);
         }
 
     Z_Free(flatpresent);
@@ -840,6 +919,11 @@ void R_PrecacheLevel(void)
 
     texturepresent[Sky1Texture] = 1;
     texturepresent[Sky2Texture] = 1;
+    // Reveal each switch's pressed state first, then expand animations (so an
+    // animated switch face also gets all its frames), so a swapped-in texture
+    // is GPU-resident instead of a slow CPU column draw on first sight.
+    P_ExpandSwitchTexturePresence(texturepresent, numtextures);
+    P_ExpandAnimatedTexturePresence(texturepresent, numtextures);
 
     texturememory = 0;
     for (i = 0; i < numtextures; i++)
@@ -893,4 +977,7 @@ void R_PrecacheLevel(void)
     }
 
     Z_Free(spritepresent);
+
+    if (gpu_tex2d_dropped > 0)
+        printf("GPU textures: %d over budget -> CPU\n", gpu_tex2d_dropped);
 }

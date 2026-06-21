@@ -88,6 +88,62 @@ static int *LightningLightLevels;
 
 //==========================================================================
 //
+// P_ExpandAnimatedPresence
+//
+// Mark every frame of an animated flat/texture present when its base index (or
+// any frame) is already present, so R_PrecacheLevel builds the GPU 2D block for
+// each cycled frame up front instead of lazily mid-frame on first sight.
+//
+//==========================================================================
+
+static void P_ExpandAnimatedPresence(char *present, int count, boolean flat)
+{
+    int i, f;
+
+    if (present == NULL)
+        return;
+
+    for (i = 0; i < AnimDefCount; i++)
+    {
+        animDef_t *ad = &AnimDefs[i];
+        boolean any;
+
+        if ((ad->type == ANIM_FLAT) != flat)
+            continue;
+
+        any = (ad->index >= 0 && ad->index < count && present[ad->index]);
+        for (f = ad->startFrameDef; !any && f <= ad->endFrameDef; f++)
+        {
+            int t = FrameDefs[f].index;
+            if (t >= 0 && t < count && present[t])
+                any = true;
+        }
+        if (!any)
+            continue;
+
+        if (ad->index >= 0 && ad->index < count)
+            present[ad->index] = 1;
+        for (f = ad->startFrameDef; f <= ad->endFrameDef; f++)
+        {
+            int t = FrameDefs[f].index;
+            if (t >= 0 && t < count)
+                present[t] = 1;
+        }
+    }
+}
+
+void P_ExpandAnimatedFlatPresence(char *present, int count)
+{
+    P_ExpandAnimatedPresence(present, count, true);
+}
+
+void P_ExpandAnimatedTexturePresence(char *present, int count)
+{
+    P_ExpandAnimatedPresence(present, count, false);
+}
+
+//==========================================================================
+//
 // P_AnimateSurfaces
 //
 //==========================================================================

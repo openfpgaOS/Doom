@@ -87,6 +87,12 @@ extern fixed_t Sky2ScrollDelta;
 
 void P_AnimateSurfaces(void);
 void P_InitFTAnims(void);
+// Expand a renderer present-set to cover textures/flats that appear at runtime
+// (animated frames, pressed switch faces) so their GPU 2D blocks are precached
+// instead of built lazily mid-frame on first sight.
+void P_ExpandAnimatedTexturePresence(char *present, int count);
+void P_ExpandAnimatedFlatPresence(char *present, int count);
+void P_ExpandSwitchTexturePresence(char *present, int count);
 void P_InitLightning(void);
 void P_ForceLightning(void);
 

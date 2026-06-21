@@ -741,6 +741,54 @@ static int oldpieces = -1;
 static int oldweapon = -1;
 static int oldkeys = -1;
 
+/* Direct-framebuffer (triple-buffered) status-bar cache.  Instead of forcing a
+ * full bar redraw into every flip buffer each frame, keep a per-buffer snapshot
+ * of the widget diff state (the old* values + SB_state).  Drawing buffer N
+ * restores its snapshot, so the normal diff path repaints only the widgets that
+ * changed *since buffer N was last drawn*; steady-state = nothing redraws.  A
+ * forced repaint (any SB_state==-1 site) or a layout change (inventory/automap)
+ * invalidates all buffers, so each gets one full redraw over the next few
+ * frames.  Mirrors the Doom core's st_directfb_slots[]. */
+#define SB_DIRECTFB_SLOTS 3
+typedef struct
+{
+    boolean valid;
+    int sb_state;
+    int oldarti, oldartiCount, oldfrags, oldmana1, oldmana2, oldarmor;
+    int oldhealth, oldlife, oldpieces, oldweapon, oldkeys;
+} sb_directfb_slot_t;
+static sb_directfb_slot_t sb_directfb_slots[SB_DIRECTFB_SLOTS];
+static int sb_directfb_inventory = -1;
+static int sb_directfb_automap = -1;
+
+static void SB_InvalidateDirectFBSlots(void)
+{
+    int i;
+    for (i = 0; i < SB_DIRECTFB_SLOTS; i++)
+        sb_directfb_slots[i].valid = false;
+}
+
+static void SB_SaveDirectFBSlot(int slot)
+{
+    sb_directfb_slot_t *s = &sb_directfb_slots[slot];
+    s->valid = true;
+    s->sb_state = SB_state;
+    s->oldarti = oldarti;     s->oldartiCount = oldartiCount; s->oldfrags = oldfrags;
+    s->oldmana1 = oldmana1;   s->oldmana2 = oldmana2;         s->oldarmor = oldarmor;
+    s->oldhealth = oldhealth; s->oldlife = oldlife;           s->oldpieces = oldpieces;
+    s->oldweapon = oldweapon; s->oldkeys = oldkeys;
+}
+
+static void SB_RestoreDirectFBSlot(int slot)
+{
+    const sb_directfb_slot_t *s = &sb_directfb_slots[slot];
+    SB_state = s->sb_state;
+    oldarti = s->oldarti;     oldartiCount = s->oldartiCount; oldfrags = s->oldfrags;
+    oldmana1 = s->oldmana1;   oldmana2 = s->oldmana2;         oldarmor = s->oldarmor;
+    oldhealth = s->oldhealth; oldlife = s->oldlife;           oldpieces = s->oldpieces;
+    oldweapon = s->oldweapon; oldkeys = s->oldkeys;
+}
+
 
 void SB_Drawer(void)
 {
@@ -757,6 +805,26 @@ void SB_Drawer(void)
     }
     else
     {
+        /* Direct-FB: pick this flip buffer's diff snapshot so only widgets that
+         * changed since the buffer was last drawn repaint (instead of a full bar
+         * redraw every frame).  A forced repaint (SB_state==-1) or a layout
+         * change invalidates all buffers; an uncertain slot (-1) full-redraws. */
+        int sb_slot = R_GPU_UsingDirectFramebuffer()
+                    ? R_GPU_CurrentDrawSlot() : -1;
+        if (sb_slot >= 0 && sb_slot < SB_DIRECTFB_SLOTS)
+        {
+            if (SB_state == -1
+                || inventory != sb_directfb_inventory
+                || automapactive != sb_directfb_automap)
+                SB_InvalidateDirectFBSlots();
+            sb_directfb_inventory = inventory;
+            sb_directfb_automap = automapactive;
+            if (!sb_directfb_slots[sb_slot].valid)
+                SB_state = -1;          // this buffer needs a full redraw
+            else
+                SB_RestoreDirectFBSlot(sb_slot);
+        }
+
         if (SB_state == -1)
         {
             V_DrawPatch(0, 134, PatchH2BAR);
@@ -801,6 +869,9 @@ void SB_Drawer(void)
             DrawInventoryBar();
             SB_state = 1;
         }
+
+        if (sb_slot >= 0 && sb_slot < SB_DIRECTFB_SLOTS)
+            SB_SaveDirectFBSlot(sb_slot);
     }
     SB_PaletteFlash(false);
     DrawAnimatedIcons();
@@ -982,7 +1053,11 @@ void DrawCommonBar(void)
 {
     int healthPos;
 
-    V_DrawPatch(0, 134, PatchH2TOP);
+    /* H2TOP is the chain groove; repaint it on a full redraw, or when the chain
+     * moves (to clear the old gem) -- not unconditionally every frame, which
+     * would defeat the per-buffer cache. */
+    if (SB_state == -1 || oldhealth != HealthMarker)
+        V_DrawPatch(0, 134, PatchH2TOP);
 
     if (oldhealth != HealthMarker)
     {

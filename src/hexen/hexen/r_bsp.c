@@ -19,6 +19,7 @@
 #include "i_system.h"
 #include "m_bbox.h"
 #include "r_local.h"
+#include "of_fastram.h"
 
 seg_t *curline;
 side_t *sidedef;
@@ -71,7 +72,7 @@ typedef struct
 cliprange_t solidsegs[MAXSEGS], *newend;        // newend is one past the last valid seg
 
 
-void R_ClipSolidWallSegment(int first, int last)
+OF_FASTTEXT void R_ClipSolidWallSegment(int first, int last)
 {
     cliprange_t *next, *start;
 
@@ -143,7 +144,7 @@ void R_ClipSolidWallSegment(int first, int last)
 ===============================================================================
 */
 
-void R_ClipPassWallSegment(int first, int last)
+OF_FASTTEXT void R_ClipPassWallSegment(int first, int last)
 {
     cliprange_t *start;
 
@@ -212,7 +213,7 @@ void R_ClearClipSegs(void)
 ======================
 */
 
-void R_AddLine(seg_t * line)
+OF_FASTTEXT void R_AddLine(seg_t * line)
 {
     int x1, x2;
     angle_t angle1, angle2, span, tspan;
@@ -319,7 +320,7 @@ int checkcoord[12][4] = {
 };
 
 
-boolean R_CheckBBox(fixed_t * bspcoord)
+OF_FASTTEXT boolean R_CheckBBox(fixed_t * bspcoord)
 {
     int boxx, boxy, boxpos;
     fixed_t x1, y1, x2, y2;
@@ -407,7 +408,7 @@ boolean R_CheckBBox(fixed_t * bspcoord)
 ================
 */
 
-void R_Subsector(int num)
+OF_FASTTEXT void R_Subsector(int num)
 {
     int count;
     seg_t *line;
@@ -480,7 +481,7 @@ void R_Subsector(int num)
 ===============================================================================
 */
 
-void R_RenderBSPNode(int bspnum)
+OF_FASTTEXT void R_RenderBSPNode(int bspnum)
 {
     node_t *bsp;
     int side;

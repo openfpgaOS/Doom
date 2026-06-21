@@ -20,6 +20,7 @@
 #include "h2def.h"
 #include "m_bbox.h"
 #include "r_local.h"
+#include "of_fastram.h"
 
 int viewangleoffset;
 
@@ -111,7 +112,7 @@ void R_AddPointToBox (int x, int y, fixed_t *box)
 ===============================================================================
 */
 
-int R_PointOnSide(fixed_t x, fixed_t y, node_t * node)
+OF_FASTTEXT int R_PointOnSide(fixed_t x, fixed_t y, node_t * node)
 {
     fixed_t dx, dy;
     fixed_t left, right;
@@ -326,7 +327,7 @@ void R_InitPointToAngle(void)
 ================
 */
 
-fixed_t R_ScaleFromGlobalAngle(angle_t visangle)
+OF_FASTTEXT fixed_t R_ScaleFromGlobalAngle(angle_t visangle)
 {
     fixed_t scale;
     int anglea, angleb;

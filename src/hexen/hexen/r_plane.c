@@ -20,6 +20,7 @@
 #include "h2def.h"
 #include "i_system.h"
 #include "r_local.h"
+#include "of_fastram.h"
 #include "r_gpu.h"
 #include "p_spec.h"
 
@@ -134,7 +135,7 @@ void R_InitPlanes(void)
 //
 //==========================================================================
 
-void R_MapPlane(int y, int x1, int x2)
+OF_FASTTEXT void R_MapPlane(int y, int x1, int x2)
 {
     angle_t angle;
     fixed_t distance, length;
@@ -393,7 +394,7 @@ void R_MakeSpans(int x, int t1, int b1, int t2, int b2)
 
 #define SKYTEXTUREMIDSHIFTED 200
 
-void R_DrawPlanes(void)
+OF_FASTTEXT void R_DrawPlanes(void)
 {
     boolean gpu_plane;
     visplane_t *pl;
@@ -534,9 +535,10 @@ void R_DrawPlanes(void)
                 continue;       // Next visplane
             }
         }
-        // Regular flat
-        tempSource = W_CacheLumpNum(firstflat +
-                                    flattranslation[pl->picnum], PU_STATIC);
+        // Regular flat: persistent per-level data (loaded + flushed once at
+        // precache) so it isn't re-cached/released per frame -- that churn drains
+        // the GPU on rotation (hiccups).
+        tempSource = R_GetFlatData(flattranslation[pl->picnum], true);
         scrollOffset = leveltime >> 1 & 63;
         switch (pl->special)
         {                       // Handle scrolling flats
@@ -639,8 +641,6 @@ void R_DrawPlanes(void)
 
         if (gpu_plane)
             R_GPU_EndPlaneSpans();
-
-        if (!R_GPU_DeferLumpRelease(firstflat + flattranslation[pl->picnum]))
-            W_ReleaseLumpNum(firstflat + flattranslation[pl->picnum]);
+        /* No per-frame release: the flat is resident PU_LEVEL for the level. */
     }
 }

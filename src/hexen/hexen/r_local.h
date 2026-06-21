@@ -424,6 +424,7 @@ void R_RetargetBuffer(void);
 byte *R_GetWallTexture2D(int texnum);  // flat 2D block for param-walls
 byte *R_GetSpriteTexture2D(int spritelump);  // flat 2D sprite block
 byte *R_GetMaskedTexture2D(int texnum);   // post-aware block for masked midtex
+byte *R_GetFlatData(int flatnum, boolean permanent);  // persistent flat lump data
 
 
 void R_RenderMaskedSegRange(drawseg_t * ds, int x1, int x2);

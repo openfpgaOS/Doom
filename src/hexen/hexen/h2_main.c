@@ -1076,14 +1076,12 @@ static void DrawAndBlit(void)
             UpdateState |= I_FULLVIEW;
             if (MenuActive)
                 SB_state = -1;   // redraw the bar under an overlapping menu
-            // Direct-FB triple buffering: force a full statusbar +
-            // border redraw per frame so every flip buffer carries the
-            // current HUD (openfpgaOS).
+            // Direct-FB triple buffering: the border is refreshed into every
+            // flip buffer; the status bar is now cached per buffer inside
+            // SB_Drawer (sb_directfb_slots), so it no longer force-redraws the
+            // whole bar every frame (openfpgaOS).
             if (R_GPU_UsingDirectFramebuffer())
-            {
-                SB_state = -1;
                 BorderNeedRefresh = true;
-            }
             SB_Drawer();
             break;
         case GS_INTERMISSION:

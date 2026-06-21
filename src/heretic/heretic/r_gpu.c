@@ -2008,14 +2008,17 @@ void R_GPU_TextureDataUpdated(void *ptr, unsigned int size)
     if (!gpu_present || ptr == NULL || size == 0)
         return;
 
-    /* Texture-cache invalidation is only safe while the GPU is idle.  This
-     * path is cold: it runs when Doom loads a lump or builds a composite
-     * texture, not for every already-cached texel fetch. */
+    /* Publish the new texels to RAM for the GPU's DMA reads -- that is all a
+     * first-sighting upload needs: a brand-new block has no stale texture-cache
+     * line, so the GPU DMAs the flushed RAM correctly.  Do NOT issue the
+     * whole-cache GPU_TEX_FLUSH here -- these blocks build lazily mid-frame, and
+     * the invalidate nuked the warm cache, rendering ~8 frames cold (~70ms vs
+     * ~6ms) on every switch/door/animation first-sighting.  gpu_finish_pending()
+     * stays: the in-flight frame must retire before the new texels overwrite. */
     gpu_finish_pending();
     cache_start = R_Perf_BeginStage();
     of_cache_flush_range(ptr, size);
     R_Perf_EndStage(R_PERF_STAGE_CACHE, cache_start);
-    GPU_TEX_FLUSH = 1;
 }
 
 void R_GPU_TextureDataFlushAll(void)
@@ -2666,8 +2669,14 @@ boolean R_GPU_WallSegBegin(int x1, int x2, fixed_t scale1, fixed_t scalestep,
     return true;
 }
 
-boolean R_GPU_WallTierBegin(int tier, const byte *tex2d, int tex_height,
-                            int widthmask, fixed_t texturemid)
+/* Open a tier accumulator for the current seg.  vperiod is the vertical wrap
+ * period (texels): 128 for opaque walls (R_DrawColumn wraps vtex &127 regardless
+ * of texture height), or the texture height for masked midtextures (which clip,
+ * never wrap, so vtex must not be truncated below the height -- the column-major
+ * block stride is the height, so mask = height-1 keeps each column's vtex inside
+ * its own column).  vperiod must be a power of two. */
+static boolean gpu_wall_tier_begin(int tier, const byte *tex2d, int tex_height,
+                                   int widthmask, fixed_t texturemid, int vperiod)
 {
     const float inv16 = 1.0f / 65536.0f;
     float f_org[3], f_du[3], f_dv[3];
@@ -2683,13 +2692,15 @@ boolean R_GPU_WallTierBegin(int tier, const byte *tex2d, int tex_height,
     if (tex_height <= 0 || tex_height > 0xFFFF ||
         widthmask < 0 || widthmask > 0xFFFF)
         return false;
+    if (vperiod <= 0 || (vperiod & (vperiod - 1)) != 0)
+        return false;                       /* non-pow2 period -> &mask is invalid */
 
     t = &gpu_wall_tiers[tier];
     proj = (float)centerxfrac * inv16;
 
-    /* vtex wraps &127 like R_DrawColumn, so texturemid rebases mod 128
-     * texels — texel-identical, keeps the Q29 shift small. */
-    tmr = texturemid & ((128 << FRACBITS) - 1);
+    /* vtex wraps &(vperiod-1) like R_DrawColumn, so texturemid rebases mod
+     * vperiod texels — texel-identical, keeps the Q29 shift small. */
+    tmr = texturemid & (((fixed_t)vperiod << FRACBITS) - 1);
     tm_f = (float)tmr * inv16;
 
     /* texcol rebases by a multiple of the texture's wrap period. */
@@ -2700,7 +2711,7 @@ boolean R_GPU_WallTierBegin(int tier, const byte *tex2d, int tex_height,
 
     /* attr0 = vtex*zi, attr1 = texcol*zi, attr2 = zi.  The texture roles
      * are swapped to fit the column-major 2D block: tex_width = column
-     * stride (texheight), w_mask = 127 vertical wrap, h_mask = width. */
+     * stride (texheight), w_mask = vperiod-1 vertical wrap, h_mask = width. */
     f_du[0] = tm_f * gpu_wall_zi_du;
     f_dv[0] = 1.0f / proj;
     f_org[0] = tm_f * gpu_wall_zi_org - (float)centery * f_dv[0];
@@ -2719,7 +2730,7 @@ boolean R_GPU_WallTierBegin(int tier, const byte *tex2d, int tex_height,
     t->params.fb_minor_step = SCREENWIDTH;  /* per-pixel walk = row stride */
     t->params.tex_addr = (uint32_t)(uintptr_t)tex2d;
     t->params.tex_width = (uint16_t)tex_height;
-    t->params.tex_w_mask = 127;
+    t->params.tex_w_mask = (uint16_t)(vperiod - 1);
     t->params.tex_h_mask = (uint16_t)widthmask;
     t->params.flags = OF_GPU_SPAN_COLORMAP | OF_GPU_SPAN_PERSP;
     t->params.colormap_id = 0;
@@ -2733,6 +2744,14 @@ boolean R_GPU_WallTierBegin(int tier, const byte *tex2d, int tex_height,
     t->rr = 0;
     t->active = 1;
     return true;
+}
+
+boolean R_GPU_WallTierBegin(int tier, const byte *tex2d, int tex_height,
+                            int widthmask, fixed_t texturemid)
+{
+    /* Opaque walls wrap vtex at 128 (R_DrawColumn's &127), regardless of the
+     * texture's own height — keep that exact behaviour. */
+    return gpu_wall_tier_begin(tier, tex2d, tex_height, widthmask, texturemid, 128);
 }
 
 boolean R_GPU_WallTierColumn(int tier, int x, int yl, int yh, fixed_t scale)
@@ -2935,7 +2954,9 @@ boolean R_GPU_MaskedBegin(const byte *blk, int tex_height, int widthmask,
     if (!R_GPU_WallSegBegin(x1, x2, scale1, scalestep,
                             distance, offset, centerangle))
         return false;
-    if (!R_GPU_WallTierBegin(0, blk, tex_height, widthmask, texturemid))
+    /* Masked midtextures clip vertically (never wrap): the tier wraps vtex at the
+     * texture height, not 128.  R_GetMaskedTexture2D has gated the height pow2. */
+    if (!gpu_wall_tier_begin(0, blk, tex_height, widthmask, texturemid, tex_height))
     {
         gpu_wall_seg_valid = 0;
         return false;

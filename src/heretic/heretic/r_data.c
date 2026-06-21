@@ -299,6 +299,12 @@ static byte **gpu_wall_tex2d;
 static int gpu_wall_tex2d_budget;
 static byte **gpu_masked_tex2d;
 
+/* Per-level persistent flat data (PU_LEVEL, flushed once at precache).  Without
+ * it R_DrawPlanes re-caches + deferred-releases each visible flat every frame,
+ * which churns the purgeable cache and drains the GPU on rotation (hiccups).
+ * Mirrors the Doom core's flatlumpdata[]. */
+static byte **flatlumpdata;
+
 byte *R_GetWallTexture2D(int texnum)
 {
     texture_t *texture;
@@ -361,7 +367,10 @@ byte *R_GetMaskedTexture2D(int texnum)
     if (width > texture->width)
         width = texture->width;
     height = texture->height;
-    if (height <= 0 || height > 128)
+    /* The masked tier wraps vtex at the texture height (not 128), so it must be
+     * a power of two for the &(height-1) mask + mod-height rebase to be exact;
+     * non-pow2 (or >128) declines to the CPU post walk. */
+    if (height <= 0 || height > 128 || (height & (height - 1)) != 0)
         return NULL;
 
     for (x = 0; x < width; x++)
@@ -655,6 +664,36 @@ void R_InitFlats(void)
     flattranslation = Z_Malloc((numflats + 1) * sizeof(int), PU_STATIC, 0);
     for (i = 0; i < numflats; i++)
         flattranslation[i] = i;
+
+    flatlumpdata = Z_Malloc(numflats * sizeof(*flatlumpdata), PU_STATIC, 0);
+    memset(flatlumpdata, 0, numflats * sizeof(*flatlumpdata));
+}
+
+//
+// R_GetFlatData
+//  Persistent flat lump data the GPU plane path samples directly.  Precached
+//  flats return their resident (already-flushed) pointer; an un-precached flat
+//  loads on demand and is flushed for the GPU's DMA reads.  `permanent` keeps it
+//  PU_LEVEL + cached so it is never re-fetched/re-flushed per frame.
+//
+byte *R_GetFlatData(int flatnum, boolean permanent)
+{
+    byte *data;
+    int lump;
+
+    if (flatnum < 0 || flatnum >= numflats)
+        I_Error("R_GetFlatData: bad flat %i", flatnum);
+
+    if (flatlumpdata[flatnum] != NULL)
+        return flatlumpdata[flatnum];
+
+    lump = firstflat + flatnum;
+    data = W_CacheLumpNum(lump, permanent ? PU_LEVEL : PU_STATIC);
+    R_GPU_TextureDataUpdated(data, (unsigned int)lumpinfo[lump]->size);
+    if (permanent)
+        flatlumpdata[flatnum] = data;
+
+    return data;
 }
 
 
@@ -835,6 +874,9 @@ void R_PrecacheLevel(void)
      * cache restarts from a full budget each level (openfpgaOS). */
     gpu_wall_tex2d_budget = GPU_WALL_TEX2D_BUDGET;
     gpu_sprite_tex2d_budget = GPU_SPRITE_TEX2D_BUDGET;
+    /* Previous level's PU_LEVEL flat lumps were freed; clear the stale pointers. */
+    if (flatlumpdata != NULL)
+        memset(flatlumpdata, 0, numflats * sizeof(*flatlumpdata));
 
     char *flatpresent;
     char *texturepresent;
@@ -864,7 +906,9 @@ void R_PrecacheLevel(void)
         {
             lump = firstflat + i;
             flatmemory += lumpinfo[lump]->size;
-            W_CacheLumpNum(lump, PU_CACHE);
+            /* Load + flush once, resident PU_LEVEL for the level so R_DrawPlanes
+             * never re-caches/releases it per frame (the rotation-hiccup churn). */
+            R_GetFlatData(i, true);
         }
 
     Z_Free(flatpresent);
