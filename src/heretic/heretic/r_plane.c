@@ -399,7 +399,6 @@ void R_DrawPlanes(void)
     visplane_t *pl;
     int light;
     int x, stop;
-    int lumpnum;
     int angle;
     byte *tempSource;
 
@@ -562,8 +561,6 @@ void R_DrawPlanes(void)
 
         if (gpu_plane)
             R_GPU_EndPlaneSpans();
-
-        if (!R_GPU_DeferLumpRelease(lumpnum))
-            W_ReleaseLumpNum(lumpnum);
+        /* No per-frame release: the flat is resident PU_LEVEL for the level. */
     }
 }

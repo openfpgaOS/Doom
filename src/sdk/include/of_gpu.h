@@ -263,7 +263,7 @@ static uint32_t _gpu_base;
  * Counters reset only on GPU reset, so the caller diffs against the previous
  * frame's snapshot; cnt_clk is the cycle denominator since this VexiiRiscv
  * build lacks rdcycle. */
-#define GPU_CHANUTIL_SEL        OF_GPU_REG(0x34)  /* W: select which counter VAL returns (0..7) */
+#define GPU_CHANUTIL_SEL        OF_GPU_REG(0x34)  /* W: select which counter VAL returns (0..12) */
 #define GPU_CHANUTIL_VAL        OF_GPU_REG(0x08)  /* R: selected free-running counter */
 
 #define GPU_CHANUTIL_CLK        0u   /* cycle denominator */

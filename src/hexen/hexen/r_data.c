@@ -689,8 +689,10 @@ byte *R_GetFlatData(int flatnum, boolean permanent)
         return flatlumpdata[flatnum];
 
     lump = firstflat + flatnum;
+    /* W_CacheLumpNum already flushes a freshly-loaded lump for the GPU's DMA
+     * reads (w_wad.c), so an explicit R_GPU_TextureDataUpdated here would be a
+     * redundant gpu_finish_pending() drain on the load. */
     data = W_CacheLumpNum(lump, permanent ? PU_LEVEL : PU_STATIC);
-    R_GPU_TextureDataUpdated(data, (unsigned int)lumpinfo[lump]->size);
     if (permanent)
         flatlumpdata[flatnum] = data;
 

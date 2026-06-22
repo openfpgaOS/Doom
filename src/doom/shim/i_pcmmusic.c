@@ -46,10 +46,17 @@
 #define MUS_RATE        48000          /* source + voice rate (no resample) */
 #define MUS_CHANNELS    2
 #define MUS_BYTES_FRAME (MUS_CHANNELS * (int)sizeof(int16_t))   /* 4 */
-#define RING_SECONDS    4              /* refill slack; covers a level load */
+#define RING_SECONDS    8              /* refill slack: must outlast on-demand WAD reads
+                                        * starving the music DMA during early gameplay (4 s
+                                        * underran -> ring laps -> music jumps to the start) */
 #define RING_FRAMES     (MUS_RATE * RING_SECONDS)
 #define STAGING_FRAMES  4096           /* one sync read+deinterleave pass */
-#define CHUNK_FRAMES    16384          /* async DMA read (64 KB), max */
+#define CHUNK_FRAMES    1024           /* normal async read (4 KB): ~one frame's worth, so the fold is
+                                        * a flat per-frame trickle (no jitter). */
+#define CHUNK_FRAMES_HI 2048           /* fall back to 8 KB only while the ring is running low, to
+                                        * catch up faster -- without paying the bigger fold all the
+                                        * time.  Must stay <= 32 KB (the OS SDRAM-direct cap). */
+#define CD_LOW_FRAMES   (RING_FRAMES / 4)  /* "running low" threshold (~2 s of the 8 s ring) */
 #define MUS_PRIORITY    200
 #define PRESENT_STALE_US 250000u       /* no scanout for this long == OSD/stall */
 
@@ -91,7 +98,7 @@ static unsigned    pcm_rd;             /* sync read cursor within the lump */
 /* deinterleaved SDRAM rings (+1 guard frame mirrors [0] for the loop seam) */
 static int16_t     ringL[RING_FRAMES + 1];
 static int16_t     ringR[RING_FRAMES + 1];
-static int16_t     staging[STAGING_FRAMES * MUS_CHANNELS];
+static int16_t     staging[STAGING_FRAMES * MUS_CHANNELS] __attribute__((aligned(8)));
 static int         write_pos;          /* next ring frame to fill */
 static int         last_pos;           /* play cursor at previous refill */
 static int         last_vol;           /* last group volume pushed (0..255) */
@@ -102,8 +109,13 @@ static of_mixer_handle_t vR = OF_MIXER_HANDLE_INVALID;
 
 /* ---- async (data-slot DMA) refill state --------------------------- */
 static int           cd_slot = -1;     /* data slot of the music WAD */
-static uint8_t      *cd_stage;          /* CRAM0 staging for of_file_read_async */
-static int           cd_chunk;          /* frames per DMA read (<= CHUNK_FRAMES) */
+/* DMA staging in SDRAM: the async read targets the UNCACHED alias so the OS takes
+ * the 32 KB SDRAM-direct path (not the 4 KB CRAM0 FIFO), and cd_fold reads it back
+ * through the CACHED alias (after invalidate) -- cheap cached-SDRAM line fills
+ * instead of the slow uncached CRAM0 reads that drove the fold jitter. */
+static uint8_t       cd_stage_mem[CHUNK_FRAMES_HI * MUS_BYTES_FRAME] __attribute__((aligned(64)));
+static uint8_t      *cd_stage;          /* uncached-SDRAM alias of cd_stage_mem (DMA dest) */
+static int           cd_chunk;          /* frames per DMA read */
 static int           cd_async_ok;       /* async usable for the current track */
 static int           cd_pending;        /* a DMA read is in flight */
 static int           cd_frames;         /* frames the in-flight read delivers */
@@ -159,6 +171,10 @@ static int pcm_group_volume(void)
  * wrapping, flushing each span and keeping the loop-seam guard in sync. */
 static void ring_write(const int16_t *src, int frames)
 {
+    /* One stereo frame == one 32-bit word (L in the low half, R in the high).
+     * Reading the word does a single uncached CRAM0 access per frame instead of
+     * two int16 reads -- halves the CDC-crossing latency that drives the fold. */
+    const uint32_t *src32 = (const uint32_t *)src;
     int done = 0;
 
     while (done < frames)
@@ -173,8 +189,9 @@ static void ring_write(const int16_t *src, int frames)
 
         for (i = 0; i < batch; i++)
         {
-            ringL[w + i] = gain_clamp(src[(done + i) * 2 + 0]);
-            ringR[w + i] = gain_clamp(src[(done + i) * 2 + 1]);
+            uint32_t lr = src32[done + i];
+            ringL[w + i] = gain_clamp((int16_t)(lr & 0xffffu));
+            ringR[w + i] = gain_clamp((int16_t)(lr >> 16));
         }
         of_cache_flush_range(&ringL[w], (uint32_t)batch * sizeof(int16_t));
         of_cache_flush_range(&ringR[w], (uint32_t)batch * sizeof(int16_t));
@@ -262,8 +279,11 @@ static void cd_cb(int token, int result)
  * Non-blocking: sets cd_pending and pre-advances the read cursor. */
 static int cd_issue(void)
 {
+    /* 4 KB normally (small, smooth fold); jump to 8 KB only while the ring has
+     * run low, to catch up faster without the bigger fold running all the time. */
+    int want = (ring_valid < CD_LOW_FRAMES) ? CHUNK_FRAMES_HI : cd_chunk;
     unsigned remain = pcm_size - cd_read_off;
-    int frames, tok;
+    int frames, tok, space;
 
     if (remain == 0)
     {
@@ -271,9 +291,12 @@ static int cd_issue(void)
         cd_read_off = 0;
         remain = pcm_size;
     }
-    frames = cd_chunk;
+    frames = want;
     if ((unsigned)frames * MUS_BYTES_FRAME > remain)
         frames = (int)(remain / MUS_BYTES_FRAME);
+    space = RING_FRAMES - ring_valid;
+    if (frames > space)             /* never write past the play cursor */
+        frames = space;
     if (frames <= 0)
         return -1;
 
@@ -350,7 +373,7 @@ static void pcm_ensure_init(void)
 
     if (W_AddFile(PCM_WAD) == NULL)
     {
-        printf("CD music: %s absent, MIDI only\n", PCM_WAD);
+        /* printf("CD music: %s absent, MIDI only\n", PCM_WAD); */  /* UART silenced for jitter test */
         return;
     }
     W_GenerateHashTable();
@@ -359,22 +382,22 @@ static void pcm_ensure_init(void)
 #ifndef OF_PC
     if (pcm_async_enabled)
     {
-        uint32_t slot, maxr;
+        uint32_t slot;
         if (of_file_slot_find(PCM_WAD, &slot) == 0)
         {
-            cd_slot = (int)slot;
+            /* DMA straight into SDRAM via the uncached alias (the OS routes
+             * uncached-SDRAM dests through the 32 KB direct path).  cd_fold then
+             * reads it back cached, so the deinterleave is cheap.  Flush the
+             * buffer once so dirty BSS-zero lines can't evict over a DMA. */
+            cd_slot  = (int)slot;
             cd_chunk = CHUNK_FRAMES;
-            maxr = of_file_async_max_read();
-            if (maxr > 0 && (uint32_t)(cd_chunk * MUS_BYTES_FRAME) > maxr)
-                cd_chunk = (int)(maxr / MUS_BYTES_FRAME);
-            if (cd_chunk > 0)
-                cd_stage = (uint8_t *)of_file_dma_stage_alloc(
-                    (uint32_t)cd_chunk * MUS_BYTES_FRAME, 2048);
+            cd_stage = (uint8_t *)of_uncached(cd_stage_mem);
+            of_cache_flush_range(cd_stage_mem, sizeof(cd_stage_mem));
         }
     }
 #endif
-    printf("CD music: %s loaded (%s refill)\n", PCM_WAD,
-           cd_stage ? "async DMA" : "sync");
+    /* printf("CD music: %s loaded (%s refill)\n", PCM_WAD,
+              cd_stage ? "async DMA" : "sync"); */  /* UART silenced for jitter test */
 }
 
 int I_PCM_TryPlay(boolean looping)
@@ -425,7 +448,7 @@ int I_PCM_TryPlay(boolean looping)
                                     RING_FRAMES, MUS_RATE, MUS_PRIORITY, 0);
     if (vL == OF_MIXER_HANDLE_INVALID || vR == OF_MIXER_HANDLE_INVALID)
     {
-        printf("CD music: no free music voices, using MIDI\n");
+        /* printf("CD music: no free music voices, using MIDI\n"); */  /* UART silenced for jitter test */
         pcm_stop_voices();
         return 0;
     }
@@ -440,8 +463,8 @@ int I_PCM_TryPlay(boolean looping)
 
     pcm_playing = 1;
     i_pcm_active = 1;
-    printf("CD music: streaming lump %s (%u bytes, %s)\n", pcm_lump, pcm_size,
-           cd_async_ok ? "async" : "sync");
+    /* printf("CD music: streaming lump %s (%u bytes, %s)\n", pcm_lump, pcm_size,
+              cd_async_ok ? "async" : "sync"); */  /* UART silenced for jitter test */
     return 1;
 }
 
@@ -452,29 +475,38 @@ static void cd_fold(void)
     {
         if (cd_result >= 0)
         {
-            ring_write((const int16_t *)cd_stage, cd_frames);
+            /* The bridge DMA'd into cd_stage_mem's physical SDRAM.  Invalidate
+             * so the cached read below sees the fresh data, then deinterleave
+             * from the CACHED alias (fast line fills, not uncached CRAM0). */
+            of_cache_inval_range(cd_stage_mem,
+                                 (uint32_t)cd_frames * MUS_BYTES_FRAME);
+            ring_write((const int16_t *)cd_stage_mem, cd_frames);
             ring_valid += cd_frames;
         }
         cd_pending = 0;
     }
 }
 
+/* No async CD reads across the WHOLE save/load sequence, not just while the menu
+ * is up: the menu closes (menuactive=0) a few tics BEFORE G_DoSaveGame runs the
+ * blocking slot write, and a read issued in that gap collides with the save on
+ * the single data-slot bridge (GPU watchdog hang).  sendsave covers menu-confirm
+ * -> button; gameaction covers the tic the blocking save/load I/O executes. */
+static int pcm_quiet(void)
+{
+    extern boolean menuactive;
+    extern gameaction_t gameaction;
+    extern boolean sendsave;
+    return menuactive || sendsave
+        || gameaction == ga_savegame
+        || gameaction == ga_loadgame;
+}
+
 void I_PCM_Poll(void)
 {
     if (pcm_playing)
     {
-        extern boolean menuactive;
-        extern gameaction_t gameaction;
-        extern boolean sendsave;
-        /* Suspend async CD reads across the WHOLE save/load sequence, not just
-         * while the menu is up: the menu closes (menuactive=0) a few tics BEFORE
-         * G_DoSaveGame runs the blocking slot write, and a read issued in that
-         * gap collides with the save on the single data-slot bridge (GPU
-         * watchdog hang).  sendsave covers menu-confirm -> button; gameaction
-         * covers the tic the blocking save/load I/O actually executes. */
-        int quiet = menuactive || sendsave
-                 || gameaction == ga_savegame
-                 || gameaction == ga_loadgame;
+        int quiet = pcm_quiet();
         int pos, consumed, present_live;
         of_video_timing_t vt;
         uint32_t now_us = of_time_us();

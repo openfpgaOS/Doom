@@ -7,8 +7,8 @@
             "description": "Hexen on openfpgaOS",
             "author": "TheDiscordian",
             "url": "",
-            "version": "1.0.2",
-            "date_release": "2026-06-11"
+            "version": "1.0.3",
+            "date_release": "2026-06-21"
         },
         "framework": {
             "target_product": "Analogue Pocket",
