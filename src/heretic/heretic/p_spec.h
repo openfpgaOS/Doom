@@ -67,6 +67,10 @@ void P_InitPicAnims(void);
 void P_InitTerrainTypes(void);
 void P_InitLava(void);
 
+// precache expansion over animation frames (not upstream)
+void P_ExpandAnimatedFlatPresence(char *present, int count);
+void P_ExpandAnimatedTexturePresence(char *present, int count);
+
 // at map load
 void P_SpawnSpecials(void);
 void P_InitAmbientSound(void);
@@ -191,6 +195,7 @@ extern button_t buttonlist[MAXBUTTONS];
 
 void P_ChangeSwitchTexture(line_t * line, int useAgain);
 void P_InitSwitchList(void);
+void P_ExpandSwitchTexturePresence(char *present, int count);   // (not upstream)
 
 /*
 ===============================================================================

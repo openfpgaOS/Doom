@@ -440,17 +440,51 @@ OF_FASTTEXT void R_DrawPlanes(void)
         {                       // Sky flat
             if (DoubleSky)
             {                   // Render 2 layers, sky 1 in front
-                // CPU composites both layers straight into the FB,
-                // MID-FRAME — sprites draw over this sky afterwards on
-                // the GPU, so these lines must NOT be marked dirty (the
-                // present-time flush would stamp stale sky back over
-                // the GPU sprites).  Use the drain+inval / flush-clean
-                // bracket instead (openfpgaOS).
-                R_GPU_BeginCPUSprite();
                 offset = Sky1ColumnOffset >> 16;
                 skyTexture = texturetranslation[Sky1Texture];
                 offset2 = Sky2ColumnOffset >> 16;
                 skyTexture2 = texturetranslation[Sky2Texture];
+
+                // GPU: sky 2 as opaque columns, then sky 1 over it with
+                // skip-zero -- the same merge as the CPU loop below,
+                // without its per-frame GPU drain + composite + flush.
+                if (R_GPU_SkyColumnsActive())
+                {
+                    for (x = pl->minx; x <= pl->maxx; x++)
+                    {
+                        dc_yl = pl->top[x];
+                        dc_yh = pl->bottom[x];
+                        if (dc_yl <= dc_yh)
+                        {
+                            angle = (viewangle + xtoviewangle[x])
+                                >> ANGLETOSKYSHIFT;
+                            R_GPU_DrawSkyColumn(x, dc_yl, dc_yh,
+                                R_GetColumn(skyTexture2, angle + offset2)
+                                + SKYTEXTUREMIDSHIFTED + (dc_yl - centery));
+                        }
+                    }
+                    for (x = pl->minx; x <= pl->maxx; x++)
+                    {
+                        dc_yl = pl->top[x];
+                        dc_yh = pl->bottom[x];
+                        if (dc_yl <= dc_yh)
+                        {
+                            angle = (viewangle + xtoviewangle[x])
+                                >> ANGLETOSKYSHIFT;
+                            R_GPU_DrawSkyColumnZ(x, dc_yl, dc_yh,
+                                R_GetColumn(skyTexture, angle + offset)
+                                + SKYTEXTUREMIDSHIFTED + (dc_yl - centery));
+                        }
+                    }
+                    continue;   // Next visplane
+                }
+
+                // CPU composite fallback: writes the FB mid-frame --
+                // sprites draw over this sky afterwards on the GPU, so
+                // these lines must NOT be marked dirty (the present-time
+                // flush would stamp stale sky back over the GPU
+                // sprites).  Use the drain+inval / flush-clean bracket.
+                R_GPU_BeginCPUSprite();
                 for (x = pl->minx; x <= pl->maxx; x++)
                 {
                     dc_yl = pl->top[x];

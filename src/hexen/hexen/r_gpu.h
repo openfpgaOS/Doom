@@ -27,6 +27,8 @@ boolean R_GPU_DrawColumn(void);
 boolean R_GPU_DrawTLColumn(void);
 /* Raven sky: raw texel column from a pre-offset source pointer. */
 boolean R_GPU_DrawSkyColumn(int x, int yl, int yh, const byte *source);
+boolean R_GPU_DrawSkyColumnZ(int x, int yl, int yh, const byte *source);
+boolean R_GPU_SkyColumnsActive(void);
 boolean R_GPU_TLEnabled(void);  /* false under -nogputl (CPU TL columns) */
 /* Drain the GPU before a translucent sprite: TL columns READ the
  * framebuffer, and pixels written by immediately-preceding commands may
@@ -124,6 +126,5 @@ boolean R_GPU_MaskedBegin(const byte *blk, int tex_height, int widthmask,
 boolean R_GPU_MaskedPost(int x, int yl, int yh);
 void R_GPU_MaskedEnd(void);
 
-boolean R_GPU_DeferLumpRelease(int lumpnum);
 
 #endif

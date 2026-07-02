@@ -10,6 +10,7 @@
             { "id": 2, "filename": "chexquest.ini" },
             { "id": 3, "filename": "doom.elf" },
             { "id": 4, "filename": "chex.wad" },
+            { "id": 5, "filename": "DOOMMUS.WAD" },
             { "id": 6, "filename": "chex.deh" },
             { "id": 7, "filename": "bank.ofsf" },
             { "id": 9, "filename": "chex/ChexQuest.cfg" },

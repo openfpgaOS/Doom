@@ -54,12 +54,17 @@ extern "C" {
  * ================================================================ */
 
 #define OF_GPU_SPAN_COLORMAP     (1 << 0)
-/* bit 1 reserved */
+#define OF_GPU_SPAN_BLEND        (1 << 1)   /* src-over const-alpha blend (truecolor; 0x4A ctl[1]); src alpha = 0x4A w16 */
 #define OF_GPU_SPAN_SKIP_ZERO    (1 << 2)
 /* bits 3/4 reserved */
 #define OF_GPU_SPAN_PERSP        (1 << 5)
 #define OF_GPU_SPAN_TRANSLUC     (1 << 6)
 #define OF_GPU_SPAN_TRUECOLOR    (1 << 7)   /* RGB565 direct-color select (0x4A ctl[7]) */
+/* Control-word bit 30 (not in the 8-bit flags byte): enables the full N64
+ * combiner emulation clamp(texel*C + D).  C rides the per-vertex RGB565 words
+ * 12-14 (signed 5b/ch); D rides the 22-word 0x4E words 19-21.  Set via
+ * of_gpu_tri_state_t.cd_combine; OFF = byte-exact legacy texel*C. */
+#define OF_GPU_SPAN_CD_COMBINE   (1u << 30)
 
 /* ================================================================
  * Data Structures
@@ -1606,6 +1611,21 @@ typedef struct {
                               * triangle shift rides in 0x4D w12, only the
                               * MODE bit is sticky).  Zero-init keeps the
                               * pre-existing PERSP behavior. */
+
+    /* Truecolor extras (0x4A control word bits 28/29 + word 16).  mirror_s/_t
+     * drive G_TX_MIRROR addressing; const_alpha is the per-surface src alpha
+     * (0..255) consumed when OF_GPU_SPAN_BLEND is set. */
+    uint8_t  mirror_s, mirror_t;
+    uint8_t  const_alpha;
+    /* Full combiner emulation (control bit 30): when 1, the GPU computes
+     * clamp(texel*C + D) — C = per-vertex RGB565 (signed 5b/ch) in the normal
+     * rgb[] words, D = the rgb_d[] triple on the 22-word 0x4E.  0 = legacy. */
+    uint8_t  cd_combine;
+    /* Vert-tri vertex Y is Q12.4 subpixel instead of an integer scanline
+     * (control bit 31, INCLUDE_DIRECT_COLOR-gated; decoded as data[31] in
+     * gpu_core.v -> spanprod_subpix_y, consumed by gpu_edge_walker.v).
+     * 0 = legacy integer Y. */
+    uint8_t  subpix_y;
 } of_gpu_tri_state_t;
 
 /* 0x4A serves BOTH sticky-state consumers — 0x4B (HW plane derivation)
@@ -1634,9 +1654,15 @@ static inline void of_gpu_set_tri_state(const of_gpu_tri_state_t *st) {
                                                 : OF_GPU_PARAM_ATTR_PERSP) << 12)
                      | ((uint32_t)OF_GPU_PARAM_AXIS_X << 16)
                      | ((uint32_t)OF_GPU_PARAM_RECORD_U16V16_COUNT16 << 20)
-                     | (((uint32_t)st->z_mode & 0x0Fu) << 24);
+                     | (((uint32_t)st->z_mode & 0x0Fu) << 24)
+                     | ((uint32_t)(st->mirror_s & 1u) << 28)   /* G_TX_MIRROR S (ctl[28]) */
+                     | ((uint32_t)(st->mirror_t & 1u) << 29)   /* G_TX_MIRROR T (ctl[29]) */
+                     | ((uint32_t)(st->cd_combine & 1u) << 30) /* texel*C+D combine (ctl[30]) */
+                     | ((uint32_t)(st->subpix_y & 1u) << 31);  /* Q12.4 subpixel Y (ctl[31]) */
 
-    _gpu_cmd_header(GPU_CMD_SET_TRI_STATE, 16);
+    /* 17-word 0x4A: word 16 carries the OF_GPU_SPAN_BLEND src alpha (RTL accepts
+     * 16- or 17-word; const_alpha is ignored unless OF_GPU_SPAN_BLEND is set). */
+    _gpu_cmd_header(GPU_CMD_SET_TRI_STATE, 17);
     uint32_t *w = _gpu_ring_claim();
     *w++ = st->fb_base;
     *w++ = (uint32_t)st->fb_major_step;
@@ -1654,7 +1680,8 @@ static inline void of_gpu_set_tri_state(const of_gpu_tri_state_t *st) {
     *w++ = (uint32_t)st->z_minor_step;
     *w++ = ((uint32_t)(uint16_t)st->clip_x1 << 16) | (uint16_t)st->clip_x0;
     *w++ = ((uint32_t)(uint16_t)st->clip_y1 << 16) | (uint16_t)st->clip_y0;
-    _gpu_ring_commit(16u);
+    *w++ = (uint32_t)st->const_alpha;   /* w16: src alpha for OF_GPU_SPAN_BLEND */
+    _gpu_ring_commit(17u);
 }
 
 /* One triangle: x[] in signed Q12.4 subpixels, y[] integer scanlines,
@@ -1756,12 +1783,15 @@ static inline void of_gpu_draw_xform_tri(const int32_t vx[3], const int32_t vy[3
 static inline void of_gpu_draw_vert_tri_rgb(const int16_t x[3], const int16_t y[3],
                                             const int32_t s[3], const int32_t t[3],
                                             const int32_t zi[3], const uint16_t rgb[3],
-                                            uint32_t q29, const int32_t depth[3]) {
+                                            uint32_t q29, const int32_t depth[3],
+                                            const uint16_t *rgb_d /* NULL=19-word legacy */) {
 #ifndef OF_PC
     if (!of_has_feature(OF_HW_GPU_VERT_TRI) || !of_has_feature(OF_HW_GPU_VCOLOR))
         return;
 #endif
-    _gpu_cmd_header(GPU_CMD_DRAW_VERT_TRI_RGB, 19);
+    uint32_t n = rgb_d ? 19u : 17u;  /* shrunk: dead q29 word dropped, 3 RGB565 packed -> 2 words */
+    (void)q29;                        /* q29 kept in the signature for ABI, no longer emitted */
+    _gpu_cmd_header(GPU_CMD_DRAW_VERT_TRI_RGB, n);
     uint32_t *w = _gpu_ring_claim();
     *w++ = ((uint32_t)(uint16_t)y[0] << 16) | (uint16_t)x[0];
     *w++ = ((uint32_t)(uint16_t)y[1] << 16) | (uint16_t)x[1];
@@ -1769,10 +1799,12 @@ static inline void of_gpu_draw_vert_tri_rgb(const int16_t x[3], const int16_t y[
     *w++ = (uint32_t)s[0]; *w++ = (uint32_t)s[1]; *w++ = (uint32_t)s[2];
     *w++ = (uint32_t)t[0]; *w++ = (uint32_t)t[1]; *w++ = (uint32_t)t[2];
     *w++ = (uint32_t)zi[0]; *w++ = (uint32_t)zi[1]; *w++ = (uint32_t)zi[2];
-    *w++ = (uint32_t)rgb[0]; *w++ = (uint32_t)rgb[1]; *w++ = (uint32_t)rgb[2];
-    *w++ = q29;
+    /* w12-13: three RGB565 colours packed into 2 words (rgb1<<16|rgb0, then rgb2). */
+    *w++ = ((uint32_t)rgb[1] << 16) | (uint32_t)rgb[0]; *w++ = (uint32_t)rgb[2];
     *w++ = (uint32_t)depth[0]; *w++ = (uint32_t)depth[1]; *w++ = (uint32_t)depth[2];
-    _gpu_ring_commit(19u);
+    /* w17-18: per-vertex additive D (RGB565) packed 3->2 — only on the 19-word combine path. */
+    if (rgb_d) { *w++ = ((uint32_t)rgb_d[1] << 16) | (uint32_t)rgb_d[0]; *w++ = (uint32_t)rgb_d[2]; }
+    _gpu_ring_commit(n);
 }
 
 /* Truecolour sibling of of_gpu_draw_xform_tri (0x51): w0-14 identical (raw
@@ -1989,6 +2021,10 @@ typedef struct {
 
     uint8_t  attr_q29;       /* 0 = PERSP (default), 1 = PERSP_Q29 — see
                               * the non-PC definition above */
+    uint8_t  mirror_s, mirror_t;
+    uint8_t  const_alpha;
+    uint8_t  cd_combine;
+    uint8_t  subpix_y;       /* Q12.4 subpixel vert-tri Y — see the non-PC definition above */
 } of_gpu_tri_state_t;
 
 static inline void     of_gpu_init(void)                                  {}
@@ -2003,8 +2039,9 @@ static inline void     of_gpu_draw_vert_tri(const int16_t x[3], const int16_t y[
 static inline void     of_gpu_draw_vert_tri_rgb(const int16_t x[3], const int16_t y[3],
                                                 const int32_t s[3], const int32_t t[3],
                                                 const int32_t zi[3], const uint16_t rgb[3],
-                                                uint32_t q29, const int32_t depth[3])
-                                                { (void)x;(void)y;(void)s;(void)t;(void)zi;(void)rgb;(void)q29;(void)depth; }
+                                                uint32_t q29, const int32_t depth[3],
+                                                const uint16_t *rgb_d)
+                                                { (void)x;(void)y;(void)s;(void)t;(void)zi;(void)rgb;(void)q29;(void)depth;(void)rgb_d; }
 static inline void     of_gpu_draw_xform_tri_rgb(const int32_t vx[3], const int32_t vy[3],
                                                  const int32_t vz[3], const int32_t s[3],
                                                  const int32_t t[3], const uint16_t rgb[3])

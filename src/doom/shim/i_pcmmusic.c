@@ -1,7 +1,8 @@
 /* i_pcmmusic.c — stream PCM music from a WAD lump over the HW mixer, else MIDI (not upstream).
  *
  * Doom core only.  S_ChangeMusic's lump D_E1M1 maps to a 'P'-prefixed lump
- * (PE1M1) of raw 48 kHz / stereo / s16le PCM in a merged music WAD; present ->
+ * (PE1M1) of raw stereo s16le PCM (sample rate from the WAD's PCMINFO lump,
+ * else 48 kHz) in a merged music WAD; present ->
  * stream it, absent -> the OPL/MIDI module keeps playing.
  *
  * Playback model (mirrors Quake's cd_of.c, which never underruns): two mono HW
@@ -29,6 +30,7 @@
 #include "doomtype.h"
 #include "doomdef.h"      /* gameaction_t / ga_savegame / ga_loadgame */
 #include "i_sound.h"
+#include "m_argv.h"       /* -pcmwad override */
 #include "w_wad.h"
 #include "w_file.h"
 
@@ -42,27 +44,30 @@
 #include "of_timer.h"
 #include "of_video.h"
 
-#define PCM_WAD         "DOOMMUS.WAD"
-#define MUS_RATE        48000          /* source + voice rate (no resample) */
+#define PCM_WAD_DEFAULT "DOOMMUS.WAD"  /* used unless -pcmwad <file> overrides it */
+#define MUS_RATE_MAX     48000         /* output rate; ring arrays are sized for this */
+#define MUS_RATE_DEFAULT 48000         /* assumed when the WAD has no PCMINFO lump (old DOOMMUS.WAD) */
 #define MUS_CHANNELS    2
 #define MUS_BYTES_FRAME (MUS_CHANNELS * (int)sizeof(int16_t))   /* 4 */
-#define RING_SECONDS    8              /* refill slack: must outlast on-demand WAD reads
+#define RING_SECONDS    5              /* refill slack: must outlast on-demand WAD reads
                                         * starving the music DMA during early gameplay (4 s
                                         * underran -> ring laps -> music jumps to the start) */
-#define RING_FRAMES     (MUS_RATE * RING_SECONDS)
+#define RING_FRAMES_MAX (MUS_RATE_MAX * RING_SECONDS)
 #define STAGING_FRAMES  4096           /* one sync read+deinterleave pass */
 #define CHUNK_FRAMES    1024           /* normal async read (4 KB): ~one frame's worth, so the fold is
                                         * a flat per-frame trickle (no jitter). */
 #define CHUNK_FRAMES_HI 2048           /* fall back to 8 KB only while the ring is running low, to
                                         * catch up faster -- without paying the bigger fold all the
                                         * time.  Must stay <= 32 KB (the OS SDRAM-direct cap). */
-#define CD_LOW_FRAMES   (RING_FRAMES / 4)  /* "running low" threshold (~2 s of the 8 s ring) */
+#define CD_LOW_FRAMES   (ring_frames / 4)  /* "running low" threshold (~1.25 s of the 5 s ring) */
 #define MUS_PRIORITY    200
 #define PRESENT_STALE_US 250000u       /* no scanout for this long == OSD/stall */
 
-/* Output boost: the mixer master is already at its 255 max, so an extra +50%
- * is a software gain on the samples, hard-clamped so peaks limit (not wrap). */
-#define MASTER_GAIN_NUM 15
+/* Output gain on the music samples, hard-clamped so peaks limit (not wrap).
+ * Unity (1.0): the PCM is pre-mastered (loudnorm) with -1 dBTP headroom, so any
+ * boost here would only clip the already-hot transients (e.g. drums). Master
+ * loudness offline, not at runtime. */
+#define MASTER_GAIN_NUM 10
 #define MASTER_GAIN_DEN 10
 
 static inline int16_t gain_clamp(int s)
@@ -96,13 +101,16 @@ static unsigned    pcm_size;           /* lump byte length (whole frames) */
 static unsigned    pcm_rd;             /* sync read cursor within the lump */
 
 /* deinterleaved SDRAM rings (+1 guard frame mirrors [0] for the loop seam) */
-static int16_t     ringL[RING_FRAMES + 1];
-static int16_t     ringR[RING_FRAMES + 1];
+static int16_t     ringL[RING_FRAMES_MAX + 1];
+static int16_t     ringR[RING_FRAMES_MAX + 1];
 static int16_t     staging[STAGING_FRAMES * MUS_CHANNELS] __attribute__((aligned(8)));
 static int         write_pos;          /* next ring frame to fill */
 static int         last_pos;           /* play cursor at previous refill */
 static int         last_vol;           /* last group volume pushed (0..255) */
 static int         ring_valid;         /* real (non-silence) frames ahead of cursor */
+
+static int         mus_rate    = MUS_RATE_DEFAULT;  /* voice rate: PCMINFO lump or default */
+static int         ring_frames = RING_FRAMES_MAX;   /* active ring length = mus_rate * RING_SECONDS */
 
 static of_mixer_handle_t vL = OF_MIXER_HANDLE_INVALID;
 static of_mixer_handle_t vR = OF_MIXER_HANDLE_INVALID;
@@ -180,7 +188,7 @@ static void ring_write(const int16_t *src, int frames)
     while (done < frames)
     {
         int w = write_pos;
-        int contig = RING_FRAMES - w;
+        int contig = ring_frames - w;
         int batch = frames - done;
         int i;
 
@@ -198,13 +206,13 @@ static void ring_write(const int16_t *src, int frames)
 
         if (w == 0)
         {
-            ringL[RING_FRAMES] = ringL[0];
-            ringR[RING_FRAMES] = ringR[0];
-            of_cache_flush_range(&ringL[RING_FRAMES], sizeof(int16_t));
-            of_cache_flush_range(&ringR[RING_FRAMES], sizeof(int16_t));
+            ringL[ring_frames] = ringL[0];
+            ringR[ring_frames] = ringR[0];
+            of_cache_flush_range(&ringL[ring_frames], sizeof(int16_t));
+            of_cache_flush_range(&ringR[ring_frames], sizeof(int16_t));
         }
 
-        write_pos = (w + batch) % RING_FRAMES;
+        write_pos = (w + batch) % ring_frames;
         done += batch;
     }
 }
@@ -294,7 +302,7 @@ static int cd_issue(void)
     frames = want;
     if ((unsigned)frames * MUS_BYTES_FRAME > remain)
         frames = (int)(remain / MUS_BYTES_FRAME);
-    space = RING_FRAMES - ring_valid;
+    space = ring_frames - ring_valid;
     if (frames > space)             /* never write past the play cursor */
         frames = space;
     if (frames <= 0)
@@ -363,27 +371,54 @@ void I_PCM_Stop(void)
     pcm_ended = 0;
 }
 
+/* Music WAD filename: -pcmwad <file> overrides the default, so each instance can
+ * ship its own (DOOM1MUS.WAD, DOOM2MUS.WAD, ...) without colliding in common/. */
+static const char *pcm_wad_name(void)
+{
+    int p = M_CheckParmWithArgs("-pcmwad", 1);
+    return (p > 0) ? myargv[p + 1] : PCM_WAD_DEFAULT;
+}
+
 /* Merge the optional music WAD + set up async refill on first use (graceful if
  * the WAD or async support is absent). */
 static void pcm_ensure_init(void)
 {
+    const char *wad;
+
     if (pcm_checked)
         return;
     pcm_checked = 1;
 
-    if (W_AddFile(PCM_WAD) == NULL)
+    wad = pcm_wad_name();
+    if (W_AddFile(wad) == NULL)
     {
-        /* printf("CD music: %s absent, MIDI only\n", PCM_WAD); */  /* UART silenced for jitter test */
+        /* printf("CD music: %s absent, MIDI only\n", wad); */  /* UART silenced for jitter test */
         return;
     }
     W_GenerateHashTable();
     pcm_ready = 1;
 
+    /* Optional PCMINFO lump: little-endian <u32 sample_rate>[<u32 channels>].
+     * Absent -> default rate, so an old headerless 48 kHz DOOMMUS.WAD stays valid. */
+    {
+        lumpindex_t ri = W_CheckNumForName("PCMINFO");
+        if (ri >= 0)
+        {
+            lumpinfo_t *rl = lumpinfo[ri];
+            uint32_t    rate = 0;
+            if (rl != NULL && rl->size >= 4
+                && W_Read(rl->wad_file, (unsigned)rl->position, &rate, 4) == 4
+                && rate >= 8000 && rate <= (uint32_t)MUS_RATE_MAX)
+                mus_rate = (int)rate;
+        }
+    }
+    ring_frames = mus_rate * RING_SECONDS;
+
 #ifndef OF_PC
     if (pcm_async_enabled)
     {
         uint32_t slot;
-        if (of_file_slot_find(PCM_WAD, &slot) == 0)
+        if (of_file_slot_find(wad, &slot) == 0)
         {
             /* DMA straight into SDRAM via the uncached alias (the OS routes
              * uncached-SDRAM dests through the 32 KB direct path).  cd_fold then
@@ -396,7 +431,7 @@ static void pcm_ensure_init(void)
         }
     }
 #endif
-    /* printf("CD music: %s loaded (%s refill)\n", PCM_WAD,
+    /* printf("CD music: %s loaded (%s refill)\n", wad,
               cd_stage ? "async DMA" : "sync"); */  /* UART silenced for jitter test */
 }
 
@@ -430,7 +465,7 @@ int I_PCM_TryPlay(boolean looping)
     /* Prefill the whole ring synchronously (one-time at track start). */
     write_pos  = 0;
     ring_valid = 0;
-    pcm_produce(RING_FRAMES);
+    pcm_produce(ring_frames);
     write_pos  = 0;
     last_pos   = 0;
 
@@ -443,9 +478,9 @@ int I_PCM_TryPlay(boolean looping)
     pcm_present_change_us = of_time_us();
 
     vL = of_mixer_alloc_for_group_h(OF_MIXER_GROUP_MUSIC, (const uint8_t *)ringL,
-                                    RING_FRAMES, MUS_RATE, MUS_PRIORITY, 0);
+                                    ring_frames, mus_rate, MUS_PRIORITY, 0);
     vR = of_mixer_alloc_for_group_h(OF_MIXER_GROUP_MUSIC, (const uint8_t *)ringR,
-                                    RING_FRAMES, MUS_RATE, MUS_PRIORITY, 0);
+                                    ring_frames, mus_rate, MUS_PRIORITY, 0);
     if (vL == OF_MIXER_HANDLE_INVALID || vR == OF_MIXER_HANDLE_INVALID)
     {
         /* printf("CD music: no free music voices, using MIDI\n"); */  /* UART silenced for jitter test */
@@ -453,8 +488,8 @@ int I_PCM_TryPlay(boolean looping)
         return 0;
     }
 
-    of_mixer_set_loop_h(vL, 0, RING_FRAMES);
-    of_mixer_set_loop_h(vR, 0, RING_FRAMES);
+    of_mixer_set_loop_h(vL, 0, ring_frames);
+    of_mixer_set_loop_h(vR, 0, ring_frames);
     of_mixer_set_vol_lr_h(vL, 255, 0);
     of_mixer_set_vol_lr_h(vR, 0, 255);
 
@@ -544,8 +579,8 @@ void I_PCM_Poll(void)
         }
         if (pcm_frozen)
         {
-            of_mixer_set_rate_h(vL, MUS_RATE);  /* scanout resumed — unfreeze */
-            of_mixer_set_rate_h(vR, MUS_RATE);
+            of_mixer_set_rate_h(vL, mus_rate);  /* scanout resumed — unfreeze */
+            of_mixer_set_rate_h(vR, mus_rate);
             pcm_frozen = 0;
         }
 
@@ -572,9 +607,9 @@ void I_PCM_Poll(void)
         pos = of_mixer_get_position_h(vL);
         if (pos >= 0)
         {
-            consumed = (pos - last_pos + RING_FRAMES) % RING_FRAMES;
-            if (consumed >= RING_FRAMES)
-                consumed = RING_FRAMES - 1;
+            consumed = (pos - last_pos + ring_frames) % ring_frames;
+            if (consumed >= ring_frames)
+                consumed = ring_frames - 1;
             last_pos = pos;
 
             if (!pcm_paused)
@@ -595,7 +630,7 @@ void I_PCM_Poll(void)
             {
                 /* Issue the next read once the cursor freed a whole chunk. */
                 if (!cd_pending && !pcm_ended &&
-                    RING_FRAMES - ring_valid >= cd_chunk)
+                    ring_frames - ring_valid >= cd_chunk)
                     cd_issue();
 
                 if (!cd_async_ok)            /* async dropped mid-stream */

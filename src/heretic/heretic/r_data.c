@@ -292,18 +292,37 @@ byte *R_GetColumn(int tex, int col)
  * free); a per-level byte budget caps zone pressure - over budget,
  * callers fall back to column emission.
  * ================================================================ */
-#define GPU_WALL_TEX2D_BUDGET (2 * 1024 * 1024)
+#define GPU_WALL_TEX2D_BUDGET (9 * 1024 * 1024)
+#define GPU_MASKED_TEX2D_BUDGET (2 * 1024 * 1024)
+/* Past this many built block bytes, guard each further block on real zone
+ * headroom (Z_FreeMemory) so a texture-heavy map can't OOM the unguarded
+ * composite/lump/gameplay allocations -- it falls back to the CPU column path
+ * instead.  The first GUARD_FLOOR bytes are always safe (the old conservative
+ * budget), so typical maps pay no Z_FreeMemory cost. */
+#define GPU_TEX2D_GUARD_FLOOR (2 * 1024 * 1024)
+#define GPU_TEX2D_ZONE_RESERVE (8 * 1024 * 1024)
 #define GPU_WALL_TEX2D_PAD 128
 
 static byte **gpu_wall_tex2d;
 static int gpu_wall_tex2d_budget;
 static byte **gpu_masked_tex2d;
+static int gpu_masked_tex2d_budget;
+static int gpu_tex2d_dropped;    /* blocks over budget / zone-tight -> CPU (diag) */
 
 /* Per-level persistent flat data (PU_LEVEL, flushed once at precache).  Without
  * it R_DrawPlanes re-caches + deferred-releases each visible flat every frame,
  * which churns the purgeable cache and drains the GPU on rotation (hiccups).
  * Mirrors the Doom core's flatlumpdata[]. */
 static byte **flatlumpdata;
+
+/* True if building `size` more block bytes would leave the zone too tight for
+ * the rest of precache + gameplay.  Only consults Z_FreeMemory past the safe
+ * floor, so light maps stay fast to load. */
+static boolean R_Tex2DZoneTight(int used, int size)
+{
+    return used >= GPU_TEX2D_GUARD_FLOOR
+        && Z_FreeMemory() < size + GPU_TEX2D_ZONE_RESERVE;
+}
 
 byte *R_GetWallTexture2D(int texnum)
 {
@@ -326,8 +345,12 @@ byte *R_GetWallTexture2D(int texnum)
     height = texture->height;
     size = width * height + GPU_WALL_TEX2D_PAD;
 
-    if (size > gpu_wall_tex2d_budget)
+    if (size > gpu_wall_tex2d_budget
+        || R_Tex2DZoneTight(GPU_WALL_TEX2D_BUDGET - gpu_wall_tex2d_budget, size))
+    {
+        gpu_tex2d_dropped++;
         return NULL;
+    }
 
     block = Z_Malloc(size, PU_LEVEL, &gpu_wall_tex2d[texnum]);
     gpu_wall_tex2d_budget -= size;
@@ -378,11 +401,15 @@ byte *R_GetMaskedTexture2D(int texnum)
             return NULL;
 
     size = width * height + GPU_WALL_TEX2D_PAD;
-    if (size > gpu_wall_tex2d_budget)
+    if (size > gpu_masked_tex2d_budget
+        || R_Tex2DZoneTight(GPU_MASKED_TEX2D_BUDGET - gpu_masked_tex2d_budget, size))
+    {
+        gpu_tex2d_dropped++;
         return NULL;
+    }
 
     block = Z_Malloc(size, PU_LEVEL, &gpu_masked_tex2d[texnum]);
-    gpu_wall_tex2d_budget -= size;
+    gpu_masked_tex2d_budget -= size;
     memset(block, 0, size);
 
     for (x = 0; x < width; x++)
@@ -415,7 +442,7 @@ byte *R_GetMaskedTexture2D(int texnum)
  * block + x*height, transparent texels zero).  Records cover only post
  * extents, so the zeros are never sampled except at clamped boundary
  * roundings. */
-#define GPU_SPRITE_TEX2D_BUDGET (2 * 1024 * 1024)
+#define GPU_SPRITE_TEX2D_BUDGET (9 * 1024 * 1024)
 
 static byte **gpu_sprite_tex2d;
 static int gpu_sprite_tex2d_budget;
@@ -443,8 +470,12 @@ byte *R_GetSpriteTexture2D(int spritelump)
         return NULL;
     size = width * height;
 
-    if (size > gpu_sprite_tex2d_budget)
+    if (size > gpu_sprite_tex2d_budget
+        || R_Tex2DZoneTight(GPU_SPRITE_TEX2D_BUDGET - gpu_sprite_tex2d_budget, size))
+    {
+        gpu_tex2d_dropped++;
         return NULL;
+    }
 
     block = Z_Malloc(size, PU_LEVEL, &gpu_sprite_tex2d[spritelump]);
     gpu_sprite_tex2d_budget -= size;
@@ -566,6 +597,7 @@ void R_InitTextures(void)
     gpu_wall_tex2d_budget = GPU_WALL_TEX2D_BUDGET;
     gpu_masked_tex2d = Z_Malloc(numtextures * sizeof(*gpu_masked_tex2d), PU_STATIC, 0);
     memset(gpu_masked_tex2d, 0, numtextures * sizeof(*gpu_masked_tex2d));
+    gpu_masked_tex2d_budget = GPU_MASKED_TEX2D_BUDGET;
     textureheight = Z_Malloc(numtextures * sizeof(fixed_t), PU_STATIC, 0);
 
     for (i = 0; i < numtextures; i++, directory++)
@@ -876,6 +908,8 @@ void R_PrecacheLevel(void)
      * cache restarts from a full budget each level (openfpgaOS). */
     gpu_wall_tex2d_budget = GPU_WALL_TEX2D_BUDGET;
     gpu_sprite_tex2d_budget = GPU_SPRITE_TEX2D_BUDGET;
+    gpu_masked_tex2d_budget = GPU_MASKED_TEX2D_BUDGET;
+    gpu_tex2d_dropped = 0;
     /* Previous level's PU_LEVEL flat lumps were freed; clear the stale pointers. */
     if (flatlumpdata != NULL)
         memset(flatlumpdata, 0, numflats * sizeof(*flatlumpdata));
@@ -888,8 +922,9 @@ void R_PrecacheLevel(void)
     thinker_t *th;
     spriteframe_t *sf;
 
-    if (demoplayback)
-        return;
+    /* Vanilla skips precache during demo playback, but the GPU renderer needs
+     * the level's 2D blocks prebuilt -- without them the attract demos draw
+     * through lazy mid-frame builds (GPU drains).  So precache for demos too. */
 
 //
 // precache flats
@@ -901,6 +936,10 @@ void R_PrecacheLevel(void)
         flatpresent[sectors[i].floorpic] = 1;
         flatpresent[sectors[i].ceilingpic] = 1;
     }
+
+    /* flattranslation[] cycles through frames on no sector; cover whole
+     * animation ranges so no frame pays a lazy load + flush mid-frame. */
+    P_ExpandAnimatedFlatPresence(flatpresent, numflats);
 
     flatmemory = 0;
     for (i = 0; i < numflats; i++)
@@ -929,6 +968,11 @@ void R_PrecacheLevel(void)
     }
 
     texturepresent[skytexture] = 1;
+    // Reveal each switch's pressed state first, then expand animations (so an
+    // animated switch face also gets all its frames), so a swapped-in texture
+    // is GPU-resident instead of a lazy mid-frame build on first sight.
+    P_ExpandSwitchTexturePresence(texturepresent, numtextures);
+    P_ExpandAnimatedTexturePresence(texturepresent, numtextures);
 
     texturememory = 0;
     for (i = 0; i < numtextures; i++)
@@ -950,6 +994,37 @@ void R_PrecacheLevel(void)
 
     Z_Free(texturepresent);
 
+    /* Prebuild the masked 2D blocks for 2-sided midtextures (and their
+     * switch/animation frames): the masked path otherwise builds them
+     * lazily on first sight, a mid-frame GPU drain. */
+    {
+        char *maskedpre = Z_Malloc(numtextures, PU_STATIC, NULL);
+
+        memset(maskedpre, 0, numtextures);
+        for (i = 0; i < numlines; i++)
+        {
+            if (lines[i].backsector == NULL)
+                continue;
+            for (j = 0; j < 2; j++)
+            {
+                int sn = lines[i].sidenum[j];
+                int mt;
+
+                if (sn < 0)
+                    continue;
+                mt = sides[sn].midtexture;
+                if (mt > 0 && mt < numtextures)
+                    maskedpre[mt] = 1;
+            }
+        }
+        P_ExpandSwitchTexturePresence(maskedpre, numtextures);
+        P_ExpandAnimatedTexturePresence(maskedpre, numtextures);
+        for (i = 0; i < numtextures; i++)
+            if (maskedpre[i])
+                R_GetMaskedTexture2D(i);
+        Z_Free(maskedpre);
+    }
+
 //
 // precache sprites
 //
@@ -960,6 +1035,37 @@ void R_PrecacheLevel(void)
     {
         if (th->function == P_MobjThinker)
             spritepresent[((mobj_t *) th)->sprite] = 1;
+    }
+
+    /* Sprites the player spawns by firing aren't live thinkers at level start,
+     * so the walk above misses them -> the first shot pays a lazy GPU build
+     * mid-frame (a hiccup).  Mark each weapon's (both tome levels) view + flash
+     * sprites and the universal impact/projectile effects. */
+    for (i = 0; i < NUMWEAPONS; i++)
+    {
+        spritepresent[states[wpnlev1info[i].readystate].sprite]   = 1;
+        spritepresent[states[wpnlev1info[i].atkstate].sprite]     = 1;
+        spritepresent[states[wpnlev1info[i].holdatkstate].sprite] = 1;
+        spritepresent[states[wpnlev1info[i].flashstate].sprite]   = 1;
+        spritepresent[states[wpnlev2info[i].readystate].sprite]   = 1;
+        spritepresent[states[wpnlev2info[i].atkstate].sprite]     = 1;
+        spritepresent[states[wpnlev2info[i].holdatkstate].sprite] = 1;
+        spritepresent[states[wpnlev2info[i].flashstate].sprite]   = 1;
+    }
+    {
+        static const spritenum_t fx[] = {
+            SPR_PUF1, SPR_PUF2, SPR_PUF3, SPR_PUF4,  /* gauntlet/goldwand/staff puffs */
+            SPR_FX17,                                /* blaster puff */
+            SPR_BLOD,                                /* blood */
+            SPR_ACLO, SPR_FX18,                      /* blaster PL2 bolt + rippers */
+            SPR_FX01,                                /* gold wand PL2 */
+            SPR_FX03,                                /* crossbow */
+            SPR_FX00, SPR_FX20,                      /* skull rod + rain */
+            SPR_FX04, SPR_FX09,                      /* phoenix rod PL1/PL2 */
+            SPR_FX02,                                /* mace */
+        };
+        for (j = 0; j < (int)(sizeof(fx) / sizeof(fx[0])); j++)
+            spritepresent[fx[j]] = 1;
     }
 
     spritememory = 0;

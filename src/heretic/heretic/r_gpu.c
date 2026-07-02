@@ -255,11 +255,6 @@ int R_GPU_TranslationSlot(const byte *translation)
     (void)translation;
     return -1;
 }
-boolean R_GPU_DeferLumpRelease(int lumpnum)
-{
-    (void)lumpnum;
-    return false;
-}
 
 #else
 
@@ -290,7 +285,6 @@ static uint8_t *gpu_draw_fb;
 static uint8_t *gpu_draw_render_base;
 static uintptr_t gpu_framebuffer_delta;
 
-#define GPU_DEFERRED_LUMPS 64
 #define GPU_COLUMN_BATCH_LANES 16
 #define GPU_AFFINE_BATCH_LANES OF_GPU_AFFINE_SPAN_GROUP_MAX_LANES
 #define GPU_COLUMN_LIST_BATCH_LANES OF_GPU_COLUMN_LIST_MAX_LANES
@@ -299,8 +293,6 @@ static uintptr_t gpu_framebuffer_delta;
     ((SCREENWIDTH * SCREENHEIGHT + GPU_FB_CACHE_LINE_BYTES - 1u) \
      / GPU_FB_CACHE_LINE_BYTES)
 #define GPU_FB_CACHE_WORDS ((GPU_FB_CACHE_LINES + 31u) / 32u)
-static int gpu_deferred_lumps[GPU_DEFERRED_LUMPS];
-static int gpu_deferred_lump_count;
 static of_gpu_affine_span_group_t gpu_affine_batch;
 static int gpu_affine_batch_count;
 static int gpu_affine_batch_is_column;
@@ -385,7 +377,6 @@ static void gpu_flush_plane_batch(void);
 static void gpu_flush_wall_batch(void);
 static void gpu_flush_sprite_batch(void);
 static void gpu_flush_draw_batches(void);
-static void gpu_release_deferred_lumps(void);
 static void gpu_prepare_for_gpu_write(void);
 
 /* ================================================================
@@ -867,7 +858,6 @@ static int gpu_prepare_framebuffer_for_cpu(void)
     gpu_record_debug_snapshot();
     gpu_pending = 0;
     gpu_framebuffer_cpu_ready = 1;
-    gpu_release_deferred_lumps();
     return 1;
 }
 
@@ -899,7 +889,6 @@ static int gpu_acquire_draw_buffer(void)
     gpu_pending = 0;
     gpu_framebuffer_cpu_ready = 1;
     gpu_write_prepared = 0;
-    gpu_release_deferred_lumps();
     gpu_clear_pending_acquire();
 
     if (gpu_draw_idx < 0)
@@ -909,13 +898,6 @@ static int gpu_acquire_draw_buffer(void)
     }
 
     return 1;
-}
-
-static void gpu_release_deferred_lumps(void)
-{
-    for (int i = 0; i < gpu_deferred_lump_count; i++)
-        W_ReleaseLumpNum(gpu_deferred_lumps[i]);
-    gpu_deferred_lump_count = 0;
 }
 
 static inline int __attribute__((always_inline))
@@ -1446,7 +1428,6 @@ static void gpu_finish_pending(void)
         R_Perf_EndStage(R_PERF_STAGE_CACHE, cache_start);
     }
 
-    gpu_release_deferred_lumps();
 }
 
 static void gpu_prepare_for_gpu_write(void)
@@ -1658,7 +1639,6 @@ void R_GPU_Init(void)
     gpu_draw_fb = NULL;
     gpu_draw_render_base = NULL;
     gpu_framebuffer_delta = 0;
-    gpu_deferred_lump_count = 0;
     gpu_affine_batch_count = 0;
     gpu_affine_batch_is_column = 0;
     gpu_column_batch_count = 0;
@@ -1942,7 +1922,6 @@ void R_GPU_EndFrame(void)
     }
     gpu_frame_active = 0;
     gpu_write_prepared = 0;
-    gpu_release_deferred_lumps();
 }
 
 void R_GPU_PrepareForCPUAccess(void)
@@ -3037,28 +3016,6 @@ void R_GPU_EndCPUSprite(void)
         return;
 
     of_cache_flush_range(band, size);
-}
-
-boolean R_GPU_DeferLumpRelease(int lumpnum)
-{
-    if (!gpu_present || !gpu_frame_active ||
-        (!gpu_pending && !gpu_has_pending_draw_batches()))
-        return false;
-
-    for (int i = 0; i < gpu_deferred_lump_count; i++)
-    {
-        if (gpu_deferred_lumps[i] == lumpnum)
-            return true;
-    }
-
-    if (gpu_deferred_lump_count == GPU_DEFERRED_LUMPS)
-    {
-        gpu_finish_pending();
-        return false;
-    }
-
-    gpu_deferred_lumps[gpu_deferred_lump_count++] = lumpnum;
-    return true;
 }
 
 #endif

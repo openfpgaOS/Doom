@@ -10,6 +10,7 @@
             { "id": 2, "filename": "plutonia.ini" },
             { "id": 3, "filename": "doom.elf" },
             { "id": 4, "filename": "PLUTONIA.WAD" },
+            { "id": 5, "filename": "DOOM2MUS.WAD" },
             { "id": 7, "filename": "bank.ofsf" },
             { "id": 9, "filename": "plutonia/Plutonia.cfg" },
             { "id": 10, "filename": "plutonia/Plutonia_0.sav" },

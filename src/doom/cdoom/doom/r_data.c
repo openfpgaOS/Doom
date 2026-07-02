@@ -1073,10 +1073,13 @@ int R_FlatNumForName(const char *name)
     return i - firstflat;
 }
 
-byte *R_GetFlatData(int flatnum, boolean permanent)
+/* Level-resident flat data: precache loads every present flat (animation
+ * frames included) PU_LEVEL; a runtime miss loads + pins the same way.  Flats
+ * are never re-cached or released per frame -- a purgeable tag under a live
+ * flatlumpdata[] pointer would dangle when the zone purges it. */
+byte *R_GetFlatData(int flatnum)
 {
     byte *data;
-    int lump;
 
     if (flatnum < 0 || flatnum >= numflats)
         I_Error("R_GetFlatData: bad flat %i", flatnum);
@@ -1084,11 +1087,8 @@ byte *R_GetFlatData(int flatnum, boolean permanent)
     if (flatlumpdata[flatnum] != NULL)
         return flatlumpdata[flatnum];
 
-    lump = firstflat + flatnum;
-    data = W_CacheLumpNum(lump, permanent ? PU_LEVEL : PU_STATIC);
-
-    if (permanent)
-        flatlumpdata[flatnum] = data;
+    data = W_CacheLumpNum(firstflat + flatnum, PU_LEVEL);
+    flatlumpdata[flatnum] = data;
 
     return data;
 }
@@ -1194,6 +1194,13 @@ static void R_CreateTextures (void)
                 masked[mt] = 1;
         }
     }
+    /* The masked path draws texturetranslation[midtexture], and a switch flip
+     * swaps sides[].midtexture to the paired face -- every animation frame /
+     * switch pair of a masked midtexture is masked too.  Without this, those
+     * frames' redirected (post-less) columns get walked as posts: garbage
+     * stripes and runaway post walks (the E2M5 fire-curtain slowdown). */
+    P_ExpandSwitchTexturePresence(masked, numtextures);
+    P_ExpandAnimatedTexturePresence(masked, numtextures);
 
     for (i = 0; i < numtextures; i++)
     {
@@ -1417,6 +1424,27 @@ void R_PrecacheLevel (void)
 	    spritepresent[((mobj_t *)th)->sprite] = 1;
     }
 	
+    /* Sprites the player spawns by firing aren't live thinkers at level start,
+     * so the walk above misses them -> the first shot pays a lazy GPU build
+     * mid-frame (a hiccup).  Mark each weapon's view + flash sprites and the
+     * universal impact/projectile effects. */
+    for (i=0 ; i<NUMWEAPONS ; i++)
+    {
+	spritepresent[states[weaponinfo[i].readystate].sprite] = 1;
+	spritepresent[states[weaponinfo[i].atkstate].sprite]   = 1;
+	spritepresent[states[weaponinfo[i].flashstate].sprite] = 1;
+	spritepresent[states[weaponinfo[i].upstate].sprite]    = 1;
+	spritepresent[states[weaponinfo[i].downstate].sprite]  = 1;
+    }
+    {
+	static const spritenum_t fx[] = {
+	    SPR_PUFF, SPR_BLUD, SPR_MISL, SPR_PLSS, SPR_PLSE,
+	    SPR_BFS1, SPR_BFE1, SPR_BFE2, SPR_TFOG, SPR_IFOG,
+	};
+	for (j=0 ; j<(int)(sizeof(fx)/sizeof(fx[0])) ; j++)
+	    spritepresent[fx[j]] = 1;
+    }
+
     spritememory = 0;
     for (i=0 ; i<numsprites ; i++)
     {

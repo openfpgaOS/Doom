@@ -293,6 +293,60 @@ void P_InitPicAnims(void)
     }
 }
 
+/* Mark every frame of any animation with a marked member: the renderer draws
+ * texturetranslation[]/flattranslation[] frames that appear on no sidedef or
+ * sector, so precache (and the masked-midtexture set) must cover whole
+ * ranges.  Ported from the Doom core. */
+static boolean P_AnimRangeIsPresent(anim_t * anim, char *present, int count)
+{
+    int end = anim->basepic + anim->numpics;
+    int i;
+
+    if (anim->basepic < 0 || end > count)
+        return false;
+
+    for (i = anim->basepic; i < end; i++)
+    {
+        if (present[i])
+            return true;
+    }
+
+    return false;
+}
+
+static void P_ExpandAnimatedPresence(char *present, int count, boolean texture)
+{
+    anim_t *anim;
+    int i;
+
+    if (present == NULL)
+        return;
+
+    for (anim = anims; anim < lastanim; anim++)
+    {
+        int end;
+
+        if (anim->istexture != texture)
+            continue;
+        if (!P_AnimRangeIsPresent(anim, present, count))
+            continue;
+
+        end = anim->basepic + anim->numpics;
+        for (i = anim->basepic; i < end; i++)
+            present[i] = 1;
+    }
+}
+
+void P_ExpandAnimatedFlatPresence(char *present, int count)
+{
+    P_ExpandAnimatedPresence(present, count, false);
+}
+
+void P_ExpandAnimatedTexturePresence(char *present, int count)
+{
+    P_ExpandAnimatedPresence(present, count, true);
+}
+
 /*
 ==============================================================================
 

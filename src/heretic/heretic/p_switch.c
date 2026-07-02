@@ -132,6 +132,28 @@ void P_InitSwitchList(void)
     switchlist[slindex] = -1;
 }
 
+/* Mark the paired face of any marked switch texture: P_ChangeSwitchTexture
+ * swaps sides[].*texture to a face on no sidedef, so precache (and the
+ * masked-midtexture set) must cover both states.  Ported from the Doom core. */
+void P_ExpandSwitchTexturePresence(char *present, int count)
+{
+    int i;
+
+    if (present == NULL)
+        return;
+
+    for (i = 0; i < numswitches * 2; i += 2)
+    {
+        int a = switchlist[i];
+        int b = switchlist[i + 1];
+
+        if (a < 0 || b < 0 || a >= count || b >= count)
+            continue;
+        if (present[a] || present[b])
+            present[a] = present[b] = 1;
+    }
+}
+
 //==================================================================
 //
 //      Start a button counting down till it turns off.

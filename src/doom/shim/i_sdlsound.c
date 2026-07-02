@@ -175,10 +175,7 @@ static void I_SDL_UpdateSound(void)
     I_OpenFPGAMixerPump();
 }
 
-/* Doom volume: 0..127, sep: 0..254 (0=left, 128=center, 254=right).
- * The target mixer output is physically reversed for SFX, so hand the
- * mixer the opposite channel volumes while keeping Doom's sep semantics
- * intact above this layer. */
+/* Doom volume: 0..127, sep: 0..254 (0=left, 128=center, 254=right). */
 static void set_params(of_mixer_handle_t voice, int vol, int sep)
 {
     if (voice == OF_MIXER_HANDLE_INVALID) return;
@@ -188,7 +185,7 @@ static void set_params(of_mixer_handle_t voice, int vol, int sep)
     int right = (sep        * v) / 255;
     if (left > 255)  left  = 255;
     if (right > 255) right = 255;
-    of_mixer_set_vol_lr_h(voice, right, left);
+    of_mixer_set_vol_lr_h(voice, left, right);
 }
 
 static boolean sfx_voice_owned(of_mixer_handle_t voice)

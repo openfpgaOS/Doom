@@ -1971,6 +1971,14 @@ boolean M_Responder (event_t* ev)
     // Take care of any messages that need input
     if (messageToPrint)
     {
+	// The Pocket has no 'y'/'n' keys -- its menu runs on ENTER/ESC (A/Start).
+	// Map select -> confirm and back/cancel -> abort so Y/N prompts (e.g. the
+	// Nightmare warning) can be answered.
+	if (key == key_menu_forward)
+	    key = key_menu_confirm;
+	else if (key == key_menu_back || key == key_menu_activate)
+	    key = key_menu_abort;
+
 	if (messageNeedsInput)
         {
             if (key != ' ' && key != KEY_ESCAPE

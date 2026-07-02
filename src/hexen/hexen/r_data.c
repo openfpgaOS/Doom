@@ -878,8 +878,9 @@ void R_PrecacheLevel(void)
     thinker_t *th;
     spriteframe_t *sf;
 
-    if (demoplayback)
-        return;
+    /* Vanilla skips precache during demo playback, but the GPU renderer needs
+     * the level's 2D blocks prebuilt -- without them the attract demos draw
+     * through lazy mid-frame builds (GPU drains).  So precache for demos too. */
 
 //
 // precache flats
@@ -947,6 +948,37 @@ void R_PrecacheLevel(void)
 
     Z_Free(texturepresent);
 
+    /* Prebuild the masked 2D blocks for 2-sided midtextures (and their
+     * switch/animation frames): the masked path otherwise builds them
+     * lazily on first sight, a mid-frame GPU drain. */
+    {
+        char *maskedpre = Z_Malloc(numtextures, PU_STATIC, NULL);
+
+        memset(maskedpre, 0, numtextures);
+        for (i = 0; i < numlines; i++)
+        {
+            if (lines[i].backsector == NULL)
+                continue;
+            for (j = 0; j < 2; j++)
+            {
+                int sn = lines[i].sidenum[j];
+                int mt;
+
+                if (sn < 0)
+                    continue;
+                mt = sides[sn].midtexture;
+                if (mt > 0 && mt < numtextures)
+                    maskedpre[mt] = 1;
+            }
+        }
+        P_ExpandSwitchTexturePresence(maskedpre, numtextures);
+        P_ExpandAnimatedTexturePresence(maskedpre, numtextures);
+        for (i = 0; i < numtextures; i++)
+            if (maskedpre[i])
+                R_GetMaskedTexture2D(i);
+        Z_Free(maskedpre);
+    }
+
 //
 // precache sprites
 //
@@ -957,6 +989,30 @@ void R_PrecacheLevel(void)
     {
         if (th->function == P_MobjThinker)
             spritepresent[((mobj_t *) th)->sprite] = 1;
+    }
+
+    /* Sprites the player spawns by firing aren't live thinkers at level start,
+     * so the walk above misses them -> the first shot pays a lazy GPU build
+     * mid-frame (a hiccup).  Mark every class's weapon view + flash sprites and
+     * the universal impact/projectile effects. */
+    for (i = 0; i < NUMWEAPONS; i++)
+        for (j = 0; j < NUMCLASSES; j++)
+        {
+            spritepresent[states[WeaponInfo[i][j].readystate].sprite]   = 1;
+            spritepresent[states[WeaponInfo[i][j].atkstate].sprite]     = 1;
+            spritepresent[states[WeaponInfo[i][j].holdatkstate].sprite] = 1;
+            spritepresent[states[WeaponInfo[i][j].flashstate].sprite]   = 1;
+        }
+    {
+        static const spritenum_t fx[] = {
+            SPR_BLOD,                                /* blood */
+            SPR_FHFX, SPR_FAXE, SPR_FSFX,            /* fighter punch/hammer/axe/sword */
+            SPR_CSSF, SPR_CFFX, SPR_CFLM, SPR_SPIR,  /* cleric staff/flame/holy */
+            SPR_MWND, SPR_SHRD, SPR_MSP1, SPR_MSP2,  /* mage wand/shards/staff */
+            SPR_MLFX, SPR_MLF2,                      /* mage lightning + impact */
+        };
+        for (j = 0; j < (int)(sizeof(fx) / sizeof(fx[0])); j++)
+            spritepresent[fx[j]] = 1;
     }
 
     spritememory = 0;

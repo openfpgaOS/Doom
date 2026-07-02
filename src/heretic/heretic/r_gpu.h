@@ -128,6 +128,5 @@ void R_GPU_MaskedEnd(void);
  * Pass as SpriteBegin's cmap_slot so translated sprites draw GPU-side. */
 int R_GPU_TranslationSlot(const byte *translation);
 
-boolean R_GPU_DeferLumpRelease(int lumpnum);
 
 #endif

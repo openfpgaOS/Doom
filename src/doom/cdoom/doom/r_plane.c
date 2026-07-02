@@ -500,9 +500,7 @@ OF_FASTTEXT void R_DrawPlanes (void)
     int			x;
     int			stop;
     int			angle;
-    int                 lumpnum;
     int                 flatnum;
-    boolean             animated_flat;
     boolean             gpu_plane;
 				
 #ifdef RANGECHECK
@@ -555,9 +553,7 @@ OF_FASTTEXT void R_DrawPlanes (void)
 	
 	// regular flat
         flatnum = flattranslation[pl->picnum];
-        animated_flat = P_IsAnimatedFlat(flatnum);
-        lumpnum = firstflat + flatnum;
-	ds_source = R_GetFlatData(flatnum, animated_flat);
+	ds_source = R_GetFlatData(flatnum);
 	R_GPU_UseFlatTexture(flatnum);
 
 	planeheight = abs(pl->height-viewz);
@@ -608,8 +604,5 @@ OF_FASTTEXT void R_DrawPlanes (void)
 
 	if (gpu_plane)
 	    R_GPU_EndPlaneSpans();
-
-        if (!animated_flat && !R_GPU_DeferLumpRelease(lumpnum))
-            W_ReleaseLumpNum(lumpnum);
     }
 }
