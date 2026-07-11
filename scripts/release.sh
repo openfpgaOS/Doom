@@ -89,7 +89,11 @@ PY
 
 TAG="$CORE$PLATFORM_TAG_SUFFIX-v$VERSION"
 TITLE="$DISPLAY for $PLATFORM_PRODUCT v$VERSION"
-ZIP="$SDK_DIR/releases/$TARGET/$CORE-v$VERSION.zip"
+# Zip basename must match platforms/$TARGET/package.sh: the bundled demo core
+# "sdk" ships as "openfpgaOS-SDK".  Keep this rename in sync with package.sh.
+ZIP_LABEL="$CORE"
+[ "$ZIP_LABEL" = "sdk" ] && ZIP_LABEL="openfpgaOS-SDK"
+ZIP="$SDK_DIR/releases/$TARGET/$ZIP_LABEL-v$VERSION.zip"
 
 [ -f "$ZIP" ] || err "asset $ZIP not found — run 'make package CORE=$CORE' first."
 

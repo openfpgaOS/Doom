@@ -19,12 +19,48 @@ Three classic id Tech 1 / Raven shooters packaged as standalone openFPGA cores, 
 
 ---
 
-## ⬇️ Download & install
+## ⬇️ Download & install (Analogue Pocket)
 
 1. Grab the ZIP for the game you want from the **[Releases page](https://github.com/openfpgaOS/Doom/releases)** — each core publishes as `<game>-v<version>.zip`.
 2. Extract it to the **root of your Pocket's SD card**, merging folders when prompted.
 3. Drop your IWAD into the core's asset folder on the SD card:
    `Assets/<game>/common/<GAME>.WAD` — e.g. `Assets/hexen/common/HEXEN.WAD`.
+
+---
+
+## 🖥️ MiSTer
+
+Doom (and the whole Doom II / Final Doom / freeware-megawad family) also runs on
+**MiSTer** through the game-agnostic **openfpgaOS** core. The core is installed
+once; each game is a self-contained bundle that drops into
+`games/OpenfpgaOS/`, and your saves live on a **separate volume** so an engine
+update never touches them.
+
+1. **Install the core once** from the game-agnostic **openfpgaOS core release**
+   (`openfpgaos-core-v<version>.zip`, or via **MiSTer Downloader**) — it ships
+   separately from the per-game bundles: `OpenfpgaOS.rbf` →
+   `/media/fat/_Computer/`, `boot.rom` → `/media/fat/games/OpenfpgaOS/`.
+2. **Unzip** the MiSTer release into `/media/fat/games/OpenfpgaOS/` — you get one
+   `.mgl` launcher per game/mod plus a `Doom/` folder (read-only `boot.vhd`, a
+   saves template, the loose `doom.elf` engine, per-instance `.ini`s, an empty
+   `wads/`, and `setup.sh`).
+3. **Add your IWADs:** copy the commercial WADs you own (`DOOM2.WAD`,
+   `PLUTONIA.WAD`, `TNT.WAD`, …) into `games/OpenfpgaOS/Doom/wads/`. Freeware
+   WADs (Freedoom, REKKR, SIGIL) can instead be fetched automatically with
+   **MiSTer Downloader**.
+4. **Run setup once** (and again after adding WADs): copy `Doom/setup.sh` to
+   `/media/fat/Scripts/` and run it from the **Scripts** menu, or over ssh
+   `bash Doom/setup.sh Doom`. It seeds your saves image **only if absent** (your
+   saves are never overwritten) and injects your WADs into the boot image.
+5. **Play:** pick a Doom `.mgl` from the MiSTer menu.
+
+Engine updates are a single loose-file swap (`doom.elf`) — `boot.vhd` and your
+saves are left alone. Push a rebuilt engine straight to a running MiSTer with
+`make copy CORE=doom TARGET=mister`, which atomically replaces just the loose
+`doom.elf`; build a full release bundle with
+`make package CORE=doom TARGET=mister`. The full packaging/deployment flow is
+documented in the SDK's
+[`platforms/mister/PACKAGING.md`](src/sdk/platforms/mister/PACKAGING.md).
 
 ---
 

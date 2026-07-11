@@ -1,0 +1,40 @@
+# openfpgaOS — Doom freeware wad list for the MiSTer Downloader database.
+#
+# THIS IS A BUILD INPUT, NOT A DEVICE FILE.  The device never reads it.  It is
+# consumed by  src/sdk/platforms/mister/mkdb.py  at package time, which folds
+# each valid row into the generated  doom.json.zip  (the real Downloader
+# custom-database artifact).  The MiSTer Downloader then fetches these files
+# straight from their own absolute URLs onto the SD card at the given sd_path.
+#
+# Only FREEWARE wads belong here.  Commercial IWADs (DOOM.WAD, DOOM2.WAD,
+# PLUTONIA.WAD, TNT.WAD, doomu.wad) can NOT be redistributed — the user copies
+# those into  games/OpenfpgaOS/Doom/wads/  by hand and runs setup.sh.
+#
+# Freedoom is a complete free IWAD set (playable with ZERO commercial content);
+# REKKR (standalone) is a free IWAD; SIGIL / SIGIL II are free megawads (they
+# still need a commercial Ultimate Doom IWAD to run).
+#
+# Format — one wad per row, comma-separated:
+#   sd_path , url , size , md5 , tags
+#     sd_path : on-SD path relative to /media/fat (mirrors the DB layout)
+#     url     : absolute http(s) source for the exact hosted file
+#     size    : file size in bytes (integer)
+#     md5     : lowercase 32-hex MD5 of the hosted file
+#     tags    : space-separated Downloader filter tags (users can filter these
+#               out of the sync, e.g. add  filter = !freeware  in downloader.ini)
+#
+# TODO(maintainer): the size + md5 below are UNKNOWN and MUST be pinned against
+# the exact hosted artifact before release.  Rows with a TODO_ field are SKIPPED
+# by mkdb.py (with a warning) — the DB is still valid, those wads just won't be
+# offered until a real size+md5 is filled in.  Do NOT invent hashes.  Candidate
+# sources (verify the direct-download URL resolves to the bare .wad):
+#   freedoom : https://github.com/freedoom/freedoom/releases (freedoom-x.y.z.zip)
+#   rekkr    : https://www.moddb.com/mods/rekkr/downloads  (rekkrsa.wad = IWAD)
+#   sigil    : https://romero.com/sigil                    (free megawad)
+#
+sd_path,url,size,md5,tags
+games/OpenfpgaOS/Doom/wads/freedoom1.wad,https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip,TODO_SIZE,TODO_MD5,doom freedoom freeware
+games/OpenfpgaOS/Doom/wads/freedoom2.wad,https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip,TODO_SIZE,TODO_MD5,doom freedoom freeware
+games/OpenfpgaOS/Doom/wads/rekkrsa.wad,TODO_URL,TODO_SIZE,TODO_MD5,doom rekkr freeware iwad
+games/OpenfpgaOS/Doom/wads/SIGIL_COMPAT_V1_23.wad,TODO_URL,TODO_SIZE,TODO_MD5,doom sigil freeware
+games/OpenfpgaOS/Doom/wads/SIGIL_II_V1_0.WAD,TODO_URL,TODO_SIZE,TODO_MD5,doom sigil2 freeware

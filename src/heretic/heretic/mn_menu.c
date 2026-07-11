@@ -111,7 +111,6 @@ static boolean SCLoadGame(int option);
 static boolean SCSaveGame(int option);
 static boolean SCMessages(int option);
 static boolean SCSwapRunWalk(int option);
-static boolean SCRefreshMode(int option);
 static boolean SCControlScheme(int option);
 static boolean SCEndGame(int option);
 static boolean SCInfo(int option);
@@ -260,14 +259,13 @@ static MenuItem_t OptionsItems[] = {
     {ITT_LRFUNC, "MOUSE SENSITIVITY", SCMouseSensi, 0, MENU_NONE},
     {ITT_EMPTY, NULL, NULL, 0, MENU_NONE},
     {ITT_EFUNC, "MOVEMENT : ", SCSwapRunWalk, 0, MENU_NONE},
-    {ITT_EFUNC, "REFRESH : ", SCRefreshMode, 0, MENU_NONE},
     {ITT_SETMENU, "MORE...", NULL, 0, MENU_OPTIONS2}
 };
 
 static Menu_t OptionsMenu = {
     88, 30,
     DrawOptionsMenu,
-    7, OptionsItems,
+    6, OptionsItems,
     0,
     MENU_MAIN
 };
@@ -737,14 +735,6 @@ static void DrawOptionsMenu(void)
     {
         MN_DrTextB(DEH_String("WALK"), 196, 110);
     }
-    if (refresh_mode == REFRESH_MODE_VRR)
-    {
-        MN_DrTextB(DEH_String("VRR"), 196, 130);
-    }
-    else
-    {
-        MN_DrTextB(DEH_String("FIXED"), 196, 130);
-    }
 }
 
 //---------------------------------------------------------------------------
@@ -855,16 +845,6 @@ static boolean SCMessages(int option)
 static boolean SCSwapRunWalk(int option)
 {
     swap_run_walk ^= 1;
-    S_StartSound(NULL, sfx_chat);
-    M_SaveDefaults();
-    return true;
-}
-
-static boolean SCRefreshMode(int option)
-{
-    refresh_mode = refresh_mode == REFRESH_MODE_VRR
-                 ? REFRESH_MODE_FIXED
-                 : REFRESH_MODE_VRR;
     S_StartSound(NULL, sfx_chat);
     M_SaveDefaults();
     return true;

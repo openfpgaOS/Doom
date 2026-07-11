@@ -14,6 +14,8 @@
 #include "doomtype.h"
 #ifndef OF_PC
 #include "of_analogizer.h"
+#include "of_caps.h"
+#include "of_input.h"
 #endif
 
 /* VRR interpolation flag the shim updates each frame; defined in
@@ -21,12 +23,13 @@
 extern int frame_interpolation;
 
 /* Display refresh policy; defined in of_hexen_compat.c, defaults to
- * VRR.  Toggled in the Options menu. */
+ * AUTO (auto-selected; see M_EffectiveRefreshMode). */
 extern int refresh_mode;
 
 /* Mirror the Doom module's REFRESH_MODE_* values (cdoom/doom/m_menu.h). */
 enum
 {
+    REFRESH_MODE_AUTO  = 0,
     REFRESH_MODE_PAL   = 1,
     REFRESH_MODE_FIXED = 2,
     REFRESH_MODE_NTSC  = 4,
@@ -72,6 +75,10 @@ static inline int M_AnalogizerRefreshMode(void)
 #endif
 }
 
+/* Auto policy: Analogizer output forces PAL/NTSC, MiSTer and docked play
+ * run FIXED, the handheld LCD runs VRR.  Dock state is live, so
+ * dock/undock retunes across frames.  A nonzero refresh_mode forces
+ * VRR/FIXED. */
 static inline int M_EffectiveRefreshMode(void)
 {
     int analogizer_mode = M_AnalogizerRefreshMode();
@@ -79,7 +86,16 @@ static inline int M_EffectiveRefreshMode(void)
     if (analogizer_mode >= 0)
         return analogizer_mode;
 
-    return M_NormalizeRefreshMode(refresh_mode);
+    if (refresh_mode != REFRESH_MODE_AUTO)
+        return M_NormalizeRefreshMode(refresh_mode);
+
+#ifndef OF_PC
+    if (of_get_caps()->platform_id == OF_PLATFORM_MISTER
+        || of_input_is_docked())
+        return REFRESH_MODE_FIXED;
+#endif
+
+    return REFRESH_MODE_VRR;
 }
 
 static inline boolean M_RefreshModeUsesInterpolation(int mode)

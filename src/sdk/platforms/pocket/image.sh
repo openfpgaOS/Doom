@@ -40,18 +40,17 @@ ASSET_PLAT=""; for d in "$OUT"/Assets/*/; do [ -d "$d" ] && { ASSET_PLAT="$d"; b
 ASSET_DIR="${ASSET_PLAT}common"
 mkdir -p "$ASSET_DIR"
 
-# Runtime FPGA artifacts.  The bitstream ships under the name core.json's
-# "filename" references -- currently os25.rbf_r (OS30 trees also ship
-# os30.rbf_r; older trees named it bitstream.rbf_r).  Copy every *.rbf_r present
-# so the bundle matches whichever variant the core uses, instead of one
-# hardcoded name that goes stale on a rename.  loader.bin is copied separately
-# so a missing one is reported rather than silently swallowed.
-rbf_found=0
-for f in "$RT"/*.rbf_r; do
-    [ -f "$f" ] && { cp "$f" "$CORE_DIR"; rbf_found=1; }
+# Runtime FPGA artifacts (each copied independently so a missing one is
+# reported, not silently swallowed alongside the others).  The bitstream
+# is variant-named (os25.rbf_r / os30.rbf_r); copy exactly
+# the one this core's core.json points at — the single source of truth set
+# at scaffold time (customize.sh --variant).
+RBF=$(grep -o '"filename"[[:space:]]*:[[:space:]]*"[^"]*"' "$CORE_DIR/core.json" 2>/dev/null \
+      | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+[ -n "$RBF" ] || RBF="bitstream.rbf_r"
+for f in "$RBF" loader.bin; do
+    [ -f "$RT/$f" ] && cp "$RT/$f" "$CORE_DIR" || echo "  warn: runtime/$f missing (run 'make sdk VARIANT=… DEST=…' in openfpgaOS)"
 done
-[ "$rbf_found" = 1 ] || echo "  warn: runtime FPGA bitstream (*.rbf_r) missing (run 'make sdk' in openfpgaOS)"
-[ -f "$RT/loader.bin" ] && cp "$RT/loader.bin" "$CORE_DIR" || echo "  warn: runtime/loader.bin missing (run 'make sdk' in openfpgaOS)"
 [ -f "$RT/os.bin" ] && cp "$RT/os.bin" "$ASSET_DIR/" || echo "  warn: runtime/os.bin missing"
 
 # Soundfonts (bank.ofsf + any game .ofsf) — target-agnostic, at runtime/ root.

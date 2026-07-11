@@ -29,6 +29,7 @@
 
 #include "doomtype.h"
 #include "doomdef.h"      /* gameaction_t / ga_savegame / ga_loadgame */
+#include "doomstat.h"     /* gamemode / gamemission — per-IWAD music-WAD default */
 #include "i_sound.h"
 #include "m_argv.h"       /* -pcmwad override */
 #include "w_wad.h"
@@ -36,6 +37,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <string.h>
 
 #include "of_mixer.h"
@@ -44,7 +46,8 @@
 #include "of_timer.h"
 #include "of_video.h"
 
-#define PCM_WAD_DEFAULT "DOOMMUS.WAD"  /* used unless -pcmwad <file> overrides it */
+#define PCM_WAD_DEFAULT  "DOOMMUS.WAD"   /* Doom 1 music (D_E1M1.. -> PE1M1..) */
+#define PCM_WAD_DEFAULT2 "DOOM2MUS.WAD"  /* Doom II / Final Doom music (D_RUNNIN.. -> PRUNNIN..) */
 #define MUS_RATE_MAX     48000         /* output rate; ring arrays are sized for this */
 #define MUS_RATE_DEFAULT 48000         /* assumed when the WAD has no PCMINFO lump (old DOOMMUS.WAD) */
 #define MUS_CHANNELS    2
@@ -274,6 +277,38 @@ static void pcm_produce(int nframes)
     }
 }
 
+/* ---- diagnostics (PCM_DIAG): state ----------------------------------------
+ * Self-contained, bounded logging to a file the host can read off the vhd.
+ * Distinguishes the two "music loops every few seconds" failure modes:
+ *   - track-mismatch : W_CheckNumForName(<lump>) < 0 -> PCM never starts, the
+ *                      track falls back to MIDI (midi_fallthrough++).
+ *   - refill-failure : PCM starts (pcm_started++) but async S2 reads fail
+ *                      (cd_fail++ / issue_err++ / drain_timeout++) so the 5 s
+ *                      ring laps and repeats.
+ * Declared here (above the refill helpers) so cd_issue/cd_fold/DrainAsync can
+ * bump the counters; the fopen/snprintf helpers live below pcm_wad_name().
+ * Enable with `make PCMLOG=1` (adds -DPCM_DIAG).  Off by default. */
+#ifdef PCM_DIAG
+#define PCMLOG_PATH      "/pcmlog.txt"
+#define PCMLOG_EVTCAP    3072u
+#define PCMLOG_PERIOD_MS 2000u
+
+static char     dg_evt[PCMLOG_EVTCAP];
+static unsigned dg_evt_len;
+static int      dg_evt_full;
+static uint32_t dg_last_flush_ms;
+
+/* cumulative counters */
+static unsigned dg_tryplay, dg_pcm_started, dg_midi_fallthrough;
+static unsigned dg_lump_missing, dg_empty_lump, dg_no_voices;
+static unsigned dg_cd_issue, dg_cd_ok, dg_cd_fail, dg_cd_issue_err;
+static unsigned dg_sync_topup, dg_drain_timeout, dg_async_dropped;
+
+#define DG(x) do { x; } while (0)
+#else
+#define DG(x) do { } while (0)
+#endif
+
 /* ---- async refill ------------------------------------------------- */
 #ifndef OF_PC
 static void cd_cb(int token, int result)
@@ -312,11 +347,12 @@ static int cd_issue(void)
     cd_result = -1;
     tok = of_file_read_async(cd_slot, pcm_base + cd_read_off, cd_stage,
                              (uint32_t)(frames * MUS_BYTES_FRAME), cd_cb);
-    if (tok < 0) { cd_async_ok = 0; return tok; }
+    if (tok < 0) { cd_async_ok = 0; DG(dg_cd_issue_err++; dg_async_dropped++); return tok; }
 
     cd_pending = 1;
     cd_frames  = frames;
     cd_read_off += (unsigned)frames * MUS_BYTES_FRAME;
+    DG(dg_cd_issue++);
     return 0;
 }
 #else
@@ -345,6 +381,7 @@ void I_PCM_DrainAsync(void)
         if ((unsigned)(of_time_ms() - start) >= 200u)
         {
             cd_async_ok = 0;        /* wedged — sync from here */
+            DG(dg_drain_timeout++; dg_async_dropped++);
             break;
         }
     }
@@ -371,13 +408,122 @@ void I_PCM_Stop(void)
     pcm_ended = 0;
 }
 
-/* Music WAD filename: -pcmwad <file> overrides the default, so each instance can
- * ship its own (DOOM1MUS.WAD, DOOM2MUS.WAD, ...) without colliding in common/. */
+/* Music WAD filename: -pcmwad <file> overrides everything (so each instance can
+ * ship its own without colliding in common/).  With no override the default is
+ * chosen PER IWAD: Doom II / Final Doom request Doom2 track names (D_RUNNIN ->
+ * PRUNNIN), which live ONLY in DOOM2MUS.WAD; Doom 1 requests D_E1M1 -> PE1M1,
+ * which live in DOOMMUS.WAD.  Defaulting Doom II to the Doom 1 wad (the old
+ * behaviour) meant W_CheckNumForName never resolved the track -> the PCM path
+ * was dead and every track fell back to MIDI.  gamemission is set by
+ * D_IdentifyVersion() long before the first track plays, so it is valid here. */
+static int pcm_iwad_is_doom2(void)
+{
+    /* pack_chex/pack_hacx alias through logical_gamemission; commercial is the
+     * belt-and-braces check for a Doom II-style IWAD. */
+    GameMission_t m = logical_gamemission;
+    return m == doom2 || m == pack_tnt || m == pack_plut
+        || gamemode == commercial;
+}
+
 static const char *pcm_wad_name(void)
 {
     int p = M_CheckParmWithArgs("-pcmwad", 1);
-    return (p > 0) ? myargv[p + 1] : PCM_WAD_DEFAULT;
+    if (p > 0)
+        return myargv[p + 1];
+    return pcm_iwad_is_doom2() ? PCM_WAD_DEFAULT2 : PCM_WAD_DEFAULT;
 }
+
+/* ---- diagnostics (PCM_DIAG): logging helpers -------------------------------
+ * (Counters + the DG() increment macro are declared higher up so the refill
+ *  helpers that sit above pcm_wad_name() can bump them.) */
+#ifdef PCM_DIAG
+
+static void dg_add(const char *s)
+{
+    unsigned n = (unsigned)strlen(s);
+    if (dg_evt_len + n + 1u >= PCMLOG_EVTCAP)
+    {
+        if (!dg_evt_full)
+        {
+            const char *t = "...[event log full]\n";
+            unsigned tn = (unsigned)strlen(t);
+            if (dg_evt_len + tn < PCMLOG_EVTCAP)
+            {
+                memcpy(dg_evt + dg_evt_len, t, tn);
+                dg_evt_len += tn;
+            }
+            dg_evt_full = 1;
+        }
+        return;
+    }
+    memcpy(dg_evt + dg_evt_len, s, n);
+    dg_evt_len += n;
+}
+
+/* Rewrite the whole log file: bounded event history, then a freshly-formatted
+ * cumulative SUMMARY block that is ALWAYS present even once the event buffer is
+ * full.  wb (truncate) each time -> the file is always a complete valid snapshot,
+ * no reliance on append semantics.  Drains the async CD read first so the small
+ * fatfs write never collides with an in-flight refill on the single DS bridge. */
+static void dg_flush(void)
+{
+#ifndef OF_PC
+    FILE *fp;
+    char  sum[512];
+    int   n;
+
+    I_PCM_DrainAsync();
+    fp = fopen(PCMLOG_PATH, "wb");
+    if (fp == NULL)
+        return;
+    if (dg_evt_len)
+        fwrite(dg_evt, 1, dg_evt_len, fp);
+    n = snprintf(sum, sizeof(sum),
+        "SUMMARY wad=%s ready=%d cd_slot=%d async_ok=%d frozen=%d rate=%d ring=%d\n"
+        "  gamemission=%d gamemode=%d\n"
+        "  tryplay=%u pcm_started=%u midi_fallthrough=%u lump_missing=%u empty_lump=%u no_voices=%u\n"
+        "  cd_issue=%u cd_ok=%u cd_fail=%u issue_err=%u sync_topup=%u drain_timeout=%u async_dropped=%u\n",
+        pcm_wad_name(), pcm_ready, cd_slot, cd_async_ok, pcm_frozen, mus_rate, ring_frames,
+        (int)gamemission, (int)gamemode,
+        dg_tryplay, dg_pcm_started, dg_midi_fallthrough, dg_lump_missing, dg_empty_lump, dg_no_voices,
+        dg_cd_issue, dg_cd_ok, dg_cd_fail, dg_cd_issue_err, dg_sync_topup, dg_drain_timeout, dg_async_dropped);
+    if (n > 0)
+        fwrite(sum, 1, (size_t)n, fp);
+    fclose(fp);
+    dg_last_flush_ms = of_time_ms();
+#endif
+}
+
+static void dg_logf(const char *fmt, ...)
+{
+    char b[160];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(b, sizeof(b), fmt, ap);
+    va_end(ap);
+    dg_add(b);
+}
+
+/* Rate-limited flush from the Poll loop so the file survives even if a refill
+ * failure escalates to a hang. */
+static void dg_tick(void)
+{
+    uint32_t now = of_time_ms();
+    if ((uint32_t)(now - dg_last_flush_ms) >= PCMLOG_PERIOD_MS)
+        dg_flush();
+}
+
+#define DG_LOG(...)  dg_logf(__VA_ARGS__)
+#define DG_FLUSH()   dg_flush()
+#define DG_TICK()    dg_tick()
+
+#else  /* !PCM_DIAG */
+
+#define DG_LOG(...)  do { } while (0)
+#define DG_FLUSH()   do { } while (0)
+#define DG_TICK()    do { } while (0)
+
+#endif /* PCM_DIAG */
 
 /* Merge the optional music WAD + set up async refill on first use (graceful if
  * the WAD or async support is absent). */
@@ -393,6 +539,9 @@ static void pcm_ensure_init(void)
     if (W_AddFile(wad) == NULL)
     {
         /* printf("CD music: %s absent, MIDI only\n", wad); */  /* UART silenced for jitter test */
+        DG_LOG("init wad=%s W_AddFile=FAIL -> MIDI only (mission=%d mode=%d)\n",
+               wad, (int)gamemission, (int)gamemode);
+        DG_FLUSH();
         return;
     }
     W_GenerateHashTable();
@@ -433,6 +582,9 @@ static void pcm_ensure_init(void)
 #endif
     /* printf("CD music: %s loaded (%s refill)\n", wad,
               cd_stage ? "async DMA" : "sync"); */  /* UART silenced for jitter test */
+    DG_LOG("init wad=%s W_AddFile=OK ready=1 rate=%d cd_slot=%d async=%d (mission=%d mode=%d)\n",
+           wad, mus_rate, cd_slot, (cd_stage != NULL), (int)gamemission, (int)gamemode);
+    DG_FLUSH();
 }
 
 int I_PCM_TryPlay(boolean looping)
@@ -441,15 +593,37 @@ int I_PCM_TryPlay(boolean looping)
     lumpinfo_t *l;
 
     pcm_ensure_init();
+    DG(dg_tryplay++);
     if (!pcm_ready || pcm_lump[0] == '\0')
+    {
+        /* No music WAD (MIDI-only) or no track name — not a mismatch. */
+        DG(dg_midi_fallthrough++);
+        DG_LOG("try lump='%s' ready=%d -> MIDI (no wad / empty name)\n",
+               pcm_lump, pcm_ready);
+        DG_FLUSH();
         return 0;
+    }
 
     n = W_CheckNumForName(pcm_lump);
     if (n < 0)
+    {
+        /* TRACK MISMATCH: the requested lump is not in this music WAD (e.g. a
+         * Doom II track name against a Doom 1 wad) -> clean MIDI fallback. */
+        DG(dg_lump_missing++; dg_midi_fallthrough++);
+        DG_LOG("try lump='%s' wad=%s checknum=MISSING -> MIDI\n",
+               pcm_lump, pcm_wad_name());
+        DG_FLUSH();
         return 0;
+    }
     l = lumpinfo[n];
     if (l == NULL || l->size < MUS_BYTES_FRAME)
+    {
+        DG(dg_empty_lump++; dg_midi_fallthrough++);
+        DG_LOG("try lump='%s' checknum=%d size=%ld too-small -> MIDI\n",
+               pcm_lump, (int)n, l ? (long)l->size : -1L);
+        DG_FLUSH();
         return 0;
+    }
 
     if (pcm_playing)
         I_PCM_Stop();
@@ -485,6 +659,9 @@ int I_PCM_TryPlay(boolean looping)
     {
         /* printf("CD music: no free music voices, using MIDI\n"); */  /* UART silenced for jitter test */
         pcm_stop_voices();
+        DG(dg_no_voices++; dg_midi_fallthrough++);
+        DG_LOG("try lump='%s' no free music voices -> MIDI\n", pcm_lump);
+        DG_FLUSH();
         return 0;
     }
 
@@ -500,6 +677,10 @@ int I_PCM_TryPlay(boolean looping)
     i_pcm_active = 1;
     /* printf("CD music: streaming lump %s (%u bytes, %s)\n", pcm_lump, pcm_size,
               cd_async_ok ? "async" : "sync"); */  /* UART silenced for jitter test */
+    DG(dg_pcm_started++);
+    DG_LOG("try lump='%s' wad=%s PCM START size=%u async=%d cd_slot=%d\n",
+           pcm_lump, pcm_wad_name(), pcm_size, cd_async_ok, cd_slot);
+    DG_FLUSH();
     return 1;
 }
 
@@ -517,6 +698,14 @@ static void cd_fold(void)
                                  (uint32_t)cd_frames * MUS_BYTES_FRAME);
             ring_write((const int16_t *)cd_stage_mem, cd_frames);
             ring_valid += cd_frames;
+            DG(dg_cd_ok++);
+        }
+        else
+        {
+            /* Refill DMA failed: the frames the cursor already freed stay
+             * silent-or-stale and, if this keeps up, the ring laps = the
+             * "loops every few seconds" symptom.  Count it. */
+            DG(dg_cd_fail++);
         }
         cd_pending = 0;
     }
@@ -639,11 +828,14 @@ void I_PCM_Poll(void)
             else if (consumed > 0)
             {
                 pcm_produce(consumed);       /* sync top-up (menu up, or no async) */
+                DG(dg_sync_topup++);
             }
 
             if (pcm_ended && ring_valid <= 0)
                 I_PCM_Stop();
         }
+
+        DG_TICK();     /* rate-limited log snapshot while a track streams */
     }
 
     I_OpenFPGAMixerPump();

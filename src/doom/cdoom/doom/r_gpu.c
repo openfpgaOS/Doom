@@ -2285,6 +2285,16 @@ boolean R_GPU_PresentFrame(void)
      */
     gpu_flush_draw_batches();
     had_gpu_work = gpu_pending;
+    /* Pure-2D pages (GS_DEMOSCREEN title/credits, intermission, finale) draw
+     * the whole screen on the CPU with no GPU frame, but CPU writes over the
+     * 3D view rows aren't marked dirty (gpu_prepare_cpu_write_outside_view
+     * skips in-view writes).  With no GPU render to fill the view and no
+     * per-frame clear of the acquired buffer, that leaves the view region of
+     * a full-screen image (e.g. TITLEPIC) stale/black on the scanned-out
+     * buffer.  When no GPU frame ran this display frame, publish the whole
+     * buffer so the full 2D image reaches the screen. */
+    if (!gpu_frame_active)
+        gpu_mark_cpu_dirty_rect(0, 0, SCREENWIDTH, SCREENHEIGHT);
     gpu_flush_cpu_dirty_lines();
 
     stage_start = R_Perf_BeginStage();

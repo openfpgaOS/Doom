@@ -67,7 +67,7 @@
                 "extensions": ["ofsf"],
                 "deferload": true
             },
-            { "id": 8,  "name": "Shared Config", "required": false, "parameters": "0x84", "nonvolatile": true, "address": "0x200C0000", "size_maximum": "0x40000", "extensions": ["cfg", "bin"] },
+            { "id": 8,  "name": "Shared Config", "required": false, "parameters": "0x84", "nonvolatile": true, "address": "0x20380000", "size_maximum": "0x40000", "extensions": ["cfg", "bin"] },
             { "id": 10, "name": "Save 0", "required": false, "parameters": "0x84", "nonvolatile": true, "address": "0x20100000", "size_maximum": "0x40000", "extensions": ["sav"] },
             { "id": 11, "name": "Save 1", "required": false, "parameters": "0x84", "nonvolatile": true, "address": "0x20140000", "size_maximum": "0x40000", "extensions": ["sav"] },
             { "id": 12, "name": "Save 2", "required": false, "parameters": "0x84", "nonvolatile": true, "address": "0x20180000", "size_maximum": "0x40000", "extensions": ["sav"] },

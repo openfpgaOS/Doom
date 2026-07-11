@@ -85,7 +85,7 @@ Files the port adds on top of stock chocolate-doom (each opens with a one-line
 ## 🎚️ Options menu (per-game `m_menu.c` / `mn_menu.c`, persisted in `<Game>.cfg`)
 
 - **`swap_run_walk`** — `0` = hold Speed to run (vanilla), `1` = run by default. Doom and Heretic default `0`; **Hexen defaults `1`** (its puzzles are speed-gated). Bound via `M_BindIntVariable`; the menu toggle calls `M_SaveDefaults`. Menu label: MOVEMENT / Swap Run-Walk.
-- **`refresh_mode`** — `REFRESH_MODE_VRR` (default) or `REFRESH_MODE_FIXED`, implemented in `shim/i_video.c` (variable-refresh vsync vs fixed-rate). Menu label: REFRESH.
+- **`refresh_mode`** — `REFRESH_MODE_VRR` or `REFRESH_MODE_FIXED`, implemented in `shim/i_video.c` (variable-refresh vsync vs fixed-rate). **Auto-selected in all three games** (no menu row, cfg var unbound/scrubbed): VRR on the handheld LCD, FIXED when docked (`of_input_is_docked()`, live per-frame state) or on MiSTer, PAL/NTSC on Analogizer. Doom's `-uncapped`/`-capped`/`-fixed60` force a mode. Logic: Doom `cdoom/doom/m_menu.c`, Heretic/Hexen inline in their `m_menu.h` bridge.
 - Config is stored as **DOS scancodes** in `Saves/<game>/common/<game>/<Game>.cfg` (e.g. ENTER = 28, RCTRL = 29). It's written on-device when a menu toggle fires — there's no in-game free-text editor.
 - **Hexen status bar:** the H2BAR status bar (65 px tall at y=134) sits under the 7-row Options menu, so `SB_state` is forced to `-1` while a menu is active and on deactivate, to repaint and clear overdraw. QUIT GAME is dropped from the main menu; the menu joystick branch is gated with `joywait`.
 

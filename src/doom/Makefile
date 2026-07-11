@@ -88,6 +88,15 @@ ifeq ($(PERFTIMING),1)
 CFLAGS += -falign-functions=4 -falign-loops=4
 endif
 
+# PCM/CD-music diagnostics: log the music WAD, track lookups, and refill
+# success/fail counters to /pcmlog.txt on the (writable) boot vhd, so a
+# "music loops every few seconds" report can be pinned to track-mismatch vs.
+# S2 refill failure.  Off by default; enable with `make PCMLOG=1`.
+PCMLOG ?= 0
+ifeq ($(PCMLOG),1)
+CFLAGS += -DPCM_DIAG
+endif
+
 .DEFAULT_GOAL := all
 
 include $(SDK_DIR)/sdk.mk
@@ -98,17 +107,105 @@ include $(SDK_DIR)/sdk.mk
 all: $(OBJ_DIR)/app.elf release
 	@$(SIZE) $<
 
+ifeq ($(TARGET),mister)
+release: game-dist        # MiSTer: the per-game bundle IS the release artifact
+else
 release: $(OBJ_DIR)/app.elf
 	@$(SDK_DIR)/platforms/$(TARGET)/image.sh "$(APP)" "$(OBJ_DIR)/app.elf" "$(ROOT)" "$(DIST)" $(GAME_ASSETS)
+endif
 
 debug: all
 	@$(ROOT)/scripts/debug.sh "$$(ls -d $(OUT)/Assets/*/common 2>/dev/null)/$(APP).elf"
 
 copy: all
+ifeq ($(TARGET),mister)
+	@MISTER_IP="$(MISTER_IP)" $(SDK_DIR)/platforms/mister/copy.sh game "$(GAME)" "$(GAME_ELF)" "$(OBJ_DIR)/app.elf"
+else
 	@MISTER_IP="$(MISTER_IP)" $(SDK_DIR)/platforms/$(TARGET)/copy.sh "$(APP)" "$(OBJ_DIR)/app.elf"
+endif
 
+# Engine-only update — now identical to `make copy`: for MiSTer that pushes
+# the loose games/OpenfpgaOS/<Game>/<GameElf> (the F-loaded engine), leaving
+# boot.vhd (your wads) and the saves volume untouched.  Kept as an alias.
+copy-app: all
+	@$(MAKE) copy
+
+# `make package` for MiSTer builds the per-game locked distribution (a
+# boot.vhd shell + .mgl launchers + loose inis + setup.sh + external_files.csv,
+# zipped for games/OpenfpgaOS/); every other target keeps the single-image
+# path.  scripts/package.sh -> platforms/mister/package.sh auto-detects which.
+#
+# For MiSTer it ALSO generates the Downloader custom-database delivery artifact
+# (releases/mister/doom.json.zip) via mkdb.py — a real ZIP-wrapped JSON the
+# stock MiSTer Downloader syncs.  external_files.csv is folded into it here at
+# build time (it is NOT a device file).  db_id must never change once published.
+#
+# Publishing model (edit these for the real release):
+#   MISTER_DB_ID       downloader.ini [section] == db_id
+#   MISTER_DB_BASE_URL where the STAGED tree is hosted; a local file at sd path
+#                      <p> resolves to  $(MISTER_DB_BASE_URL)<p>  (base_files_url
+#                      + path — the Downloader's own rule).  Host the game-dist
+#                      tree under games/OpenfpgaOS/ at this base.
+#   MISTER_DB_URL      where doom.json.zip itself is published (for the ini snippet)
+MISTER_DB_ID       ?= thinkelastic/openfpgaos-doom
+MISTER_DB_BASE_URL ?= https://raw.githubusercontent.com/thinkelastic/Doom/mister-dist/
+MISTER_DB_URL      ?= https://raw.githubusercontent.com/thinkelastic/Doom/mister-dist/doom.json.zip
+MISTER_DB          = $(ROOT)/releases/mister/$(APP).json.zip
+MISTER_DB_INI      = $(ROOT)/releases/mister/$(APP).downloader.ini
+ifeq ($(TARGET),mister)
+package: game-dist
+	@$(ROOT)/scripts/package.sh $(APP)
+	@$(SDK_DIR)/platforms/mister/mkdb.py \
+	    --staging "$(GAME_STAGE)" --sd-prefix "games/OpenfpgaOS" \
+	    --base-url "$(MISTER_DB_BASE_URL)" --db-id "$(MISTER_DB_ID)" \
+	    --external "$(GAME_CSV)" --db-url "$(MISTER_DB_URL)" \
+	    --output "$(MISTER_DB)" --ini-out "$(MISTER_DB_INI)"
+else
 package: all
 	@$(ROOT)/scripts/package.sh $(APP)
+endif
+
+# ── MiSTer per-game locked distribution (S0 boot shell + S1 saves + .mgl) ─
+# The core (openfpgaOS.rbf + os.bin) is game-agnostic.  This game ships a pair
+# of images: a READ-ONLY boot.vhd (S0 — /$(GAME)/common: bank.ofsf, wads added
+# on-device; NO engine ELF) and a writable $(GAME).saves.vhd (S1 — one
+# /$(GAME)/<Instance> subfolder of preallocated config/save slots per instance
+# ini).  Splitting them keeps saves on a separate, Downloader-reserved volume
+# so an update can replace boot.vhd without touching the player's saves.  The
+# engine ELF ships as a LOOSE file ($(GAME)/$(GAME_ELF), next to boot.vhd): the
+# firmware F-loads it at ioctl index 2 into ELF staging and serves it as slot 3,
+# so an engine update is one loose-file swap (mkdb.py indexes it as a Downloader
+# `files` entry) and boot.vhd never changes.  Also ships: a 4-line .mgl launcher
+# per instance (S0 boot + S1 saves + F-load ELF index 2 + F-load ini index 1;
+# ELF BEFORE ini — the ini F-load resets and triggers the app load), the loose
+# per-instance inis, setup.sh (seeds the saves image + injects the user's wads)
+# and external_files.csv (freeware wad list).
+# `make package TARGET=mister` builds and zips this bundle.
+#
+# GAME_INIS  : canonical per-instance inis (each with [os] GAME/INSTANCE/ELF)
+# GAME_STAGE : games/OpenfpgaOS/-rooted staging that package.sh zips
+# GAME_COMMON: throwaway dir feeding mkgame the ELF + bank.ofsf (kept OUT of
+#              the staging so it is never zipped)
+GAME        = Doom
+GAME_INIS   = $(DIST)/Assets/doom/common
+GAME_STAGE  = $(ROOT)/build/mister/$(APP)
+GAME_COMMON = $(ROOT)/build/mister/.$(APP)-common
+GAME_ELF    = doom.elf
+GAME_CSV    = $(DIST)/mister/external_files.csv
+
+game-dist: $(OBJ_DIR)/app.elf
+	@rm -rf "$(GAME_STAGE)" "$(GAME_COMMON)"
+	@mkdir -p "$(GAME_STAGE)/$(GAME)/wads" "$(GAME_COMMON)"
+	@cp "$(RUNTIME)/bank.ofsf" "$(GAME_COMMON)/bank.ofsf"
+	@$(SDK_DIR)/platforms/mister/mkgame.sh --no-elf --saves-out "$(GAME_STAGE)/$(GAME)/$(GAME).saves.vhd" "$(GAME)" "$(GAME_INIS)" "$(GAME_COMMON)" "$(GAME_STAGE)/$(GAME)/boot.vhd"
+	@$(SDK_DIR)/platforms/mister/mkmgl.sh "$(GAME)" "$(GAME_INIS)" "$(GAME_STAGE)"
+	@cp "$(OBJ_DIR)/app.elf" "$(GAME_STAGE)/$(GAME)/$(GAME_ELF)"
+	@cp "$(GAME_INIS)"/*.ini "$(GAME_STAGE)/$(GAME)/"
+	@sed 's|^GAME_DEFAULT=.*|GAME_DEFAULT="$(GAME)"|' "$(SDK_DIR)/platforms/mister/setup.sh" > "$(GAME_STAGE)/$(GAME)/setup.sh"
+	@chmod +x "$(GAME_STAGE)/$(GAME)/setup.sh"
+	@cp "$(GAME_CSV)" "$(GAME_STAGE)/$(GAME)/external_files.csv"
+	@rm -rf "$(GAME_COMMON)"
+	@echo "  game-dist staged -> $(GAME_STAGE)"
 
 # ── PC build (SDL2) ──────────────────────────────────────────────────
 # sdk.mk's generic app_pc rule picks up $(CFLAGS) -- set above -- and
@@ -119,4 +216,4 @@ clean: sdk-clean
 	rm -f $(APP_OBJS:.o=.d) $(OF_INIT_OBJ:.o=.d) $(OF_SDL2_OBJ:.o=.d)
 	rm -rf $(OUT) app_pc
 
-.PHONY: all release debug copy package test clean
+.PHONY: all release debug copy package test clean game-dist

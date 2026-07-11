@@ -8,8 +8,8 @@
  * the effective refresh mode (see m_menu.h bridge). */
 int frame_interpolation = 0;
 
-/* Display refresh policy; toggled in Options. Defaults to VRR like Doom. */
-int refresh_mode = REFRESH_MODE_VRR;
+/* Display refresh policy; auto-selected like Doom (m_menu.h bridge). */
+int refresh_mode = REFRESH_MODE_AUTO;
 
 /* Pocket button layout; toggled in Options. Defaults to the unified DEFAULT
  * map (DISCO selects the B-modifier map). Read by the shim. */
