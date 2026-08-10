@@ -30,7 +30,16 @@ extern "C" {
 #include <stdint.h>
 
 #define OF_CAPS_MAGIC   0x43415053  /* 'CAPS' */
-#define OF_CAPS_VERSION 3
+#define OF_CAPS_VERSION 4
+
+/* OS software-feature flags (of_capabilities.os_features, caps v4+).
+ * These describe FIRMWARE behavior, not hardware -- apps gate on
+ * caps->version >= 4 before reading the field. */
+#define OF_OS_FEAT_MOUSE_COUNTS (1u << 0)  /* of_mouse_state dx/dy are decoded
+                                            * mouse counts.  Absent (v3 OS): the
+                                            * Pocket dock's packed int8 sample
+                                            * pairs {a<<8|b} pass through raw and
+                                            * the app must decode. */
 /* The of_capabilities pointer is delivered to apps via the AT_OF_CAPS
  * auxv tag set up by the kernel ELF loader (see of_app_abi.h). Apps
  * never need to know where the struct lives -- they just call
@@ -153,12 +162,44 @@ extern "C" {
                                          * this bit is CLEAR on os25/os30/mister;
                                          * the INCLUDE_TEX_MEM module exists for a
                                          * future texture-bound core. */
-#define OF_HW_GPU_XFORM_RGB (1 << 26)   /* GPU transform front-end truecolor +
-                                         * vertex cache + per-vertex lighting:
-                                         * 0x52 xform_tri_rgb, 0x53 load_verts,
-                                         * 0x54 draw_indexed_tri, 0x55
-                                         * set_light_state, 0x57 load_vert_lit.
-                                         * Pocket os30/SM64 sets it. */
+#define OF_HW_GPU_SPAN_CONT (1 << 28)   /* Records-only continuation of a
+                                         * long-form 0x48 param span list
+                                         * (GPU_CMD_PARAM_SPAN_CONT 0x58):
+                                         * the 29-word surface header
+                                         * persists in the GPU staging, so
+                                         * repeat emissions send count +
+                                         * shift + records only.  The SDK
+                                         * emitter self-gates on this bit
+                                         * and keeps a header cache that is
+                                         * invalidated by every staging-
+                                         * overwriting emit (compact 0x48,
+                                         * 0x4C, 0x49, 0x4A) — mirroring
+                                         * the RTL residency contract. */
+#define OF_HW_GPU_XFORM_RGB (1 << 26)   /* GPU matrix transform front-end,
+                                         * truecolor: 0x50 sticky matrix,
+                                         * 0x52 xform_tri_rgb, 0x53 load_verts
+                                         * (matrix form), 0x54 draw_indexed_tri.
+                                         * Implies the matrix MAC.  Lighting
+                                         * (0x55/0x57) is OF_HW_GPU_LIGHT;
+                                         * the clip-space cache load (0x56)
+                                         * is OF_HW_GPU_CLIP_LOAD -- neither
+                                         * is implied by this bit.  Pocket
+                                         * os30 sets it (2026-08-04). */
+#define OF_HW_GPU_CLIP_LOAD (1 << 29)   /* 0x56 LOAD_VERT_CLIP: park a CPU
+                                         * pre-transformed clip-space vert
+                                         * {x,y,w} in the vertex cache; draw
+                                         * with 0x54.  Independent of the
+                                         * matrix MAC and of bit 26 by design
+                                         * (a MAC-less build can set 29 alone).
+                                         * Tracks gpu_core INCLUDE_VTX_CACHE
+                                         * && INCLUDE_XFORM_RGB. */
+#define OF_HW_GPU_LIGHT     (1 << 30)   /* GPU per-vertex lighting: 0x55
+                                         * set_light_state + 0x57 load_vert_lit.
+                                         * Carved out of bit 26 before it ever
+                                         * shipped: os30 excludes the lighting
+                                         * cone (EXCLUDE_GPU_LIGHT) while the
+                                         * rest of the transform front-end is
+                                         * live.  Tracks INCLUDE_GPU_LIGHT. */
 #define OF_HW_GPU_COMBINE   (1 << 27)   /* GPU full texel*C+D color combiner
                                          * (HILITE/specular class, e.g. the SM64
                                          * title/Goddard Mario head).  Truecolor
@@ -218,6 +259,11 @@ struct of_capabilities {
      * Addressed by GPU byte offset [0, tex_fast_size); upload via the GPU's
      * fast-texture upload regs.  The of_texture.h API hides this entirely. */
     uint32_t tex_fast_size;
+
+    /* v4: OS software-feature flags (OF_OS_FEAT_*).  Firmware behavior
+     * contracts the app adapts to at runtime -- the loose-coupling
+     * alternative to lockstep app/os deploys. */
+    uint32_t os_features;
 };
 
 #ifndef OF_PC

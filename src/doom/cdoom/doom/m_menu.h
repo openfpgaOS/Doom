@@ -67,6 +67,9 @@ enum
     REFRESH_MODE_VRR = 6
 };
 
+// True while the Load or Save menu is up -- the menus that drive NVRAM slot I/O.
+boolean M_SaveLoadMenuActive(void);
+
 int M_EffectiveRefreshMode(void);
 const char *M_RefreshModeName(int mode);
 boolean M_RefreshModeUsesInterpolation(int mode);

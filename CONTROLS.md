@@ -93,3 +93,20 @@ moves to Y and the weapon cycle goes onto the R1 chords.
 | R1 + Left / Right | Select previous / next inventory item |
 | R1 + X | Next weapon |
 | R1 + Y | Previous weapon |
+
+## 🖱️ Mouse
+
+A USB mouse on the Analogue Dock aims in all three games; the pad keeps
+doing everything else. Unplugged, nothing changes.
+
+| Mouse | In game |
+| --- | --- |
+| Move left / right | Turn (strafe while the right button is held) |
+| Left button | Fire |
+| Right button (hold) | Strafe modifier |
+| Middle button | Move forward |
+
+Vertical movement is ignored so the mouse can't fight the stick. Set
+`novert 0` in `Saves/<game>/common/<game>/<Game>.cfg` for the vanilla
+behaviour (mouse forward/back walks), and tune `mouse_sensitivity`,
+`mouse_acceleration` and `mouse_threshold` in the same file.

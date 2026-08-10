@@ -157,6 +157,7 @@ package: game-dist
 	@$(ROOT)/scripts/package.sh $(APP)
 	@$(SDK_DIR)/platforms/mister/mkdb.py \
 	    --staging "$(GAME_STAGE)" --sd-prefix "games/OpenfpgaOS" \
+	    --menu-dir "_Computer/_OpenfpgaOS" \
 	    --base-url "$(MISTER_DB_BASE_URL)" --db-id "$(MISTER_DB_ID)" \
 	    --external "$(GAME_CSV)" --db-url "$(MISTER_DB_URL)" \
 	    --output "$(MISTER_DB)" --ini-out "$(MISTER_DB_INI)"

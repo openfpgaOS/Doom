@@ -353,8 +353,8 @@ void R_DrawMaskedColumn (column_t* column)
     fixed_t	basetexturemid;
 	
     basetexturemid = dc_texturemid;
-	
-    for ( ; column->topdelta != 0xff ; ) 
+
+    for ( ; column->topdelta != 0xff ; )
     {
 	// calculate unclipped screen coordinates
 	//  for post
@@ -925,59 +925,85 @@ void R_DrawPlayerSprites (void)
 //
 vissprite_t	vsprsortedhead;
 
+/* Ascending scale; equal scales keep spawn order (the vanilla strict-<
+ * selection sort was stable), so the draw order is unchanged. */
+static int R_CompareVisSpriteScales(const void *a, const void *b)
+{
+    const vissprite_t *sa = *(const vissprite_t *const *)a;
+    const vissprite_t *sb = *(const vissprite_t *const *)b;
+
+    if (sa->scale != sb->scale)
+	return sa->scale < sb->scale ? -1 : 1;
+    return sa < sb ? -1 : 1;
+}
 
 void R_SortVisSprites (void)
 {
+    static vissprite_t*	sorted[MAXVISSPRITES];
     int			i;
     int			count;
-    vissprite_t*	ds;
-    vissprite_t*	best;
-    static vissprite_t	unsorted;
-    fixed_t		bestscale;
 
     count = vissprite_p - vissprites;
-	
-    unsorted.next = unsorted.prev = &unsorted;
+
+    vsprsortedhead.next = vsprsortedhead.prev = &vsprsortedhead;
 
     if (!count)
 	return;
-		
-    for (ds=vissprites ; ds<vissprite_p ; ds++)
-    {
-	ds->next = ds+1;
-	ds->prev = ds-1;
-    }
-    
-    vissprites[0].prev = &unsorted;
-    unsorted.next = &vissprites[0];
-    (vissprite_p-1)->next = &unsorted;
-    unsorted.prev = vissprite_p-1;
-    
-    // pull the vissprites out by scale
 
-    vsprsortedhead.next = vsprsortedhead.prev = &vsprsortedhead;
+    for (i=0 ; i<count ; i++)
+	sorted[i] = &vissprites[i];
+
+    qsort(sorted, count, sizeof(*sorted), R_CompareVisSpriteScales);
+
     for (i=0 ; i<count ; i++)
     {
-	bestscale = INT_MAX;
-        best = unsorted.next;
-	for (ds=unsorted.next ; ds!= &unsorted ; ds=ds->next)
-	{
-	    if (ds->scale < bestscale)
-	    {
-		bestscale = ds->scale;
-		best = ds;
-	    }
-	}
-	best->next->prev = best->prev;
-	best->prev->next = best->next;
-	best->next = &vsprsortedhead;
-	best->prev = vsprsortedhead.prev;
-	vsprsortedhead.prev->next = best;
-	vsprsortedhead.prev = best;
+	vissprite_t* vs = sorted[i];
+
+	vs->next = &vsprsortedhead;
+	vs->prev = vsprsortedhead.prev;
+	vsprsortedhead.prev->next = vs;
+	vsprsortedhead.prev = vs;
     }
 }
 
 
+
+//
+// R_CacheDrawSegRanges
+// Per-frame compact cache of the drawsegs the masked phase can touch
+// (silhouette or masked columns), kept in the ds_p-1..drawsegs order the
+// phase relies on: back to front, so masked ranges paint far to near and
+// the sprite clip walk keeps its first-writer clipbot/cliptop semantics.
+// 8-byte records keep the per-sprite scan off the much larger drawseg
+// structs.
+//
+typedef struct
+{
+    short	x1;
+    short	x2;
+    drawseg_t*	ds;
+} drawsegrange_t;
+
+static drawsegrange_t	drawsegranges[MAXDRAWSEGS];
+static int		numdrawsegranges;
+
+static void R_CacheDrawSegRanges (void)
+{
+    drawseg_t*		ds;
+    drawsegrange_t*	dsr = drawsegranges;
+
+    for (ds=ds_p-1 ; ds >= drawsegs ; ds--)
+    {
+	if (!ds->silhouette && !ds->maskedtexturecol)
+	    continue;
+
+	dsr->x1 = (short)ds->x1;
+	dsr->x2 = (short)ds->x2;
+	dsr->ds = ds;
+	dsr++;
+    }
+    numdrawsegranges = dsr - drawsegranges;
+}
 
 //
 // R_DrawSprite
@@ -985,6 +1011,7 @@ void R_SortVisSprites (void)
 void R_DrawSprite (vissprite_t* spr)
 {
     drawseg_t*		ds;
+    drawsegrange_t*	dsr;
     short		clipbot[SCREENWIDTH];
     short		cliptop[SCREENWIDTH];
     int			x;
@@ -993,27 +1020,25 @@ void R_DrawSprite (vissprite_t* spr)
     fixed_t		scale;
     fixed_t		lowscale;
     int			silhouette;
-		
+
     for (x = spr->x1 ; x<=spr->x2 ; x++)
 	clipbot[x] = cliptop[x] = -2;
-    
-    // Scan drawsegs from end to start for obscuring segs.
+
+    // Scan the cached drawseg ranges for obscuring segs.
     // The first drawseg that has a greater scale
     //  is the clip seg.
-    for (ds=ds_p-1 ; ds >= drawsegs ; ds--)
+    for (dsr=drawsegranges ; dsr < drawsegranges+numdrawsegranges ; dsr++)
     {
 	// determine if the drawseg obscures the sprite
-	if (ds->x1 > spr->x2
-	    || ds->x2 < spr->x1
-	    || (!ds->silhouette
-		&& !ds->maskedtexturecol) )
+	if (dsr->x1 > spr->x2 || dsr->x2 < spr->x1)
 	{
 	    // does not cover sprite
 	    continue;
 	}
-			
-	r1 = ds->x1 < spr->x1 ? spr->x1 : ds->x1;
-	r2 = ds->x2 > spr->x2 ? spr->x2 : ds->x2;
+
+	ds = dsr->ds;
+	r1 = dsr->x1 < spr->x1 ? spr->x1 : dsr->x1;
+	r2 = dsr->x2 > spr->x2 ? spr->x2 : dsr->x2;
 
 	if (ds->scale1 > ds->scale2)
 	{
@@ -1101,9 +1126,10 @@ void R_DrawSprite (vissprite_t* spr)
 void R_DrawMasked (void)
 {
     vissprite_t*	spr;
-    drawseg_t*		ds;
-	
+    drawsegrange_t*	dsr;
+
     R_SortVisSprites ();
+    R_CacheDrawSegRanges ();
 
     if (vissprite_p > vissprites)
     {
@@ -1112,16 +1138,16 @@ void R_DrawMasked (void)
 	     spr != &vsprsortedhead ;
 	     spr=spr->next)
 	{
-	    
+
 	    R_DrawSprite (spr);
 	}
     }
-    
+
     // render any remaining masked mid textures
-    for (ds=ds_p-1 ; ds >= drawsegs ; ds--)
-	if (ds->maskedtexturecol)
-	    R_RenderMaskedSegRange (ds, ds->x1, ds->x2);
-    
+    for (dsr=drawsegranges ; dsr < drawsegranges+numdrawsegranges ; dsr++)
+	if (dsr->ds->maskedtexturecol)
+	    R_RenderMaskedSegRange (dsr->ds, dsr->x1, dsr->x2);
+
     // draw the psprites on top of everything
     //  but does not draw on side views
     if (!viewangleoffset)		

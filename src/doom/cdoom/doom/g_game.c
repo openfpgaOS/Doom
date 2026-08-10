@@ -124,7 +124,11 @@ static FILE *G_OpenBufferedSaveForRead(const char *name)
 static FILE *G_OpenBufferedSaveForWrite(void)
 {
     memset(openfpga_save_buffer, 0, sizeof(openfpga_save_buffer));
-    P_SaveBufferForWrite(openfpga_save_buffer, sizeof(openfpga_save_buffer));
+    /* Budget SAVE_WRAP_HEADER_SIZE below the slot size: the shim's
+       I_OpenFPGASaveWrite prepends a 16-byte "PDSV" wrapper, so a payload
+       filling the whole buffer would overflow the 256 KB NVRAM slot. */
+    P_SaveBufferForWrite(openfpga_save_buffer,
+                         sizeof(openfpga_save_buffer) - SAVE_WRAP_HEADER_SIZE);
     return (FILE *) openfpga_save_buffer;
 }
 
@@ -133,9 +137,11 @@ static int G_FlushBufferedSave(const char *name)
     long size;
 
     size = P_SaveBufferLength();
+    /* The 16-byte "PDSV" wrapper I_OpenFPGASaveWrite prepends counts
+       against the slot, so the payload budget is slot size minus header. */
     if (savegame_error
      || size < 0
-     || size > (long) sizeof(openfpga_save_buffer))
+     || size > (long) (sizeof(openfpga_save_buffer) - SAVE_WRAP_HEADER_SIZE))
     {
         P_SaveBufferClear();
         return -1;
@@ -1827,9 +1833,10 @@ void G_LoadGame (char* name)
 void G_DoLoadGame (void) 
 { 
     int savedleveltime;
-	 
-    gameaction = ga_nothing; 
-	 
+
+    gameaction = ga_nothing;
+
+    I_SaveTrace("[sv] load start %s\n", savename);
 #ifndef OF_PC
     save_stream = G_OpenBufferedSaveForRead(savename);
 #else
@@ -1838,7 +1845,14 @@ void G_DoLoadGame (void)
 
     if (save_stream == NULL)
     {
+#ifndef OF_PC
+        /* An unreadable slot must not take the core down -- stay in the
+           current game and let the player pick another one. */
+        players[consoleplayer].message = DEH_String("could not load savegame");
+        return;
+#else
         I_Error("Could not load savegame %s", savename);
+#endif
     }
 
     savegame_error = false;
@@ -1854,19 +1868,27 @@ void G_DoLoadGame (void)
     }
 
     savedleveltime = leveltime;
-    
-    // load a base level 
-    G_InitNew (gameskill, gameepisode, gamemap); 
- 
+
+    // load a base level
+    I_SaveTrace("[sv] initnew e%dm%d skill %d\n",
+                gameepisode, gamemap, gameskill);
+    G_InitNew (gameskill, gameepisode, gamemap);
+
     leveltime = savedleveltime;
 
     // dearchive all the modifications
-    P_UnArchivePlayers (); 
-    P_UnArchiveWorld (); 
+    I_SaveTrace("[sv] unarch players\n");
+    P_UnArchivePlayers ();
+    I_SaveTrace("[sv] unarch world\n");
+    P_UnArchiveWorld ();
+    I_SaveTrace("[sv] segcache\n");
     R_UpdateSegRenderData();
-    P_UnArchiveThinkers (); 
-    P_UnArchiveSpecials (); 
- 
+    I_SaveTrace("[sv] unarch thinkers\n");
+    P_UnArchiveThinkers ();
+    I_SaveTrace("[sv] unarch specials\n");
+    P_UnArchiveSpecials ();
+    I_SaveTrace("[sv] unarch done\n");
+
     if (!P_ReadSaveGameEOF())
 	I_Error ("Bad savegame");
 
@@ -1878,10 +1900,11 @@ void G_DoLoadGame (void)
     
     if (setsizeneeded)
 	R_ExecuteSetViewSize ();
-    
+
     // draw the pattern into the back screen
-    R_FillBackScreen ();   
-} 
+    R_FillBackScreen ();
+    I_SaveTrace("[sv] load complete\n");
+}
  
 
 //
@@ -1961,9 +1984,16 @@ void G_DoSaveGame (void)
 #endif
     {
 #ifndef OF_PC
+        /* Over the vanilla limit: drop the save and keep playing.  The slot
+           is left untouched -- taking the core down here is what used to
+           strand the player. */
         P_SaveBufferClear();
-#endif
+        gameaction = ga_nothing;
+        players[consoleplayer].message = DEH_String("savegame buffer overrun");
+        return;
+#else
         I_Error("Savegame buffer overrun");
+#endif
     }
 
     // Finish up, close the savegame file.
@@ -1971,7 +2001,11 @@ void G_DoSaveGame (void)
 #ifndef OF_PC
     if (G_FlushBufferedSave(savegame_file) != 0)
     {
-        I_Error("Failed to write savegame file '%s'.", savegame_file);
+        /* The slot write failed (I_OpenFPGASaveWrite blanks a partial one so
+           it can't be read back as valid).  Report and carry on. */
+        gameaction = ga_nothing;
+        players[consoleplayer].message = DEH_String("failed to write savegame");
+        return;
     }
 #else
     fclose(save_stream);

@@ -23,6 +23,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "i_system.h"
 #include "of_fastram.h"
@@ -46,6 +47,9 @@ boolean		markfloor;
 boolean		markceiling;
 
 boolean		maskedtexture;
+/* Scratch for synthesising a post header over a post-less composite column. */
+static byte	masked_col_scratch[256 + 8];
+
 int		toptexture;
 int		bottomtexture;
 int		midtexture;
@@ -219,10 +223,40 @@ R_RenderMaskedSegRange
 	    dc_iscale = 0xffffffffu / (unsigned)spryscale;
 	    
 	    // draw the texture
-	    col = (column_t *)
-		(column_table[maskedtexturecol[dc_x] & widthmask] - 3);
-			
-	    R_DrawMaskedColumn (col);
+	    {
+		int tcol = maskedtexturecol[dc_x] & widthmask;
+		byte *cdata = column_table[tcol];
+
+		if (R_ColumnHasPosts(texnum, tcol))
+		{
+		    /* Single-patch column: colofs points 3 bytes past the
+		     * patch's real post header, so -3 recovers it. */
+		    col = (column_t *)(cdata - 3);
+		}
+		else
+		{
+		    /* COMPOSITE column: raw pixels with NO post header, so -3
+		     * would read the previous column's last pixels as
+		     * topdelta/length and walk away into garbage -- SIGIL II's
+		     * 2-patch SW1LION switch walked ~277 posts per column
+		     * instead of 1 (70k post draws, ~3.5 s/frame, stripes).
+		     * A composite column is fully opaque, so one full-height
+		     * post describes it exactly.  Build that in scratch. */
+		    int h = textureheight[texnum] >> FRACBITS;
+
+		    if (h > 254)
+			h = 254;          /* length is a byte */
+		    masked_col_scratch[0] = 0;          /* topdelta */
+		    masked_col_scratch[1] = (byte)h;    /* length   */
+		    masked_col_scratch[2] = 0;          /* pad      */
+		    memcpy(masked_col_scratch + 3, cdata, h);
+		    masked_col_scratch[3 + h] = 0;      /* pad      */
+		    masked_col_scratch[4 + h] = 0xff;   /* end      */
+		    col = (column_t *)masked_col_scratch;
+		}
+
+		R_DrawMaskedColumn (col);
+	    }
 	    maskedtexturecol[dc_x] = SHRT_MAX;
 	}
 	spryscale += rw_scalestep;
@@ -277,6 +311,32 @@ R_PrepareDrawColumn(fixed_t scale, int *iscale, int *lightrow,
     *lightrow = walllightrows[index];
     dc_iscale = 0xffffffffu / (unsigned)scale;
     *iscale = dc_iscale;
+}
+
+/* Exact 64-bit perpendicular distance and texture offset (the classic
+ * long-wall-error fix).  Merged spans put v1 far from the perpendicular
+ * foot, where the vanilla ANG90 offsetangle clamp warps rw_distance /
+ * rw_offset (sheared, sliding walls).  Inputs halved so the products fit
+ * int64 at map extremes; length_half is the true seg length >> 1, never 0.
+ * noinline: the caller lives in APP_BRAM and this needs the 64-bit divide
+ * helpers — keep it in regular text. */
+static __attribute__((noinline)) void
+R_ExactDistOffset (const rendersegcache_t *cache,
+		   fixed_t *dist_out, fixed_t *offset_out)
+{
+    int64_t dx  = ((int64_t)cache->v2->x - cache->v1->x) >> 1;
+    int64_t dy  = ((int64_t)cache->v2->y - cache->v1->y) >> 1;
+    int64_t dx1 = ((int64_t)viewx - cache->v1->x) >> 1;
+    int64_t dy1 = ((int64_t)viewy - cache->v1->y) >> 1;
+    int64_t len = (int64_t)cache->length_half;
+    int64_t dist = ((dy * dx1 - dx * dy1) / len) << 1;
+
+    if (dist < 0)
+	dist = 0;		/* grazing rounding: scale maxes out */
+    else if (dist > 0x7fffffff)
+	dist = 0x7fffffff;
+    *dist_out = (fixed_t)dist;
+    *offset_out = (fixed_t)(((dx * dx1 + dy * dy1) / len) << 1);
 }
 
 // Param-wall path setup: the GPU evaluates the wall's perspective planes,
@@ -862,6 +922,7 @@ R_StoreWallRange
 {
     fixed_t		hyp;
     fixed_t		sineval;
+    fixed_t		rw_exactoffset = 0;
     angle_t		distangle, offsetangle;
     fixed_t		vtop;
     int			lightnum;
@@ -1149,15 +1210,23 @@ R_StoreWallRange
 
     // calculate rw_distance for scale calculation
     rw_normalangle = seg_normalangle;
-    offsetangle = abs((int)rw_normalangle-(int)rw_angle1);
 
-    if (offsetangle > ANG90)
-	offsetangle = ANG90;
+    if (wallmerge_enabled)
+    {
+	R_ExactDistOffset (cache, &rw_distance, &rw_exactoffset);
+    }
+    else
+    {
+	offsetangle = abs((int)rw_normalangle-(int)rw_angle1);
 
-    distangle = ANG90 - offsetangle;
-    hyp = R_VertexViewDist(seg_v1);
-    sineval = finesine[distangle>>ANGLETOFINESHIFT];
-    rw_distance = FixedMul (hyp, sineval);
+	if (offsetangle > ANG90)
+	    offsetangle = ANG90;
+
+	distangle = ANG90 - offsetangle;
+	hyp = R_VertexViewDist(seg_v1);
+	sineval = finesine[distangle>>ANGLETOFINESHIFT];
+	rw_distance = FixedMul (hyp, sineval);
+    }
 
     ds_p->x1 = start;
     ds_p->x2 = stop;
@@ -1195,19 +1264,26 @@ R_StoreWallRange
 
     if (segtextured)
     {
-	offsetangle = rw_normalangle-rw_angle1;
+	if (wallmerge_enabled)
+	{
+	    rw_offset = rw_exactoffset;
+	}
+	else
+	{
+	    offsetangle = rw_normalangle-rw_angle1;
 
-	if (offsetangle > ANG180)
-	    offsetangle = -offsetangle;
+	    if (offsetangle > ANG180)
+		offsetangle = -offsetangle;
 
-	if (offsetangle > ANG90)
-	    offsetangle = ANG90;
+	    if (offsetangle > ANG90)
+		offsetangle = ANG90;
 
-	sineval = finesine[offsetangle >>ANGLETOFINESHIFT];
-	rw_offset = FixedMul (hyp, sineval);
+	    sineval = finesine[offsetangle >>ANGLETOFINESHIFT];
+	    rw_offset = FixedMul (hyp, sineval);
 
-	if (rw_normalangle-rw_angle1 < ANG180)
-	    rw_offset = -rw_offset;
+	    if (rw_normalangle-rw_angle1 < ANG180)
+		rw_offset = -rw_offset;
+	}
 
 	rw_offset += side_textureoffset + seg_offset;
 	rw_centerangle = ANG90 + viewangle - rw_normalangle;

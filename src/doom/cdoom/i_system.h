@@ -86,5 +86,10 @@ void I_PrintBanner(const char *text);
 
 void I_PrintDivider(void);
 
+// Breadcrumbs on the save/load path, off unless -savetrace is passed.
+// Low frequency by construction -- menu open and G_DoLoadGame only.
+
+void I_SaveTrace(const char *fmt, ...);
+
 #endif
 

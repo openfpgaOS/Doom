@@ -525,6 +525,16 @@ static byte **gpu_masked_tex2d;
 static int gpu_masked_tex2d_budget;
 static int gpu_tex2d_dropped;    /* textures over budget -> CPU (diagnostic) */
 
+/* True when this texture's column x is real patch data (has post headers).
+ * A composite (multi-patch) column is raw pixels with NO header, so the
+ * masked path's `column - 3` cannot be used on it. */
+int R_ColumnHasPosts(int texnum, int x)
+{
+    if (texnum < 0 || texnum >= numtextures || texturecolumnlump[texnum] == NULL)
+        return 1;
+    return texturecolumnlump[texnum][x] >= 0;
+}
+
 /* True if building `size` more block bytes would leave the zone too tight for
  * the rest of precache + gameplay.  Only consults Z_FreeMemory past the safe
  * floor, so light maps stay fast to load. */

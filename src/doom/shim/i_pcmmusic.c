@@ -42,6 +42,7 @@
 
 #include "of_mixer.h"
 #include "of_cache.h"
+#include "of_error.h"     /* OF_ERR_TIMEOUT: dispatch-guard drop on async issue */
 #include "of_file.h"
 #include "of_timer.h"
 #include "of_video.h"
@@ -57,12 +58,15 @@
                                         * underran -> ring laps -> music jumps to the start) */
 #define RING_FRAMES_MAX (MUS_RATE_MAX * RING_SECONDS)
 #define STAGING_FRAMES  4096           /* one sync read+deinterleave pass */
-#define CHUNK_FRAMES    1024           /* normal async read (4 KB): ~one frame's worth, so the fold is
-                                        * a flat per-frame trickle (no jitter). */
-#define CHUNK_FRAMES_HI 2048           /* fall back to 8 KB only while the ring is running low, to
-                                        * catch up faster -- without paying the bigger fold all the
-                                        * time.  Must stay <= 32 KB (the OS SDRAM-direct cap). */
-#define CD_LOW_FRAMES   (ring_frames / 4)  /* "running low" threshold (~1.25 s of the 5 s ring) */
+#define CHUNK_FRAMES    1024           /* MIN async read (4 KB): floor so steady state at high
+                                        * fps keeps the small, jitter-free fold. */
+#define CD_STAGE_FRAMES 4096           /* MAX async read (16 KB).  The read size adapts to the
+                                        * free ring space, so refill throughput tracks 48 kHz
+                                        * consumption down to ~12 polls/s -- the old fixed 4 KB
+                                        * chunk needed 47 polls/s and sawtoothed below that
+                                        * (Poll runs once per FRAME).  Capped so the per-chunk
+                                        * fold in Poll stays ~1 ms. */
+#define CD_STAGE_FALLBACK_FRAMES 2048  /* async_max_read unsupported (old OS): old HI size */
 #define MUS_PRIORITY    200
 #define PRESENT_STALE_US 250000u       /* no scanout for this long == OSD/stall */
 
@@ -120,13 +124,25 @@ static of_mixer_handle_t vR = OF_MIXER_HANDLE_INVALID;
 
 /* ---- async (data-slot DMA) refill state --------------------------- */
 static int           cd_slot = -1;     /* data slot of the music WAD */
-/* DMA staging in SDRAM: the async read targets the UNCACHED alias so the OS takes
- * the 32 KB SDRAM-direct path (not the 4 KB CRAM0 FIFO), and cd_fold reads it back
- * through the CACHED alias (after invalidate) -- cheap cached-SDRAM line fills
- * instead of the slow uncached CRAM0 reads that drove the fold jitter. */
-static uint8_t       cd_stage_mem[CHUNK_FRAMES_HI * MUS_BYTES_FRAME] __attribute__((aligned(64)));
-static uint8_t      *cd_stage;          /* uncached-SDRAM alias of cd_stage_mem (DMA dest) */
-static int           cd_chunk;          /* frames per DMA read */
+/* DMA staging is SDRAM via the uncached alias.  The OS CRAM0 app pool is the
+ * zero-copy path but is UNUSABLE from the app -- see pcm_ensure_init.  Kept
+ * below for the record:
+ * DMA staging PREFERS the OS CRAM0 app pool (of_file_dma_stage_alloc): the
+ * bridge writes it zero-copy and the completion IRQ stays microseconds.  Any
+ * other destination makes the OS bounce the whole chunk uncached->uncached
+ * INSIDE the completion IRQ (the RTL bridge->SDRAM write master is removed),
+ * a multi-ms interrupt blackout per chunk == the music frame stutter.  The
+ * fold then reads CRAM0 uncached, one 32-bit frame per access (ring_write's
+ * src32 walk), bounded by CD_STAGE_FRAMES and in Poll context where it
+ * belongs.  SDRAM staging remains only as the old-OS fallback. */
+static uint8_t       cd_stage_mem[CD_STAGE_FRAMES * MUS_BYTES_FRAME] __attribute__((aligned(64)));
+static uint8_t      *cd_stage;          /* DMA dest: CRAM0 pool, else uncached-SDRAM alias */
+static int           cd_stage_cram0;    /* staging is CRAM0 (zero-copy, no inval needed) */
+static int           cd_stage_frames;   /* per-read cap: CD_STAGE_FRAMES, OS max, or fallback */
+static uint32_t      cd_retry_ms;       /* next async re-attempt after a drop (of_time_ms) */
+static uint32_t      cd_backoff_ms;     /* retry backoff, doubles per consecutive drop */
+static int           cd_issue_defers;   /* consecutive dispatch-guard drops (OF_ERR_TIMEOUT) */
+static int           cd_drain_gaveup;   /* a drain timed out; skip the wait until a read lands */
 static int           cd_async_ok;       /* async usable for the current track */
 static int           cd_pending;        /* a DMA read is in flight */
 static int           cd_frames;         /* frames the in-flight read delivers */
@@ -309,6 +325,19 @@ static unsigned dg_sync_topup, dg_drain_timeout, dg_async_dropped;
 #define DG(x) do { } while (0)
 #endif
 
+/* Drop to the sync path with a scheduled retry: a wedged bridge (Pocket OSD,
+ * save collision) is transient, so a permanent downgrade left the rest of the
+ * track doing blocking main-thread SD reads (= frame stutter). */
+static void cd_async_drop(void)
+{
+    cd_async_ok = 0;
+    if (cd_backoff_ms < 1000u)
+        cd_backoff_ms = 1000u;
+    else if (cd_backoff_ms < 8000u)
+        cd_backoff_ms <<= 1;
+    cd_retry_ms = of_time_ms() + cd_backoff_ms;
+}
+
 /* ---- async refill ------------------------------------------------- */
 #ifndef OF_PC
 static void cd_cb(int token, int result)
@@ -318,13 +347,18 @@ static void cd_cb(int token, int result)
     cd_done = 1;
 }
 
-/* Kick a DMA read of up to cd_chunk frames at cd_read_off, looping/EOF.
+/* Kick a DMA read at cd_read_off, looping/EOF.
  * Non-blocking: sets cd_pending and pre-advances the read cursor. */
 static int cd_issue(void)
 {
-    /* 4 KB normally (small, smooth fold); jump to 8 KB only while the ring has
-     * run low, to catch up faster without the bigger fold running all the time. */
-    int want = (ring_valid < CD_LOW_FRAMES) ? CHUNK_FRAMES_HI : cd_chunk;
+    /* Adaptive size: fill all free ring space in one read (capped by the
+     * staging buffer / OS request limit), so refill keeps pace with the
+     * cursor at any poll rate and catch-up after a stall is immediate. */
+    int want = ring_frames - ring_valid;
+    if (want > cd_stage_frames)
+        want = cd_stage_frames;
+    if (want < CHUNK_FRAMES)
+        want = CHUNK_FRAMES;
     unsigned remain = pcm_size - cd_read_off;
     int frames, tok, space;
 
@@ -347,7 +381,26 @@ static int cd_issue(void)
     cd_result = -1;
     tok = of_file_read_async(cd_slot, pcm_base + cd_read_off, cd_stage,
                              (uint32_t)(frames * MUS_BYTES_FRAME), cd_cb);
-    if (tok < 0) { cd_async_ok = 0; DG(dg_cd_issue_err++; dg_async_dropped++); return tok; }
+    if (tok < 0)
+    {
+        /* TIMEOUT = the dispatch guard dropped the command (old OS: ack-CDC
+         * settling after recent bridge traffic; falling back to sync reads
+         * would put traffic in front of every retry = livelock).  BUSY = the
+         * bridge is momentarily owned (fixed OS reports it honestly after
+         * its quiet window).  Both are transient: keep async ON and retry
+         * next poll; the ring absorbs the gap.  Persistent failure of either
+         * kind, or any other error, is a real drop. */
+        if ((tok == OF_ERR_TIMEOUT || tok == OF_ERR_BUSY) && cd_issue_defers < 8)
+        {
+            cd_issue_defers++;
+            return tok;
+        }
+        cd_async_drop();
+        DG(dg_cd_issue_err++; dg_async_dropped++);
+        return tok;
+    }
+    cd_issue_defers = 0;
+    cd_drain_gaveup = 0;        /* bridge accepted a command — trust it again */
 
     cd_pending = 1;
     cd_frames  = frames;
@@ -367,20 +420,24 @@ void I_PCM_DrainAsync(void)
 #ifndef OF_PC
     unsigned start;
 
-    if (!cd_pending || cd_done)
+    /* Gate on the BRIDGE, not on cd_pending: cd_pending tracks only the read
+     * whose completion WE saw, and the OS can still own a transfer whose IRQ
+     * was lost (across a Pocket OSD visit).  The caller is about to take the
+     * CRAM0 mux for blocking slot I/O and must own the bridge alone --
+     * M_ReadSaveStrings flips it ten times back to back. */
+    if (cd_drain_gaveup || !of_file_async_busy())
         return;
 
     start = of_time_ms();
-    while (!cd_done)
+    while (of_file_async_busy())
     {
         of_file_async_poll();
-        if (cd_done)
-            break;
         if (!of_file_async_busy())
             break;
         if ((unsigned)(of_time_ms() - start) >= 200u)
         {
-            cd_async_ok = 0;        /* wedged — sync from here */
+            cd_drain_gaveup = 1;    /* don't re-stall every following read */
+            cd_async_drop();        /* wedged — sync for now, retry later */
             DG(dg_drain_timeout++; dg_async_dropped++);
             break;
         }
@@ -535,6 +592,11 @@ static void pcm_ensure_init(void)
         return;
     pcm_checked = 1;
 
+    /* -nomusic silences the PCM stream too — I_PlaySong probes this path
+     * before (and regardless of) the music module the flag disables. */
+    if (M_CheckParm("-nomusic") > 0)
+        return;
+
     wad = pcm_wad_name();
     if (W_AddFile(wad) == NULL)
     {
@@ -569,14 +631,40 @@ static void pcm_ensure_init(void)
         uint32_t slot;
         if (of_file_slot_find(wad, &slot) == 0)
         {
-            /* DMA straight into SDRAM via the uncached alias (the OS routes
-             * uncached-SDRAM dests through the 32 KB direct path).  cd_fold then
-             * reads it back cached, so the deinterleave is cheap.  Flush the
-             * buffer once so dirty BSS-zero lines can't evict over a DMA. */
+            uint32_t maxrd = of_file_async_max_read();
+
             cd_slot  = (int)slot;
-            cd_chunk = CHUNK_FRAMES;
-            cd_stage = (uint8_t *)of_uncached(cd_stage_mem);
-            of_cache_flush_range(cd_stage_mem, sizeof(cd_stage_mem));
+            cd_stage_frames = CD_STAGE_FRAMES;
+            if (maxrd == 0)
+                cd_stage_frames = CD_STAGE_FALLBACK_FRAMES;
+            else if (cd_stage_frames > (int)(maxrd / MUS_BYTES_FRAME))
+                cd_stage_frames = (int)(maxrd / MUS_BYTES_FRAME);
+            if (cd_stage_frames < CHUNK_FRAMES)
+                cd_stage_frames = CHUNK_FRAMES;
+
+            /* SDRAM staging via the uncached alias.  The OS bounces the chunk
+             * in the completion IRQ, so it pairs with the smaller fallback
+             * size; flush the buffer once so dirty BSS-zero lines can't evict
+             * over a DMA.
+             *
+             * The CRAM0 pool (of_file_dma_stage_alloc) is the zero-copy path,
+             * but the app CANNOT use it: cd_fold reads the staging buffer with
+             * the CPU, and CRAM0 is behind a CPU/bridge ownership mux the app
+             * has no API to hold.  Any NV-slot fclose (a save, a load, the
+             * Load menu, a config write) hands the mux back to the bridge, and
+             * a CPU read taken then is never answered -- cram0_cdc has no
+             * timeout, which back-pressures every per_axi read in the machine
+             * including the UART poll.  That is a hard freeze with no output.
+             * Re-enable only once the OS exports a mux bracket. */
+            cd_stage = NULL;
+            cd_stage_cram0 = 0;
+            if (!cd_stage_cram0)
+            {
+                if (cd_stage_frames > CD_STAGE_FALLBACK_FRAMES)
+                    cd_stage_frames = CD_STAGE_FALLBACK_FRAMES;
+                cd_stage = (uint8_t *)of_uncached(cd_stage_mem);
+                of_cache_flush_range(cd_stage_mem, sizeof(cd_stage_mem));
+            }
         }
     }
 #endif
@@ -636,7 +724,11 @@ int I_PCM_TryPlay(boolean looping)
     pcm_size    = (unsigned)l->size & ~3u;
     pcm_rd      = 0;
 
-    /* Prefill the whole ring synchronously (one-time at track start). */
+    /* Prefill the whole ring synchronously (one-time per track, ~100 ms,
+     * hidden inside the level transition).  It must cover the level-load
+     * poll gap: tracks start DURING loads, the voices consume immediately,
+     * and Poll doesn't run again until the load finishes -- a short prefill
+     * runs dry there and the track goes silent for seconds. */
     write_pos  = 0;
     ring_valid = 0;
     pcm_produce(ring_frames);
@@ -691,13 +783,22 @@ static void cd_fold(void)
     {
         if (cd_result >= 0)
         {
-            /* The bridge DMA'd into cd_stage_mem's physical SDRAM.  Invalidate
-             * so the cached read below sees the fresh data, then deinterleave
-             * from the CACHED alias (fast line fills, not uncached CRAM0). */
-            of_cache_inval_range(cd_stage_mem,
-                                 (uint32_t)cd_frames * MUS_BYTES_FRAME);
-            ring_write((const int16_t *)cd_stage_mem, cd_frames);
+            if (cd_stage_cram0)
+            {
+                /* Zero-copy CRAM0 staging: uncached, so no maintenance --
+                 * fold straight from it (one 32-bit read per frame). */
+                ring_write((const int16_t *)cd_stage, cd_frames);
+            }
+            else
+            {
+                /* SDRAM fallback: the OS bounced into cd_stage_mem.
+                 * Invalidate, then fold from the CACHED alias. */
+                of_cache_inval_range(cd_stage_mem,
+                                     (uint32_t)cd_frames * MUS_BYTES_FRAME);
+                ring_write((const int16_t *)cd_stage_mem, cd_frames);
+            }
             ring_valid += cd_frames;
+            cd_backoff_ms = 0;      /* healthy again: reset the retry backoff */
             DG(dg_cd_ok++);
         }
         else
@@ -711,17 +812,23 @@ static void cd_fold(void)
     }
 }
 
-/* No async CD reads across the WHOLE save/load sequence, not just while the menu
- * is up: the menu closes (menuactive=0) a few tics BEFORE G_DoSaveGame runs the
- * blocking slot write, and a read issued in that gap collides with the save on
- * the single data-slot bridge (GPU watchdog hang).  sendsave covers menu-confirm
- * -> button; gameaction covers the tic the blocking save/load I/O executes. */
+/* No async CD reads across the save/load sequence: sendsave covers
+ * menu-confirm -> button, gameaction covers the tic the blocking slot I/O
+ * executes, and the Load/Save menus cover the browsing in between -- the
+ * confirm closes the menu a few tics BEFORE G_DoSaveGame/G_DoLoadGame runs
+ * the blocking slot I/O, and a read still in flight there collides with it
+ * on the single data-slot bridge (GPU watchdog hang).  I_PCM_DrainAsync
+ * alone does not close that window: its wait is bounded at 200 ms and then
+ * hands the bridge over anyway.  Every OTHER menu stays async -- a menu-wide
+ * quiet window put every refill on the blocking sync path (one ~25 ms bridge
+ * command per poll, the APF host's per-command latency). */
 static int pcm_quiet(void)
 {
-    extern boolean menuactive;
     extern gameaction_t gameaction;
     extern boolean sendsave;
-    return menuactive || sendsave
+    extern boolean M_SaveLoadMenuActive(void);
+    return M_SaveLoadMenuActive()
+        || sendsave
         || gameaction == ga_savegame
         || gameaction == ga_loadgame;
 }
@@ -773,11 +880,30 @@ void I_PCM_Poll(void)
             pcm_frozen = 0;
         }
 
-        /* While a menu is up, never issue async CD reads: the single data-slot
-         * DMA bridge is shared with the save/config slot I/O the menu triggers,
-         * and a CD read in flight there wedges it (= hang on Load/Save Game).
-         * Retire any in-flight read on menu open and refill synchronously (plain
-         * file reads, no DMA bridge); hand back to async when the menu closes. */
+        /* Orphaned OS-side transfer (completion IRQ lost, e.g. across a
+         * Pocket OSD visit): the OS poll fallback observes latched DONE and
+         * retires it, unwedging of_file_read_async — which otherwise returns
+         * BUSY forever and pins us to the blocking sync path. */
+#ifndef OF_PC
+        if (!cd_pending && of_file_async_busy())
+            of_file_async_poll();
+#endif
+
+        /* Async dropped earlier (bridge error / drain timeout): those causes
+         * are transient, so re-arm after the backoff instead of spending the
+         * rest of the track on blocking main-thread reads. */
+        if (!cd_async_ok && pcm_async_enabled && cd_stage != NULL
+            && cd_slot >= 0 && !quiet && !cd_pending
+            && (int32_t)(of_time_ms() - cd_retry_ms) >= 0)
+        {
+            cd_async_ok = 1;
+            cd_read_off = pcm_rd;   /* async resumes where sync left off */
+        }
+
+        /* Entering a quiet window (see pcm_quiet): retire the in-flight read
+         * and refill synchronously (plain file reads, no DMA bridge), so the
+         * slot I/O that follows owns the bridge alone; hand back to async on
+         * the way out. */
         if (cd_async_ok)
         {
             if (quiet && !cd_menu_prev)
@@ -817,9 +943,9 @@ void I_PCM_Poll(void)
 
             if (cd_async_ok && !quiet)
             {
-                /* Issue the next read once the cursor freed a whole chunk. */
+                /* Issue the next read once the cursor freed a min chunk. */
                 if (!cd_pending && !pcm_ended &&
-                    ring_frames - ring_valid >= cd_chunk)
+                    ring_frames - ring_valid >= CHUNK_FRAMES)
                     cd_issue();
 
                 if (!cd_async_ok)            /* async dropped mid-stream */
@@ -827,7 +953,7 @@ void I_PCM_Poll(void)
             }
             else if (consumed > 0)
             {
-                pcm_produce(consumed);       /* sync top-up (menu up, or no async) */
+                pcm_produce(consumed);       /* sync top-up (save/load, or no async) */
                 DG(dg_sync_topup++);
             }
 

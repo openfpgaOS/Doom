@@ -10,6 +10,7 @@
 #include "deh_str.h"
 #include "doom_video_refresh.h"
 #include "of.h"
+#include "i_input.h"
 #include "i_system.h"
 #include "i_video.h"
 #include "i_timer.h"
@@ -53,7 +54,9 @@ int     force_software_renderer  = 0;
 int     png_screenshots          = 0;
 char   *window_position          = "center";
 unsigned int joywait             = 0;
-int     usemouse                 = 0;
+/* The dock mouse gates itself on the OS-reported presence flag, so
+ * I_ReadMouse runs unconditionally; this only drives the setup speed box. */
+int     usemouse                 = 1;
 
 /* ---- Gamma (chocolate-doom's 5-level table) -------------------------- */
 static const byte gammatable[5][256] = {
@@ -985,7 +988,7 @@ void I_StartFrame(void)
     (void)elapsed_vblanks;
 }
 extern void I_PollInput(void);
-void I_StartTic(void)                  { I_PollInput(); }
+void I_StartTic(void)                  { I_PollInput(); I_ReadMouse(); }
 
 void I_GetWindowPosition(int *x, int *y, int w, int h)
 {

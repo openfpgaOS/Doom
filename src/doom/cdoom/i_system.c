@@ -240,6 +240,19 @@ void I_PrintDivider(void)
     putchar('\n');
 }
 
+/* Unconditional on purpose: gating this on a flag made "no output" mean
+   either "never got here" or "flag never took".  Low frequency -- menu open
+   and G_DoLoadGame only.  Scaffolding; drop it once the freeze is found. */
+void I_SaveTrace(const char *fmt, ...)
+{
+    va_list argptr;
+
+    va_start(argptr, fmt);
+    vprintf(fmt, argptr);
+    va_end(argptr);
+    fflush(stdout);
+}
+
 void I_PrintStartupBanner(const char *gamedescription)
 {
     I_PrintDivider();

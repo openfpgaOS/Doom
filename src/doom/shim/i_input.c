@@ -11,6 +11,7 @@
  *   SELECT       -> TAB (map)
  *   Left stick   -> move forward/back + strafe left/right
  *   Right stick  -> analog turn
+ *   Dock mouse   -> turn + fire/strafe (see I_ReadMouse)
  *
  * Axis response follows the Quake port (in_of.c): movement axes get a
  * 50/50 linear+squared blend on the dock pad and stay linear (1:1) on
@@ -25,6 +26,7 @@
 #include "doomkeys.h"
 #include "i_input.h"
 #include "i_joystick.h"
+#include "m_config.h"
 #include "m_controls.h"
 #include "doomtype.h"
 #include "doomstat.h"
@@ -475,12 +477,225 @@ void I_StartTextInput(int x1, int y1, int x2, int y2)
 
 void I_StopTextInput(void) { }
 
-void I_BindInputVariables(void) { }
-
 float mouse_acceleration = 2.0f;
 int   mouse_threshold    = 10;
 
-void I_ReadMouse(void) { /* openfpgaOS: no mouse */ }
+/* Dock mouse aims only: the pad still walks, so vertical motion would
+ * fight the left stick.  Set "novert 0" in the cfg for the vanilla feel
+ * (mouse forward/back moves the player). */
+static int novert = 1;
+
+void I_BindInputVariables(void)
+{
+    M_BindFloatVariable("mouse_acceleration", &mouse_acceleration);
+    M_BindIntVariable("mouse_threshold",      &mouse_threshold);
+    M_BindIntVariable("novert",               &novert);
+}
+
+/* ---- Dock mouse ------------------------------------------------------ */
+
+static uint16_t mouse_buttons;
+
+/* From caps v4 on the OS hands us decoded mouse counts; older firmware
+ * passes the Pocket dock's packed sample pairs {a<<8 | b} through raw,
+ * where the true delta is the sum of the two int8 halves. */
+static int mouse_counts(int32_t v)
+{
+    static int raw_pairs = -1;
+
+    if (raw_pairs < 0)
+    {
+        const struct of_capabilities *caps = of_get_caps();
+
+        raw_pairs = caps != NULL
+                 && caps->platform_id == OF_PLATFORM_POCKET
+                 && (caps->version < 4
+                  || !(caps->os_features & OF_OS_FEAT_MOUSE_COUNTS));
+    }
+
+    if (!raw_pairs)
+    {
+        return v;
+    }
+
+    return (int8_t)(v >> 8) + (int8_t)v;
+}
+
+/* chocolate-doom's acceleration curve: motion past the threshold is
+ * scaled up, everything below it stays 1:1. */
+static int accelerate_mouse(int val)
+{
+    if (val < 0)
+    {
+        return -accelerate_mouse(-val);
+    }
+
+    if (val > mouse_threshold)
+    {
+        return (int)((val - mouse_threshold) * mouse_acceleration
+                     + mouse_threshold);
+    }
+
+    return val;
+}
+
+/* Post one ev_mouse per tic carrying the button mask (bit 0 left, 1
+ * right, 2 middle — the mouseb_* defaults) plus the motion the firmware
+ * accumulated since the last read.  That read is consuming, so this must
+ * stay the only caller of of_input_mouse_state().  With no mouse plugged
+ * in nothing is posted and input behaves exactly as before. */
+void I_ReadMouse(void)
+{
+    of_mouse_state_t ms;
+    event_t ev;
+    int dx;
+    int dy;
+
+    of_input_mouse_state(&ms);
+
+    if (!ms.present)
+    {
+        if (mouse_buttons != 0)   /* unplugged mid-click: release them */
+        {
+            mouse_buttons = 0;
+            memset(&ev, 0, sizeof(ev));
+            ev.type = ev_mouse;
+            D_PostEvent(&ev);
+        }
+
+        return;
+    }
+
+    dx = mouse_counts(ms.dx);
+    dy = mouse_counts(ms.dy);
+
+    if (dx == 0 && dy == 0 && ms.buttons == mouse_buttons)
+    {
+        return;
+    }
+
+    mouse_buttons = ms.buttons;
+
+    memset(&ev, 0, sizeof(ev));
+    ev.type = ev_mouse;
+    ev.data1 = mouse_buttons;
+    ev.data2 = accelerate_mouse(dx);
+    ev.data3 = novert ? 0 : -accelerate_mouse(dy);
+    D_PostEvent(&ev);
+}
+
+/* ── Real keyboard: Pocket dock, or MiSTer USB via hps_keyboard.v ─────
+ *
+ * of_keyboard_state_t reports USB HID usage IDs -- a level-triggered
+ * 256-bit map plus pressed/released edge masks already computed by the
+ * input HAL -- so this only translates and forwards; it keeps no edge
+ * bookkeeping of its own beyond the modifiers.
+ *
+ * Doom wants ASCII for printable keys and its own KEY_* codes otherwise,
+ * and it collapses left/right modifiers onto a single code (KEY_LALT is
+ * literally #defined to KEY_RALT).  That matches the vanilla bindings the
+ * keys exist to serve: Ctrl fire, Alt strafe, Shift run. */
+static int hid_to_doomkey(unsigned usage)
+{
+    if (usage >= 0x04u && usage <= 0x1Du) return 'a' + (int)(usage - 0x04u);
+    if (usage >= 0x1Eu && usage <= 0x26u) return '1' + (int)(usage - 0x1Eu);
+    /* HID F1..F10 are contiguous and so are Doom's; F11/F12 are not. */
+    if (usage >= 0x3Au && usage <= 0x43u) return KEY_F1 + (int)(usage - 0x3Au);
+
+    switch (usage) {
+    case 0x27u: return '0';
+    case 0x28u: return KEY_ENTER;
+    case 0x29u: return KEY_ESCAPE;
+    case 0x2Au: return KEY_BACKSPACE;
+    case 0x2Bu: return KEY_TAB;
+    case 0x2Cu: return ' ';
+    case 0x2Du: return KEY_MINUS;
+    case 0x2Eu: return KEY_EQUALS;
+    case 0x2Fu: return '[';
+    case 0x30u: return ']';
+    case 0x31u: return '\\';
+    case 0x33u: return ';';
+    case 0x34u: return '\'';
+    case 0x35u: return '`';
+    case 0x36u: return ',';
+    case 0x37u: return '.';
+    case 0x38u: return '/';
+    case 0x39u: return KEY_CAPSLOCK;
+    case 0x44u: return KEY_F11;
+    case 0x45u: return KEY_F12;
+    case 0x46u: return KEY_PRTSCR;
+    case 0x47u: return KEY_SCRLCK;
+    case 0x48u: return KEY_PAUSE;
+    case 0x49u: return KEY_INS;
+    case 0x4Au: return KEY_HOME;
+    case 0x4Bu: return KEY_PGUP;
+    case 0x4Cu: return KEY_DEL;
+    case 0x4Du: return KEY_END;
+    case 0x4Eu: return KEY_PGDN;
+    case 0x4Fu: return KEY_RIGHTARROW;
+    case 0x50u: return KEY_LEFTARROW;
+    case 0x51u: return KEY_DOWNARROW;
+    case 0x52u: return KEY_UPARROW;
+    case 0x53u: return KEY_NUMLOCK;
+    /* Keypad: map to the same codes as the main keys so the numpad works
+     * for weapon select and menu navigation. */
+    case 0x58u: return KEY_ENTER;
+    case 0x59u: return '1';
+    case 0x5Au: return '2';
+    case 0x5Bu: return '3';
+    case 0x5Cu: return '4';
+    case 0x5Du: return '5';
+    case 0x5Eu: return '6';
+    case 0x5Fu: return '7';
+    case 0x60u: return '8';
+    case 0x61u: return '9';
+    case 0x62u: return '0';
+    default:    return 0;
+    }
+}
+
+static void poll_real_keyboard(void)
+{
+    static int prev_ctrl, prev_shift, prev_alt;
+    of_keyboard_state_t kb;
+
+    of_input_keyboard_state(&kb);
+    if (!kb.present) {
+        /* Unplugged mid-hold: release whatever we were reporting held. */
+        if (prev_ctrl)  post_key(KEY_RCTRL,  0);
+        if (prev_shift) post_key(KEY_RSHIFT, 0);
+        if (prev_alt)   post_key(KEY_RALT,   0);
+        prev_ctrl = prev_shift = prev_alt = 0;
+        return;
+    }
+
+    for (unsigned w = 0; w < OF_KEYBOARD_WORDS; w++) {
+        uint32_t dn = kb.keys_pressed[w];
+        uint32_t up = kb.keys_released[w];
+        while (dn) {
+            unsigned b = (unsigned)__builtin_ctz(dn);
+            dn &= dn - 1u;
+            int k = hid_to_doomkey(w * 32u + b);
+            if (k) post_key(k, 1);
+        }
+        while (up) {
+            unsigned b = (unsigned)__builtin_ctz(up);
+            up &= up - 1u;
+            int k = hid_to_doomkey(w * 32u + b);
+            if (k) post_key(k, 0);
+        }
+    }
+
+    /* Collapse L/R onto one code, then edge off the collapsed level -- so
+     * holding LCtrl and adding RCtrl does not post a second keydown. */
+    int ctrl  = (kb.modifiers & 0x11u) != 0;
+    int shift = (kb.modifiers & 0x22u) != 0;
+    int alt   = (kb.modifiers & 0x44u) != 0;
+    if (ctrl  != prev_ctrl)  post_key(KEY_RCTRL,  ctrl);
+    if (shift != prev_shift) post_key(KEY_RSHIFT, shift);
+    if (alt   != prev_alt)   post_key(KEY_RALT,   alt);
+    prev_ctrl = ctrl; prev_shift = shift; prev_alt = alt;
+}
 
 #ifdef OF_HERETIC
 
@@ -518,6 +733,7 @@ static void her_emit(int *slot, int key)   /* key 0 = released */
 void I_PollInput(void)
 {
     of_input_poll();
+    poll_real_keyboard();
 
     of_input_state_t s;
     of_input_state(0, &s);
@@ -638,6 +854,7 @@ static void hex_emit(int *slot, int key)   /* key 0 = released */
 void I_PollInput(void)
 {
     of_input_poll();
+    poll_real_keyboard();
 
     of_input_state_t s;
     of_input_state(0, &s);
@@ -728,6 +945,7 @@ void I_PollInput(void)
 void I_PollInput(void)
 {
     of_input_poll();
+    poll_real_keyboard();
 
     of_input_state_t s;
     of_input_state(0, &s);

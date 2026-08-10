@@ -1001,6 +1001,7 @@ void R_RenderPlayerView (player_t* player)
     // The head node is the last node output.
     stage_start = R_Perf_BeginStage();
     R_RenderBSPNode (numnodes-1);
+    R_FlushWallMerge ();	// last pending merged wall of the walk
     R_Perf_EndStage(R_PERF_STAGE_BSP, stage_start);
     
     // Check for new console commands.

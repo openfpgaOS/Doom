@@ -21,8 +21,10 @@
 
 #include "doomdef.h"
 
+#include <math.h>
 #include <stdint.h>
 
+#include "m_argv.h"
 #include "m_bbox.h"
 
 #include "i_system.h"
@@ -111,6 +113,16 @@ static void R_FillSegRenderData(void)
 	dst->angle = seg->angle;
 	dst->normalangle = seg->angle + ANG90;
 	dst->offset = seg->offset;
+	{
+	    /* True length for the exact rw_distance/rw_offset divides; halved
+	     * so it fits 32 bits at map extremes.  Min 1: degenerate segs
+	     * must not divide by zero. */
+	    double dx = (double)(seg->v2->x - seg->v1->x);
+	    double dy = (double)(seg->v2->y - seg->v1->y);
+	    unsigned int len = (unsigned int)(sqrt(dx * dx + dy * dy) * 0.5);
+
+	    dst->length_half = len > 0 ? len : 1;
+	}
 	dst->pegflags = line->flags & (ML_DONTPEGTOP | ML_DONTPEGBOTTOM);
 
 	if (seg->v1->y == seg->v2->y)
@@ -676,6 +688,250 @@ R_ClipPassWallSegment
 }
 
 
+/* ── Collinear seg-fragment merge ────────────────────────────────────
+ * BSP building splits a linedef into consecutive segs (SIGIL-class maps
+ * average ~2 per linedef), and each visible fragment used to pay a full
+ * clip + R_StoreWallRange + drawseg.  StoreWallRange's geometry
+ * (rw_distance, normalangle, rw_offset, per-column scale) is identical
+ * for every fragment of one sidedef, so column-adjacent fragments merge
+ * into one clip call; the only rendering change is that the linear
+ * scale / height walks span the merged range (the same interpolation
+ * vanilla applies to any long seg).
+ *
+ * Fragments of one wall arrive interleaved with the other segs of each
+ * subsector along it, so several walls accumulate at once (slots).  A
+ * pending wall is flushed the moment any non-extending clip request
+ * OVERLAPS its columns — clip results and drawseg order only depend on
+ * relative order where columns overlap, so deferral is invisible to the
+ * pipeline.  Solid pendings mark solidcovered eagerly (the clip pass
+ * remarks the same range later), so R_CheckBBox culling never degrades;
+ * the solidsegs-based tests just stay conservative until the flush.
+ * frontsector must match so a fragment in a self-referencing-sector
+ * subsector keeps its own sector.  -nosegmerge disables. */
+#define WALLMERGE_SLOTS 8
+
+typedef struct
+{
+    boolean		solid;
+    int			x1;		/* inclusive column range */
+    int			x2;
+    seg_t*		curline;	/* first-seen fragment: geometry source */
+    rendersegcache_t*	segcache;
+    sector_t*		frontsector;
+    sector_t*		backsector;
+    visplane_t*		floorplane;	/* its subsector's planes: StoreWallRange */
+    visplane_t*		ceilingplane;	/*  marks through these globals */
+    int			angle1;		/* its raw rw_angle1 */
+    vertex_t*		vleft;		/* leftmost fragment's v1 */
+    vertex_t*		vright;		/* rightmost fragment's v2 */
+    unsigned int	age;
+} wallmerge_t;
+
+static wallmerge_t	wallmerge[WALLMERGE_SLOTS];
+static unsigned int	wallmerge_openmask;
+static unsigned int	wallmerge_age;
+int			wallmerge_enabled = -1;	/* r_segs.c keys exact math on it */
+
+/* Clip one pending merged wall with its own globals restored (flushes
+ * happen after R_AddLine has already switched curline/backsector to the
+ * interrupting seg). */
+static void R_FlushWallMergeOne (int slot)
+{
+    wallmerge_t*	w = &wallmerge[slot];
+    seg_t*		save_curline;
+    rendersegcache_t*	save_segcache;
+    sector_t*		save_front;
+    sector_t*		save_back;
+    visplane_t*		save_floor;
+    visplane_t*		save_ceiling;
+    int			save_angle1;
+
+    if (!(wallmerge_openmask & (1u << slot)))
+	return;			/* already flushed by a FIFO cascade */
+    wallmerge_openmask &= ~(1u << slot);
+
+    save_curline = curline;
+    save_segcache = cursegcache;
+    save_front = frontsector;
+    save_back = backsector;
+    save_floor = floorplane;
+    save_ceiling = ceilingplane;
+    save_angle1 = rw_angle1;
+
+    curline = w->curline;
+    cursegcache = w->segcache;
+    frontsector = w->frontsector;
+    backsector = w->backsector;
+    floorplane = w->floorplane;
+    ceilingplane = w->ceilingplane;
+    rw_angle1 = w->angle1;
+
+    if (w->solid)
+	R_ClipSolidWallSegment (w->x1, w->x2);
+    else
+	R_ClipPassWallSegment (w->x1, w->x2);
+
+    curline = save_curline;
+    cursegcache = save_segcache;
+    frontsector = save_front;
+    backsector = save_back;
+    rw_angle1 = save_angle1;
+    /* Same sector interrupted: keep the (possibly R_CheckPlane-evolved)
+     * planes, which StoreWallRange also synced to the sector plane cache;
+     * else restore the interrupted subsector's own planes. */
+    if (save_front != w->frontsector)
+    {
+	floorplane = save_floor;
+	ceilingplane = save_ceiling;
+    }
+}
+
+/* Flush pending walls in FIFO (first-seen) order up to and including
+ * `slot`: stores must land in first-seen order, or same-plane floor /
+ * ceiling marks interleave differently than vanilla and R_CheckPlane
+ * splits measurably more visplanes. */
+static void R_FlushWallMergeSlot (int slot)
+{
+    unsigned int m;
+    int i;
+    int oldest;
+
+    for (;;)
+    {
+	oldest = slot;
+	for (m = wallmerge_openmask; m != 0; m &= m - 1)
+	{
+	    i = __builtin_ctz(m);
+	    if (wallmerge[i].age < wallmerge[oldest].age)
+		oldest = i;
+	}
+	R_FlushWallMergeOne (oldest);
+	if (oldest == slot)
+	    return;
+    }
+}
+
+/* Flush every pending wall overlapping [x1,x2], except slot `keep`
+ * (-1 = none): a clip request must never run ahead of deferred columns
+ * it overlaps. */
+static void R_FlushWallMergeOverlaps (int x1, int x2, int keep)
+{
+    unsigned int m;
+    int i;
+
+    for (m = wallmerge_openmask; m != 0; m &= m - 1)
+    {
+	i = __builtin_ctz(m);
+	if (i == keep)
+	    continue;
+	/* m is a snapshot: a FIFO cascade below may close slots it still
+	 * lists — re-flushing one would clip stale data twice. */
+	if (!(wallmerge_openmask & (1u << i)))
+	    continue;
+	if (x1 <= wallmerge[i].x2 && x2 >= wallmerge[i].x1)
+	    R_FlushWallMergeSlot (i);
+    }
+}
+
+/* Flush all pending walls (end of the BSP walk). */
+void R_FlushWallMerge (void)
+{
+    while (wallmerge_openmask != 0)
+	R_FlushWallMergeSlot (__builtin_ctz(wallmerge_openmask));
+}
+
+/* Entry from R_AddLine (x2 inclusive): extend a pending wall when this
+ * seg continues the same sidedef at an adjacent column (either screen
+ * direction — the BSP may visit fragments in either order along the
+ * line), else open a new slot after clearing overlapped pendings. */
+static void R_AddWallRange (int x1, int x2, boolean solid)
+{
+    wallmerge_t*	w;
+    unsigned int	m;
+    int			i;
+    int			slot;
+
+    if (!wallmerge_enabled)
+    {
+	if (solid)
+	    R_ClipSolidWallSegment (x1, x2);
+	else
+	    R_ClipPassWallSegment (x1, x2);
+	return;
+    }
+
+    for (m = wallmerge_openmask; m != 0; m &= m - 1)
+    {
+	i = __builtin_ctz(m);
+	w = &wallmerge[i];
+	if (solid != w->solid
+	    || cursegcache->linedef != w->segcache->linedef
+	    || cursegcache->sidedef != w->segcache->sidedef
+	    || frontsector != w->frontsector)
+	    continue;
+
+	if (cursegcache->v1 == w->vright && x1 == w->x2 + 1)
+	{
+	    R_FlushWallMergeOverlaps (x1, x2, i);
+	    /* The FIFO cascade may have flushed this very slot (it was
+	     * older than an overlapped one).  Writing a closed slot would
+	     * silently drop these columns — open fresh below instead. */
+	    if (!(wallmerge_openmask & (1u << i)))
+		break;
+	    w->x2 = x2;
+	    w->vright = cursegcache->v2;
+	    if (solid)
+		R_MarkSolidColumns (x1, x2);
+	    return;
+	}
+	if (cursegcache->v2 == w->vleft && x2 == w->x1 - 1)
+	{
+	    R_FlushWallMergeOverlaps (x1, x2, i);
+	    if (!(wallmerge_openmask & (1u << i)))
+		break;
+	    w->x1 = x1;
+	    w->vleft = cursegcache->v1;
+	    if (solid)
+		R_MarkSolidColumns (x1, x2);
+	    return;
+	}
+    }
+
+    R_FlushWallMergeOverlaps (x1, x2, -1);
+
+    if (wallmerge_openmask == (1u << WALLMERGE_SLOTS) - 1)
+    {
+	/* All slots busy: flush the oldest. */
+	slot = 0;
+	for (i = 1; i < WALLMERGE_SLOTS; i++)
+	    if (wallmerge[i].age < wallmerge[slot].age)
+		slot = i;
+	R_FlushWallMergeSlot (slot);
+    }
+    else
+    {
+	slot = __builtin_ctz(~wallmerge_openmask);
+    }
+
+    w = &wallmerge[slot];
+    w->solid = solid;
+    w->x1 = x1;
+    w->x2 = x2;
+    w->curline = curline;
+    w->segcache = cursegcache;
+    w->frontsector = frontsector;
+    w->backsector = backsector;
+    w->floorplane = floorplane;
+    w->ceilingplane = ceilingplane;
+    w->angle1 = rw_angle1;
+    w->vleft = cursegcache->v1;
+    w->vright = cursegcache->v2;
+    w->age = wallmerge_age++;
+    wallmerge_openmask |= 1u << slot;
+    if (solid)
+	R_MarkSolidColumns (x1, x2);
+}
+
 
 //
 // R_ClearClipSegs
@@ -688,6 +944,10 @@ void R_ClearClipSegs (void)
     solidsegs[1].last = 0x7fffffff;
     newend = solidsegs+2;
     memset(solidcovered, 0, sizeof(solidcovered));
+
+    if (wallmerge_enabled < 0)
+	wallmerge_enabled = M_CheckParm("-nosegmerge") <= 0;
+    wallmerge_openmask = 0;
 }
 
 //
@@ -804,11 +1064,11 @@ OF_FASTTEXT void R_AddLine (seg_t*	line)
     
 				
   clippass:
-    R_ClipPassWallSegment (x1, x2-1);	
+    R_AddWallRange (x1, x2-1, false);
     goto done;
-		
+
   clipsolid:
-    R_ClipSolidWallSegment (x1, x2-1);
+    R_AddWallRange (x1, x2-1, true);
 
   done:
     R_PERF_DETAIL_END(R_PERF_DETAIL_BSP_ADD_LINE, perf_start);

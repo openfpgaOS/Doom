@@ -58,6 +58,7 @@ typedef struct
     angle_t     angle;
     angle_t     normalangle;
     fixed_t     offset;
+    unsigned int length_half;   /* true seg length >> 1 (16.16), never 0 */
     short       pegflags;
     signed char lightbias;
     byte        pad[1];
@@ -73,6 +74,12 @@ typedef void (*drawfunc_t) (int start, int stop);
 // BSP?
 void R_ClearClipSegs (void);
 void R_ClearDrawSegs (void);
+void R_FlushWallMerge (void);
+
+/* Seg-fragment merging on (default; -nosegmerge clears it).  R_StoreWallRange
+ * switches to exact 64-bit rw_distance/rw_offset when set: merged spans hit
+ * the vanilla ANG90 offsetangle clamp, which warps long walls. */
+extern int wallmerge_enabled;
 void R_BuildBSPRenderData (void);
 void R_BuildSegRenderData (void);
 void R_UpdateSegRenderData (void);

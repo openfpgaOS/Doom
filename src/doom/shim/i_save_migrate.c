@@ -6,6 +6,7 @@
 
 #include "doomtype.h"
 #include "i_save.h"
+#include "i_system.h"
 #include "p_saveg.h"
 
 #include <ctype.h>
@@ -23,7 +24,8 @@
 #define LEGACY_V2_HEADER_SIZE  16
 #define LEGACY_DECODE_SIZE     0x30000
 
-#define SAVE_WRAP_HEADER_SIZE  16
+/* SAVE_WRAP_HEADER_SIZE comes from i_save.h (shared with the per-core
+   payload-budget checks). */
 #define SAVE_WRAP_VERSION      1
 #define SAVE_WRAP_MAGIC_0      'P'
 #define SAVE_WRAP_MAGIC_1      'D'
@@ -141,9 +143,35 @@ static int read_save_wrapper(FILE *fp, uint32_t *payload_size)
     game_id = read_le32(header + 8);
     *payload_size = read_le32(header + 12);
 
-    return version == SAVE_WRAP_VERSION
-        && game_id == I_OpenFPGASaveGameID()
-        && *payload_size > 0;
+    if (version != SAVE_WRAP_VERSION
+     || game_id != I_OpenFPGASaveGameID()
+     || *payload_size == 0)
+    {
+        return 0;
+    }
+
+    /* A write that overran the 256 KB slot leaves a good header over a short
+       payload.  The header read still succeeds, so the menu lists the slot,
+       and only the full read fails -- which used to take the core down with
+       it.  Reject the slot here, so both reads agree it is unusable. */
+    {
+        long here = ftell(fp);
+        long end;
+
+        if (here < 0 || fseek(fp, 0, SEEK_END) != 0)
+        {
+            return 0;
+        }
+        end = ftell(fp);
+        if (fseek(fp, here, SEEK_SET) != 0
+         || end < (long) SAVE_WRAP_HEADER_SIZE
+         || (uint32_t) (end - (long) SAVE_WRAP_HEADER_SIZE) < *payload_size)
+        {
+            return 0;
+        }
+    }
+
+    return 1;
 }
 
 static int save_payload_valid(const uint8_t *data, size_t size)
@@ -193,16 +221,28 @@ boolean I_OpenFPGASaveRead(const char *name, byte *buffer,
     }
 #endif
 
+    I_SaveTrace("[sv] read open %s\n", name);
     fp = fopen(name, "rb");
     if (fp == NULL)
     {
+        I_SaveTrace("[sv] read open failed\n");
         return false;
     }
 
-    if (!read_save_wrapper(fp, &payload_size)
-     || payload_size > capacity
+    if (!read_save_wrapper(fp, &payload_size))
+    {
+        I_SaveTrace("[sv] read wrapper reject\n");
+        fclose(fp);
+        return false;
+    }
+
+    I_SaveTrace("[sv] read payload %u (cap %u)\n",
+                (unsigned) payload_size, (unsigned) capacity);
+
+    if (payload_size > capacity
      || fread(buffer, 1, payload_size, fp) != payload_size)
     {
+        I_SaveTrace("[sv] read short\n");
         fclose(fp);
         return false;
     }
@@ -211,8 +251,11 @@ boolean I_OpenFPGASaveRead(const char *name, byte *buffer,
 
     if (!save_payload_valid(buffer, payload_size))
     {
+        I_SaveTrace("[sv] read payload invalid\n");
         return false;
     }
+
+    I_SaveTrace("[sv] read ok\n");
 
     if (length != NULL)
     {
@@ -296,6 +339,18 @@ boolean I_OpenFPGASaveWrite(const char *name, const byte *buffer,
 
     ok = fwrite(header, 1, sizeof(header), fp) == sizeof(header)
       && fwrite(buffer, 1, length, fp) == length;
+
+    if (!ok)
+    {
+        /* Don't leave a valid header over a partial payload -- that slot
+           would list in the menu and fail every load from here on.  Blank
+           the magic so it reads as empty instead. */
+        memset(header, 0, sizeof(header));
+        if (fseek(fp, 0, SEEK_SET) == 0)
+        {
+            fwrite(header, 1, sizeof(header), fp);
+        }
+    }
 
     if (fclose(fp) != 0)
     {

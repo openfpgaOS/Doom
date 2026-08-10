@@ -430,6 +430,22 @@ static const of_texture_t *gpu_src_tex;  /* texture for the current draw, or NUL
 static uint32_t gpu_src_delta;           /* GPU base - pixel base: addr = ptr + this */
 static int gpu_tex_domain = -1;          /* last bound fetch domain (-1 = unset)  */
 
+/* -nospancont: defeat the 0x58 span-header continuation cache by
+ * invalidating the cached header before every span-list emission — every
+ * chunk then re-sends its full header.  A/B isolator for continuation-
+ * contract glitches (SW/RTL disagreement shows as spans replicated at
+ * offset positions); no cost when the feature is off or unsupported. */
+static int gpu_spancont_enabled = -1;
+static inline void gpu_spancont_gate(void)
+{
+    if (gpu_spancont_enabled < 0)
+        gpu_spancont_enabled = M_CheckParm("-nospancont") <= 0;
+#ifndef OF_PC
+    if (!gpu_spancont_enabled)
+        _gpu_span_hdr_valid = 0;
+#endif
+}
+
 /* Make `tex` the source for subsequent per-lane addresses, flipping the GPU
  * fetch domain only when the tier actually changes -- of_texture_create packs
  * the statics together, so this binds once per frame.  NULL = no GPU texture,
@@ -642,6 +658,7 @@ static int gpu_probe_param_span(void)
     record.v = 0;
     record.count = 1;
 
+    gpu_spancont_gate();
     of_gpu_draw_param_span_list(&params, &record, 1);
     of_gpu_finish();
     of_cache_inval_range(gpu_probe_fb, sizeof(gpu_probe_fb));
@@ -688,6 +705,7 @@ static int gpu_probe_param_axis_y(void)
     record.v = 0;
     record.count = 2;
 
+    gpu_spancont_gate();
     of_gpu_draw_param_span_list(&params, &record, 1);
     of_gpu_finish();
     of_cache_inval_range(gpu_probe_fb, sizeof(gpu_probe_fb));
@@ -1074,6 +1092,7 @@ static void gpu_flush_plane_band(gpu_plane_band_t *band)
         return;
 
     gpu_plane_params.light_origin = (int32_t)band->light << 16;
+    gpu_spancont_gate();
     of_gpu_draw_param_span_list(&gpu_plane_params, band->records,
                                 (uint32_t)n);
 
@@ -1104,6 +1123,7 @@ static void gpu_flush_wall_band(gpu_wall_tier_t *tier, gpu_wall_band_t *band)
         return;
 
     tier->params.light_origin = (int32_t)band->light << 16;
+    gpu_spancont_gate();
     of_gpu_draw_param_span_list(&tier->params, band->records, (uint32_t)n);
 
     gpu_wall_record_count -= n;
@@ -1131,6 +1151,7 @@ static void gpu_flush_sprite_batch(void)
     if (n <= 0)
         return;
 
+    gpu_spancont_gate();
     of_gpu_draw_param_span_list(&gpu_sprite_params, gpu_sprite_records,
                                 (uint32_t)n);
 

@@ -239,7 +239,19 @@ void SV_Close(void)
 
             fflush(SaveGameFP);
             written = ftell(SaveGameFP);
-            if (written > 0)
+            if (written >
+                (long) (sizeof(openfpga_save_buffer) - SAVE_WRAP_HEADER_SIZE))
+            {
+                // The shim's I_OpenFPGASaveWrite prepends a 16-byte "PDSV"
+                // wrapper, so the payload budget is the slot size minus that
+                // header; refuse rather than overflow the 256 KB NVRAM slot.
+                fprintf(stderr, "SV_Close: save too large for slot "
+                                "(%ld > %ld), not saved\n",
+                        written,
+                        (long) (sizeof(openfpga_save_buffer)
+                                - SAVE_WRAP_HEADER_SIZE));
+            }
+            else if (written > 0)
             {
                 I_OpenFPGASaveWrite(openfpga_active_save, openfpga_save_buffer,
                                     (size_t) written);

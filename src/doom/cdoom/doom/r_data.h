@@ -39,6 +39,11 @@ int R_GetTextureWidthMask(int tex);
 // cache budget — caller falls back to column emission.
 byte *R_GetWallTexture2D(int texnum);
 
+/* True when texture column x is real patch data (has post headers).  A
+ * composite column is raw pixels with no header, so `column - 3` is invalid
+ * on it -- see R_RenderMaskedSegRange. */
+int R_ColumnHasPosts(int texnum, int x);
+
 // Flat 2D sprite block (column-major, stride = patch height) for the
 // GPU affine-sprite path.  spritelump is vis->patch (relative index).
 byte *R_GetSpriteTexture2D(int spritelump);

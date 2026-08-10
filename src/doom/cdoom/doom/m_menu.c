@@ -527,6 +527,14 @@ menu_t  SaveDef =
     0
 };
 
+// These two menus read/write the NVRAM slots, so they share the single
+// data-slot bridge with the PCM music refill.
+boolean M_SaveLoadMenuActive(void)
+{
+    return menuactive
+        && (currentMenu == &LoadDef || currentMenu == &SaveDef);
+}
+
 
 //
 // M_ReadSaveStrings
@@ -587,8 +595,10 @@ void M_ReadSaveStrings(void)
         M_StringCopy(name, P_SaveGameFile(i), sizeof(name));
 
 #ifndef OF_PC
+        I_SaveTrace("[sv] menu slot %d: %s\n", i, name);
         retval = I_OpenFPGASaveReadHeader(name, header, sizeof(header))
                ? sizeof(header) : 0;
+        I_SaveTrace("[sv] menu slot %d: %s\n", i, retval ? "ok" : "empty");
 #else
 	handle = M_fopen(name, "rb");
         if (handle == NULL)
@@ -680,8 +690,11 @@ void M_LoadGame (int choice)
 	return;
     }
 	
+    I_SaveTrace("[sv] load menu open\n");
     M_SetupNextMenu(&LoadDef);
+    I_SaveTrace("[sv] load menu setup\n");
     M_ReadSaveStrings();
+    I_SaveTrace("[sv] load menu ready\n");
 }
 
 
@@ -2448,6 +2461,7 @@ void M_Ticker (void)
 //
 void M_Init (void)
 {
+    I_SaveTrace("[sv] trace build armed\n");
     currentMenu = &MainDef;
     menuactive = 0;
     itemOn = currentMenu->lastOn;

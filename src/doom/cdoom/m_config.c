@@ -2542,6 +2542,19 @@ void M_SaveDefaults (void)
             return;
         }
 
+#ifdef OF_DOOM
+        /* Free the single data-slot DMA bridge before this blocking NVRAM
+           write: a music refill in flight on the same bridge wedges it. */
+        {
+            extern int i_pcm_active;
+            if (i_pcm_active)
+            {
+                extern void I_PCM_DrainAsync(void);
+                I_PCM_DrainAsync();
+            }
+        }
+#endif
+
         f = M_fopen(doom_defaults.filename, "wb");
         if (!f)
             return;

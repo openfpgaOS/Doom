@@ -163,6 +163,22 @@ void R_Perf_EndDetail(r_perf_detail_t detail, unsigned int start_us)
     perf.detail_us[detail] += R_Perf_NowUS() - start_us;
 }
 
+#if R_RENDER_PERF_DETAIL_TIMING
+/* Out-of-line bodies for the fasttext timing sites (see r_perf.h). */
+unsigned int R_Perf_DetailBegin(void)
+{
+    return r_perf_detail_enabled ? R_Perf_BeginStage() : 0u;
+}
+
+void R_Perf_DetailEnd(r_perf_detail_t detail, unsigned int start_us)
+{
+    if (r_perf_detail_enabled)
+        R_Perf_EndDetail(detail, start_us);
+    else if (r_perf_summary_enabled)
+        R_Perf_CountDetail(detail);
+}
+#endif
+
 static void R_Perf_PrintAvg(const char *name, uint64_t total_us,
                             uint32_t frames)
 {

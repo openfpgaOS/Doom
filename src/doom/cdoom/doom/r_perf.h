@@ -119,16 +119,15 @@ extern int r_perf_detail_enabled;
 extern uint32_t r_perf_detail_count[R_PERF_DETAIL_COUNT];
 
 #if R_RENDER_PERF_DETAIL_TIMING
-#define R_PERF_DETAIL_BEGIN() \
-    (r_perf_detail_enabled ? R_Perf_BeginStage() : 0u)
+/* Out-of-line: the timing sites sit in OF_FASTTEXT hot loops and APP_BRAM
+ * is ~full — the inline branch+call form overflows it.  One jal per site. */
+unsigned int R_Perf_DetailBegin(void);
+void R_Perf_DetailEnd(r_perf_detail_t detail, unsigned int start_us);
+
+#define R_PERF_DETAIL_BEGIN() R_Perf_DetailBegin()
 
 #define R_PERF_DETAIL_END(detail, start_us) \
-    do { \
-        if (r_perf_detail_enabled) \
-            R_Perf_EndDetail((detail), (start_us)); \
-        else if (r_perf_summary_enabled) \
-            R_Perf_CountDetail((detail)); \
-    } while (0)
+    R_Perf_DetailEnd((detail), (start_us))
 #else
 #define R_PERF_DETAIL_BEGIN() 0u
 
