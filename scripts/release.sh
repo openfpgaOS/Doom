@@ -60,7 +60,13 @@ CONF="$SDK_DIR/src/sdk/platforms/$TARGET/platform.conf"
 BUNDLE="$SDK_DIR/build/$TARGET/$CORE"
 case "$PLATFORM_BUNDLE_KIND" in
     apf)   [ -d "$BUNDLE/Cores" ]          || err "build/$TARGET/$CORE/ not found — run 'make package CORE=$CORE TARGET=$TARGET' first." ;;
-    image) [ -f "$BUNDLE/openfpgaOS.vhd" ] || err "build/$TARGET/$CORE/ not found — run 'make package CORE=$CORE TARGET=$TARGET' first." ;;
+    # Per-game bundle: build/<t>/<core>/ holds <Game>/ (boot.vhd + saves.vhd +
+    # loose engine + inis + setup.sh) alongside one flat <Inst>.mgl per
+    # instance.  The sentinel used to be $BUNDLE/openfpgaOS.vhd -- the OLD
+    # single-image MiSTer shape, which the per-game model replaced, so this
+    # check could never pass and every `make release TARGET=mister` failed
+    # with a misleading "not found" against a directory that was right there.
+    image) [ -n "$(ls "$BUNDLE"/*/boot.vhd 2>/dev/null)" ] || err "no <Game>/boot.vhd under build/$TARGET/$CORE/ — run 'make package CORE=$CORE TARGET=$TARGET' first." ;;
     *)     err "unknown PLATFORM_BUNDLE_KIND='$PLATFORM_BUNDLE_KIND' in $CONF." ;;
 esac
 
