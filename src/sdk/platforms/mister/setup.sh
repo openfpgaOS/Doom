@@ -96,15 +96,26 @@ fi
 # why the S1 saves mount is written absolute.
 # A launcher belongs to this game iff it mounts <Game>/boot.vhd — the flat
 # games/OpenfpgaOS/ dir holds every installed game's launchers together.
-# UNDERSCORE PREFIX IS LOAD-BEARING and the folder is FLAT.  MiSTer only
-# descends into subdirectories of a _* tree when they are THEMSELVES
-# underscore-prefixed -- the stock layout is _@Homebrew/_GAMEBOY/*.mgl, one
-# level, launchers directly inside.  A plain "OpenfpgaOS/" folder is not
-# navigable: the menu shows the .rbf cores and nothing else, which reads to
-# the user as "it just loads the core, there are no options" (HW-confirmed
-# 2026-08-09).  A second nested level (_OpenfpgaOS/_Doom/) is UNVERIFIED --
-# do not add one without checking it on hardware first.
-MENU_DIR="/media/fat/_Computer/_OpenfpgaOS"
+#
+# UNDERSCORE PREFIX IS LOAD-BEARING at EVERY level.  MiSTer only descends into
+# subdirectories of a _* tree when they are THEMSELVES underscore-prefixed --
+# the stock layout is _@Homebrew/_GAMEBOY/*.mgl.  A plain "OpenfpgaOS/" folder
+# is not navigable: the menu shows the .rbf cores and nothing else, which reads
+# to the user as "it just loads the core, there are no options" (HW-confirmed
+# 2026-08-09).  Hence "_OpenfpgaOS", and hence "_$GAME" rather than "$GAME"
+# for the per-game level.
+#
+# LAYOUT: per-game subfolders (_OpenfpgaOS/_Doom/, _OpenfpgaOS/_ScummVM/, ...)
+# keep the menu readable once several games are installed.  The single nested
+# level is the part that has NOT been confirmed on hardware; if the per-game
+# folders turn out not to be navigable, set OF_MENU_FLAT=1 (env) to fall back
+# to the previously HW-confirmed flat layout without touching this script.
+MENU_ROOT="/media/fat/_Computer/_OpenfpgaOS"
+if [ "${OF_MENU_FLAT:-0}" = "1" ]; then
+    MENU_DIR="$MENU_ROOT"
+else
+    MENU_DIR="$MENU_ROOT/_$GAME"
+fi
 published=0
 if mkdir -p "$MENU_DIR" 2>/dev/null; then
     for m in "$ROOT"/*.mgl; do

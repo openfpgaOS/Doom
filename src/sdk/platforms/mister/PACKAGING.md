@@ -83,7 +83,7 @@ re-sync can't clobber injected wads; everything else defaults to
 ## 2. Publishing
 
 Host the staged tree at `MISTER_DB_BASE_URL` and `<game>.json.zip` at
-`MISTER_DB_URL`. `MISTER_DB_ID` (e.g. `thinkelastic/openfpgaos-doom`) is the
+`MISTER_DB_URL`. `MISTER_DB_ID` (e.g. `openfpgaOS/openfpgaos-doom`) is the
 Downloader database key — **never change it once published**.
 
 ## 3. Installing on the device

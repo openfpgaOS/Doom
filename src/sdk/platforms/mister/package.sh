@@ -55,13 +55,21 @@ if [ ${#MGLS[@]} -gt 0 ]; then
     # against the .mgl's own location (see mkmgl.sh PATH RESOLUTION).
     SDROOT="$(mktemp -d)"
     trap 'rm -rf "$SDROOT"' EXIT
-    mkdir -p "$SDROOT/games/OpenfpgaOS" "$SDROOT/_Computer/_OpenfpgaOS" "$SDROOT/Scripts"
+    # Per-game menu folder.  Underscore-prefixed at every level: MiSTer only
+    # descends into _*-named subdirectories of a _* tree (see setup.sh).
+    # OF_MENU_FLAT=1 falls back to the HW-confirmed flat layout.
+    if [ "${OF_MENU_FLAT:-0}" = "1" ]; then
+        MENU_REL="_Computer/_OpenfpgaOS"
+    else
+        MENU_REL="_Computer/_OpenfpgaOS/_$GAME"
+    fi
+    mkdir -p "$SDROOT/games/OpenfpgaOS" "$SDROOT/$MENU_REL" "$SDROOT/Scripts"
     cp -a "$INPUT/." "$SDROOT/games/OpenfpgaOS/"
     # Launchers ALSO at the menu path.  COPIES, not moves: the originals stay
     # under games/OpenfpgaOS/ so a package update rewrites them in place and
     # setup.sh can republish.
-    # Underscore prefix is load-bearing; see setup.sh.  Flat, one level.
-    cp -f "$INPUT"/*.mgl "$SDROOT/_Computer/_OpenfpgaOS/" 2>/dev/null || true
+    # Underscore prefix is load-bearing at every level; see setup.sh.
+    cp -f "$INPUT"/*.mgl "$SDROOT/$MENU_REL/" 2>/dev/null || true
     if [ -f "$INPUT/$GAME/setup.sh" ]; then
         cp -f "$INPUT/$GAME/setup.sh" \
               "$SDROOT/Scripts/openfpgaos-$(printf '%s' "$GAME" | tr 'A-Z' 'a-z')-setup.sh"
@@ -78,7 +86,7 @@ boot.rom -> /media/fat/games/OpenfpgaOS/), then for each game:
 
 1. Unzip this archive INTO  /media/fat/  (the SD card root).
    It places:
-     _Computer/_OpenfpgaOS/*.mgl            the launchers, ready in the menu
+     $MENU_REL/*.mgl   the launchers, ready in the menu
      games/OpenfpgaOS/$GAME/boot.vhd        read-only game image (no IWADs yet)
      games/OpenfpgaOS/$GAME/$GAME.saves.vhd saves template (seeded in step 3)
      games/OpenfpgaOS/$GAME/<inst>.ini      per-instance launch config
@@ -95,7 +103,7 @@ boot.rom -> /media/fat/games/OpenfpgaOS/), then for each game:
    absent -- your saves are never overwritten) and injects your wads into
    boot.vhd.  No ssh, no hand-copying.
 
-4. Play:  MiSTer menu -> Computer -> _OpenfpgaOS -> <instance>.
+4. Play:  MiSTer menu -> Computer -> _OpenfpgaOS -> _$GAME -> <instance>.
    The launchers are there from step 1; until step 3 has run they will start
    the core but the game will have no wads.
 

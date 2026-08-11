@@ -203,6 +203,14 @@ static OF_FASTDATA uint8_t  prev_vol_r[SMP_MAX_VOICES];
  * atomic here, and signed wrap-around compare handles counter wrap. */
 static OF_FASTDATA uint32_t orphan_grace_until[OF_MIXER_MAX_VOICES];
 
+/* Mixer priority the synth allocates music voices at.  MUST be > 0: both
+ * steal loops in alloc_voice_grouped() test `priority_shadow[i] < priority`,
+ * so a priority-0 request can never steal ANY voice -- once the free scan
+ * fails the note is simply dropped, silently.  A small non-zero value keeps
+ * music below SFX (effects still win a contended pool) while letting it
+ * reclaim an even lower-priority voice instead of going silent. */
+#define SMP_MIXER_PRIORITY 1
+
 /* Minimum envelope level before we consider it done */
 #define ENV_FLOOR 0x100
 
@@ -842,7 +850,8 @@ int smp_voice_note_on(const ofsf_zone_t *zone, int midi_ch, int note,
     of_mixer_handle_t mhv = of_mixer_alloc_for_group_h(OF_MIXER_GROUP_MUSIC,
                                                        sample_ptr,
                                                        zone->sample_length,
-                                                       sr, 0, 200);
+                                                       sr, SMP_MIXER_PRIORITY,
+                                                       200);
     if (mhv == OF_MIXER_HANDLE_INVALID) { v->active = 0; return -1; }
 
 
