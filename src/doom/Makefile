@@ -148,17 +148,22 @@ copy-app: all
 #                      tree under games/OpenfpgaOS/ at this base.
 #   MISTER_DB_URL      where doom.json.zip itself is published (for the ini snippet)
 MISTER_DB_ID       ?= openfpgaOS/openfpgaos-doom
-MISTER_DB_BASE_URL ?= https://raw.githubusercontent.com/openfpgaOS/Doom/mister-dist/
-MISTER_DB_URL      ?= https://raw.githubusercontent.com/openfpgaOS/Doom/mister-dist/doom.json.zip
+MISTER_DB_BASE_URL ?= https://github.com/openfpgaOS/Doom/releases/latest/download/
+MISTER_DB_URL      ?= https://github.com/openfpgaOS/Doom/releases/latest/download/doom.json.zip
 MISTER_DB          = $(ROOT)/releases/mister/$(APP).json.zip
 MISTER_DB_INI      = $(ROOT)/releases/mister/$(APP).downloader.ini
 ifeq ($(TARGET),mister)
+# Wording for the user-supplied data files in the bundle's INSTALL.txt.
+# The wads/ directory name is fixed by mkgame.sh/setup.sh; only the prose
+# varies, and it used to be hardcoded to Doom's IWADs for every game.
+package: export ASSET_LABEL    = commercial IWADs
+package: export ASSET_EXAMPLES = DOOM2.WAD, PLUTONIA.WAD, TNT.WAD
 package: game-dist
 	@$(ROOT)/scripts/package.sh $(APP)
 	@$(SDK_DIR)/platforms/mister/mkdb.py \
 	    --staging "$(GAME_STAGE)" --sd-prefix "games/OpenfpgaOS" \
 	    --menu-dir "_Computer/_OpenfpgaOS/_$(GAME)" \
-	    --base-url "$(MISTER_DB_BASE_URL)" --db-id "$(MISTER_DB_ID)" \
+	    --base-url "$(MISTER_DB_BASE_URL)" --url-mode flat --db-id "$(MISTER_DB_ID)" \
 	    --external "$(GAME_CSV)" --db-url "$(MISTER_DB_URL)" \
 	    --output "$(MISTER_DB)" --ini-out "$(MISTER_DB_INI)"
 else

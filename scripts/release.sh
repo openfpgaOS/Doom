@@ -61,11 +61,7 @@ BUNDLE="$SDK_DIR/build/$TARGET/$CORE"
 case "$PLATFORM_BUNDLE_KIND" in
     apf)   [ -d "$BUNDLE/Cores" ]          || err "build/$TARGET/$CORE/ not found — run 'make package CORE=$CORE TARGET=$TARGET' first." ;;
     # Per-game bundle: build/<t>/<core>/ holds <Game>/ (boot.vhd + saves.vhd +
-    # loose engine + inis + setup.sh) alongside one flat <Inst>.mgl per
-    # instance.  The sentinel used to be $BUNDLE/openfpgaOS.vhd -- the OLD
-    # single-image MiSTer shape, which the per-game model replaced, so this
-    # check could never pass and every `make release TARGET=mister` failed
-    # with a misleading "not found" against a directory that was right there.
+    # engine + inis + setup.sh) plus one flat <Inst>.mgl per instance.
     image) [ -n "$(ls "$BUNDLE"/*/boot.vhd 2>/dev/null)" ] || err "no <Game>/boot.vhd under build/$TARGET/$CORE/ — run 'make package CORE=$CORE TARGET=$TARGET' first." ;;
     *)     err "unknown PLATFORM_BUNDLE_KIND='$PLATFORM_BUNDLE_KIND' in $CONF." ;;
 esac
@@ -147,18 +143,33 @@ if [ "$PUBLISH" = "1" ]; then
     MODE_DESC="LIVE"
 fi
 
+# Downloader assets.  The DB is generated --url-mode flat against
+# releases/latest/download/, so EVERY file it references must be attached here
+# as a flat asset (basenames are unique per bundle).  Hosting on releases
+# rather than a dist branch is what allows the multi-hundred-MB .vhd images:
+# raw.githubusercontent refuses anything over 100 MB.
+ASSETS=()
+if [ -d "$BUNDLE" ]; then
+    while IFS= read -r f; do ASSETS+=("$f"); done < <(find "$BUNDLE" -type f | sort)
+fi
+for extra in "$SDK_DIR/releases/$TARGET/$CORE.json.zip" \
+             "$SDK_DIR/releases/$TARGET/$CORE.downloader.ini"; do
+    [ -f "$extra" ] && ASSETS+=("$extra")
+done
+
 echo -e "${CYAN}── Release ─────────────────────────────────────────${RESET}"
 echo -e "  core    : $CORE"
 echo -e "  tag     : $TAG"
 echo -e "  title   : $TITLE"
 echo -e "  asset   : ${ZIP#$SDK_DIR/}"
+echo -e "  extra   : ${#ASSETS[@]} flat asset(s) for the Downloader DB"
 echo -e "  notes   : $RANGE_DESC"
 echo -e "  mode    : $MODE_DESC"
 echo -e "${CYAN}────────────────────────────────────────────────────${RESET}"
 sed 's/^/    /' "$NOTES_FILE"
 echo -e "${CYAN}────────────────────────────────────────────────────${RESET}"
 
-gh release create "$TAG" "$ZIP" \
+gh release create "$TAG" "$ZIP" "${ASSETS[@]}" \
     --target "$(git rev-parse HEAD)" \
     --title "$TITLE" \
     --notes-file "$NOTES_FILE" \
