@@ -35,6 +35,22 @@
 sd_path,url,size,md5,tags
 games/OpenfpgaOS/Doom/wads/freedoom1.wad,https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip,TODO_SIZE,TODO_MD5,doom freedoom freeware
 games/OpenfpgaOS/Doom/wads/freedoom2.wad,https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip,TODO_SIZE,TODO_MD5,doom freedoom freeware
-games/OpenfpgaOS/Doom/wads/rekkrsa.wad,TODO_URL,TODO_SIZE,TODO_MD5,doom rekkr freeware iwad
-games/OpenfpgaOS/Doom/wads/SIGIL_COMPAT_V1_23.wad,TODO_URL,TODO_SIZE,TODO_MD5,doom sigil freeware
-games/OpenfpgaOS/Doom/wads/SIGIL_II_V1_0.WAD,TODO_URL,TODO_SIZE,TODO_MD5,doom sigil2 freeware
+games/OpenfpgaOS/Doom/wads/REKKR.WAD,https://archive.org/download/openFPGA-Files/doom/REKKR.WAD,39431864,4fe99876780ca827c8938c3560ce9bcb,doom rekkr freeware iwad
+games/OpenfpgaOS/Doom/wads/SIGIL_COMPAT_V1_23.wad,https://archive.org/download/openFPGA-Files/doom/SIGIL_COMPAT_V1_23.wad,4634503,e4c5ab58e226bfcc8761f35204aeb3fc,doom sigil freeware
+games/OpenfpgaOS/Doom/wads/SIGIL_II_V1_0.WAD,https://archive.org/download/openFPGA-Files/doom/SIGIL_II_V1_0.WAD,5632323,d0442f5a75f2faef3405c09a0c3acc58,doom sigil2 freeware
+games/OpenfpgaOS/Doom/wads/ALDENTE.wad,https://archive.org/download/openFPGA-Files/doom/ALDENTE.wad,5197856,0e2476137bd6d143c1c3e1fd8e541fb4,doom aldente freeware pwad
+games/OpenfpgaOS/Doom/wads/ALDENTE.deh,https://archive.org/download/openFPGA-Files/doom/ALDENTE.deh,31965,9c6123b22839d42781c3be1da346b96b,doom aldente freeware dehacked
+games/OpenfpgaOS/Doom/wads/BATMAN.WAD,https://archive.org/download/openFPGA-Files/doom/BATMAN.WAD,16973860,c4686776cb6e36100e232be914950b99,doom batman freeware pwad
+games/OpenfpgaOS/Doom/wads/BATMAN.DEH,https://archive.org/download/openFPGA-Files/doom/BATMAN.DEH,65612,7601983012eb829ec70c806c975dea1e,doom batman freeware dehacked
+games/OpenfpgaOS/Doom/wads/BLACK_MAGWELL.wad,https://archive.org/download/openFPGA-Files/doom/BLACK_MAGWELL.wad,2089523,360d87de21f7fcf79cf099c5e04cf4d9,doom blackmagwell freeware pwad
+games/OpenfpgaOS/Doom/wads/chex.wad,https://archive.org/download/openFPGA-Files/doom/chex.wad,12361532,25485721882b050afa96a56e5758dd52,doom chexquest freeware iwad
+games/OpenfpgaOS/Doom/wads/chex.deh,https://archive.org/download/openFPGA-Files/doom/chex.deh,20367,928cc1593cda42b78c8326807d5c80b6,doom chexquest freeware dehacked
+games/OpenfpgaOS/Doom/wads/D4V.WAD,https://archive.org/download/openFPGA-Files/doom/D4V.WAD,28134149,a3fd0f83eccbe5622b71ecf6496aa426,doom d4v freeware pwad
+games/OpenfpgaOS/Doom/wads/D4V.DEH,https://archive.org/download/openFPGA-Files/doom/D4V.DEH,58667,641ecaee294a431295f7731b364abf4a,doom d4v freeware dehacked
+games/OpenfpgaOS/Doom/wads/dehacked_gibs.wad,https://archive.org/download/openFPGA-Files/doom/dehacked_gibs.wad,234205,2fdb752c0e732b082e3869db0d756021,doom gibs freeware pwad
+games/OpenfpgaOS/Doom/wads/EARTH.WAD,https://archive.org/download/openFPGA-Files/doom/EARTH.WAD,3913680,cdf6bdf64c2361bc99d64fdf548157fb,doom earth freeware pwad
+games/OpenfpgaOS/Doom/wads/HBOUND.WAD,https://archive.org/download/openFPGA-Files/doom/HBOUND.WAD,15562933,64f7b27fc30e528cf04d80d29297bae2,doom hellbound freeware pwad
+games/OpenfpgaOS/Doom/wads/OHM_Dehacked.wad,https://archive.org/download/openFPGA-Files/doom/OHM_Dehacked.wad,9585,30159ef06e2f72980f48e46c18926959,doom ohm freeware pwad
+games/OpenfpgaOS/Doom/wads/REKKR.DEH,https://archive.org/download/openFPGA-Files/doom/REKKR.DEH,61312,56d961fc0764796deb59c1c86e7d60c5,doom rekkr freeware dehacked
+games/OpenfpgaOS/Doom/wads/TNT31.WAD,https://archive.org/download/openFPGA-Files/doom/TNT31.WAD,282000,7a77ee148fd9ee5bc599356218f6f6b5,doom tnt31 freeware pwad
+games/OpenfpgaOS/Doom/wads/TVR!.WAD,https://archive.org/download/openFPGA-Files/doom/TVR%21.WAD,5363532,1af281c0fbba582df7a541f5d7d5b286,doom tvr freeware pwad
