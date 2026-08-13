@@ -5,6 +5,13 @@ app_pc.d
 save_*.bin
 build/
 .obj/
-releases/
+# Bundle zips stay untracked, but the Downloader DBs are committed and
+# served via raw.githubusercontent — a stable per-game db_url immune to the
+# repo-wide releases/latest pointer (three release streams share it here).
+releases/*
+!releases/mister/
+releases/mister/*
+!releases/mister/*.json.zip
+!releases/mister/*.downloader.ini
 src/tools/phdp/phdp
 src/tools/phdp/phdpd
