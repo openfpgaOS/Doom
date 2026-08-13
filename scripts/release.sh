@@ -157,6 +157,65 @@ for extra in "$SDK_DIR/releases/$TARGET/$CORE.json.zip" \
     [ -f "$extra" ] && ASSETS+=("$extra")
 done
 
+# Preflight: the DB's flat URLs resolve to releases/latest/download/<basename>,
+# so a DB entry whose basename is not attached here 404s for every user who
+# installs via update_all -- and it fails at THEIR end, silently, long after we
+# published.  Two ways that happens: a file staged into the DB but not into the
+# bundle, and two different sd_paths sharing one basename (flat assets are keyed
+# by basename, so the second upload clobbers the first).  Check both BEFORE
+# creating the release.
+DB_ZIP="$SDK_DIR/releases/$TARGET/$CORE.json.zip"
+if [ -f "$DB_ZIP" ]; then
+    _assets_list="$(mktemp)"
+    printf '%s\n' "${ASSETS[@]}" > "$_assets_list"
+    _db_check="$(mktemp)"
+    cat > "$_db_check" <<'PY_DBCHECK'
+import json, os, sys, zipfile
+db_zip, asset_list = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(db_zip) as z:
+    db = json.loads(z.read(z.namelist()[0]))
+base = (db.get("base_files_url") or "").rstrip("/") + "/"
+paths = [l.strip() for l in open(asset_list) if l.strip()]
+names = [os.path.basename(p) for p in paths]
+
+dupes = sorted({n for n in names if names.count(n) > 1})
+missing = []
+for sd_path, ent in sorted(db.get("files", {}).items()):
+    url = ent.get("url", "")
+    if url and base and url.startswith(base):
+        want = os.path.basename(url)
+    elif not url:
+        want = os.path.basename(sd_path)   # base-url mode
+    else:
+        continue                            # third-party (freeware) URL
+    if want not in names:
+        missing.append((sd_path, want))
+
+ok = True
+if missing:
+    ok = False
+    print("release: DB references %d file(s) NOT attached to this release:" % len(missing))
+    for sd_path, want in missing:
+        print("    %-52s needs asset %s" % (sd_path, want))
+if dupes:
+    ok = False
+    print("release: %d basename collision(s) among flat assets:" % len(dupes))
+    for d in dupes:
+        print("    %s" % d)
+        for p in paths:
+            if os.path.basename(p) == d:
+                print("        %s" % p)
+sys.exit(0 if ok else 1)
+PY_DBCHECK
+    if ! python3 "$_db_check" "$DB_ZIP" "$_assets_list"; then
+        rm -f "$_assets_list" "$_db_check"
+        echo "release: refusing to publish an incomplete Downloader DB." >&2
+        exit 1
+    fi
+    rm -f "$_assets_list" "$_db_check"
+    echo -e "  db ok   : every DB-referenced file is attached"
+fi
+
 echo -e "${CYAN}── Release ─────────────────────────────────────────${RESET}"
 echo -e "  core    : $CORE"
 echo -e "  tag     : $TAG"

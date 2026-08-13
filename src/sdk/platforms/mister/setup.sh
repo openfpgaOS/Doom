@@ -127,7 +127,18 @@ if mkdir -p "$MENU_DIR" 2>/dev/null; then
     if [ "$published" -gt 0 ]; then
         ok "$published launcher(s) published to $MENU_DIR"
     else
-        warn "no $GAME launchers found in $ROOT — no menu entries created"
+        # No launchers staged under games/ is NORMAL for a Downloader install:
+        # the custom DB delivers .mgl straight to $MENU_DIR and deliberately
+        # does not duplicate them into the games volume.  Only the ZIP-install
+        # path relies on the republish above, so check the destination before
+        # crying wolf.
+        have=0
+        for m in "$MENU_DIR"/*.mgl; do [ -f "$m" ] && have=$((have+1)); done
+        if [ "$have" -gt 0 ]; then
+            ok "$have launcher(s) already present in $MENU_DIR (Downloader install)"
+        else
+            warn "no $GAME launchers found in $ROOT or $MENU_DIR — no menu entries"
+        fi
     fi
 else
     warn "could not create $MENU_DIR — launch a .mgl from $ROOT instead"
