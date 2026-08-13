@@ -89,8 +89,33 @@ debug: all
 copy: all
 	@MISTER_IP="$(MISTER_IP)" $(SDK_DIR)/platforms/$(TARGET)/copy.sh "$(APP)" "$(OBJ_DIR)/app.elf"
 
+
+# ── MiSTer Downloader DB (mirrors src/doom/Makefile) ─────────────────
+MISTER_DB_ID   ?= openfpgaOS/openfpgaos-hexen
+MISTER_DB_VER  := $(shell python3 -c "import glob,json;print(json.load(open(sorted(glob.glob('$(DIST)/Cores/*/core.json'))[0]))['core']['metadata']['version'])" 2>/dev/null || echo 0.0.0)
+# Asset URLs pin to THIS release stream's own tag: releases/latest is one
+# pointer for the whole repo and three cores share it here.
+MISTER_DB_BASE_URL ?= https://github.com/openfpgaOS/Doom/releases/download/hexen-mister-v$(MISTER_DB_VER)/
+# The DB itself is committed and served via raw — a stable per-game db_url.
+MISTER_DB_URL      ?= https://raw.githubusercontent.com/openfpgaOS/Doom/main/releases/mister/hexen.json.zip
+MISTER_DB          = $(ROOT)/releases/mister/$(APP).json.zip
+MISTER_DB_INI      = $(ROOT)/releases/mister/$(APP).downloader.ini
+
+package: export ASSET_LABEL    = the commercial IWAD
+package: export ASSET_EXAMPLES = HEXEN.WAD
+ifeq ($(TARGET),mister)
+package: game-dist
+	@$(ROOT)/scripts/package.sh $(APP)
+	@$(SDK_DIR)/platforms/mister/mkdb.py \
+	    --staging "$(GAME_STAGE)" --sd-prefix "games/OpenfpgaOS" \
+	    --menu-dir "_Computer/_OpenfpgaOS/_$(GAME)" \
+	    --base-url "$(MISTER_DB_BASE_URL)" --url-mode flat --db-id "$(MISTER_DB_ID)" \
+	    --db-url "$(MISTER_DB_URL)" \
+	    --output "$(MISTER_DB)" --ini-out "$(MISTER_DB_INI)"
+else
 package: all
 	@$(ROOT)/scripts/package.sh $(APP)
+endif
 
 # ── MiSTer per-game locked distribution ──────────────────────────────
 # Mirrors src/doom/Makefile: a read-only boot.vhd shell (the wads), a
