@@ -205,12 +205,18 @@ GAME_STAGE  = $(ROOT)/build/mister/$(APP)
 GAME_COMMON = $(ROOT)/build/mister/.$(APP)-common
 GAME_ELF    = doom.elf
 GAME_CSV    = $(DIST)/mister/external_files.csv
+# Without an explicit size mkgame sizes from the COMMON payload alone and lands
+# on the 48 MB FAT32 floor — too small for a real IWAD set (~75 MB commercial
+# alone), let alone a PWAD collection — real collections run to hundreds of MB.  The shell ships as a gzipped template
+# (mostly zeros), so a generous size costs almost nothing to download.
+GAME_BOOT_MB = 1024
 
 game-dist: $(OBJ_DIR)/app.elf
 	@rm -rf "$(GAME_STAGE)" "$(GAME_COMMON)"
 	@mkdir -p "$(GAME_STAGE)/$(GAME)/wads" "$(GAME_COMMON)"
 	@cp "$(RUNTIME)/bank.ofsf" "$(GAME_COMMON)/bank.ofsf"
-	@$(SDK_DIR)/platforms/mister/mkgame.sh --no-elf --saves-out "$(GAME_STAGE)/$(GAME)/$(GAME).saves.vhd" "$(GAME)" "$(GAME_INIS)" "$(GAME_COMMON)" "$(GAME_STAGE)/$(GAME)/boot.vhd"
+	@$(SDK_DIR)/platforms/mister/mkgame.sh --no-elf --saves-out "$(GAME_STAGE)/$(GAME)/$(GAME).saves.vhd" "$(GAME)" "$(GAME_INIS)" "$(GAME_COMMON)" "$(GAME_STAGE)/$(GAME)/boot.vhd" $(GAME_BOOT_MB)
+	@gzip -9nf "$(GAME_STAGE)/$(GAME)"/boot*.vhd
 	@$(SDK_DIR)/platforms/mister/mkmgl.sh "$(GAME)" "$(GAME_INIS)" "$(GAME_STAGE)"
 	@cp "$(OBJ_DIR)/app.elf" "$(GAME_STAGE)/$(GAME)/$(GAME_ELF)"
 	@cp "$(GAME_INIS)"/*.ini "$(GAME_STAGE)/$(GAME)/"
