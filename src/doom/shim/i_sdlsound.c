@@ -31,6 +31,7 @@ typedef struct {
 
 /* Per-Doom-channel state (channel -> stable mixer handle). */
 static of_mixer_handle_t channel_voice[NUM_CHANNELS];
+static struct { int volume, separation; } channel_params[NUM_CHANNELS];
 static unsigned int mixer_last_pump_us;
 
 void I_OpenFPGAMixerPump(void)
@@ -103,7 +104,8 @@ static boolean load_sfx(sfxinfo_t *sfx)
     }
 
     uint32_t rate = data[2] | (data[3] << 8);
-    uint32_t samples = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
+    uint32_t samples = data[4] | (data[5] << 8) | (data[6] << 16)
+                     | ((uint32_t)data[7] << 24);
     if (samples > (uint32_t)(len - 8)) samples = len - 8;
     if (samples < 32) { W_ReleaseLumpNum(sfx->lumpnum); return false; }
 
@@ -123,18 +125,19 @@ static boolean load_sfx(sfxinfo_t *sfx)
         /* 8-bit unsigned -> 16-bit signed, with the +50% master boost (mixer
          * master already at 255), hard-clamped so loud SFX limit, not wrap.
          * Doom core only — Heretic/Hexen keep stock SFX levels. */
-        int s = (((int)pcm8[i] - 128) << 8) * 15 / 10;
+        int s = ((int)pcm8[i] - 128) * 256 * 15 / 10;
         if (s > 32767)  s = 32767;
         else if (s < -32768) s = -32768;
         pcm16[i] = (int16_t)s;
 #else
-        pcm16[i] = (int16_t)((pcm8[i] - 128) << 8);
+        pcm16[i] = (int16_t)((pcm8[i] - 128) * 256);
 #endif
     }
 
     W_ReleaseLumpNum(sfx->lumpnum);
 
     sfx_slot_t *slot = malloc(sizeof(*slot));
+    if (!slot) { free(pcm16); return false; }
     slot->pcm          = pcm16;
     slot->sample_count = samples;
     slot->sample_rate  = rate ? rate : 11025;
@@ -176,9 +179,15 @@ static void I_SDL_UpdateSound(void)
 }
 
 /* Doom volume: 0..127, sep: 0..254 (0=left, 128=center, 254=right). */
-static void set_params(of_mixer_handle_t voice, int vol, int sep)
+static void set_params(int channel, int vol, int sep, boolean force)
 {
+    of_mixer_handle_t voice = channel_voice[channel];
     if (voice == OF_MIXER_HANDLE_INVALID) return;
+    if (!force && channel_params[channel].volume == vol
+        && channel_params[channel].separation == sep)
+        return;
+    channel_params[channel].volume = vol;
+    channel_params[channel].separation = sep;
     /* Map 0..127 -> 0..255 */
     int v = (vol * 255) / 127;
     int left  = ((254 - sep) * v) / 255;
@@ -238,7 +247,7 @@ static void I_SDL_UpdateSoundParams(int channel, int vol, int sep)
         channel_voice[channel] = OF_MIXER_HANDLE_INVALID;
         return;
     }
-    set_params(channel_voice[channel], vol, sep);
+    set_params(channel, vol, sep, false);
 }
 
 /* SFX priority is set above MIDI note priority (which of_smp_voice uses
@@ -297,7 +306,7 @@ static int I_SDL_StartSound(sfxinfo_t *sfx, int channel, int vol, int sep, int p
 
     clear_voice_refs(voice);
     channel_voice[channel] = voice;
-    set_params(voice, vol, sep);
+    set_params(channel, vol, sep, true);
     return channel;
 }
 

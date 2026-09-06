@@ -17,6 +17,7 @@
 #include "m_menu.h"
 #include "v_video.h"
 #include "d_event.h"
+#include "d_loop.h"
 #include "doomkeys.h"
 #include "doomtype.h"
 #include "m_argv.h"
@@ -58,7 +59,9 @@ unsigned int joywait             = 0;
  * I_ReadMouse runs unconditionally; this only drives the setup speed box. */
 int     usemouse                 = 1;
 
-/* ---- Gamma (chocolate-doom's 5-level table) -------------------------- */
+/* Preserve the port's default curve; restore the four stock DOOM gamma levels.
+ * Tables: id Software, linuxdoom-1.10/v_video.c (GPL-2.0-or-later).
+ * https://github.com/id-Software/DOOM/blob/master/linuxdoom-1.10/v_video.c */
 static const byte gammatable[5][256] = {
     {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,
      33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,
@@ -69,7 +72,71 @@ static const byte gammatable[5][256] = {
      169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,
      193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,
      217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,
-     241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,255}
+     241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,255},
+    {2,4,5,7,8,10,11,12,14,15,16,18,19,20,21,23,
+     24,25,26,27,29,30,31,32,33,34,36,37,38,39,40,41,
+     42,44,45,46,47,48,49,50,51,52,54,55,56,57,58,59,
+     60,61,62,63,64,65,66,67,69,70,71,72,73,74,75,76,
+     77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,
+     93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,
+     109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,
+     125,126,127,128,129,129,130,131,132,133,134,135,136,137,138,139,
+     140,141,142,143,144,145,146,147,148,148,149,150,151,152,153,154,
+     155,156,157,158,159,160,161,162,163,163,164,165,166,167,168,169,
+     170,171,172,173,174,175,175,176,177,178,179,180,181,182,183,184,
+     185,186,186,187,188,189,190,191,192,193,194,195,196,196,197,198,
+     199,200,201,202,203,204,205,205,206,207,208,209,210,211,212,213,
+     214,214,215,216,217,218,219,220,221,222,222,223,224,225,226,227,
+     228,229,230,230,231,232,233,234,235,236,237,237,238,239,240,241,
+     242,243,244,245,245,246,247,248,249,250,251,252,252,253,254,255},
+    {4,7,9,11,13,15,17,19,21,22,24,26,27,29,30,32,
+     33,35,36,38,39,40,42,43,45,46,47,48,50,51,52,54,
+     55,56,57,59,60,61,62,63,65,66,67,68,69,70,72,73,
+     74,75,76,77,78,79,80,82,83,84,85,86,87,88,89,90,
+     91,92,93,94,95,96,97,98,100,101,102,103,104,105,106,107,
+     108,109,110,111,112,113,114,114,115,116,117,118,119,120,121,122,
+     123,124,125,126,127,128,129,130,131,132,133,133,134,135,136,137,
+     138,139,140,141,142,143,144,144,145,146,147,148,149,150,151,152,
+     153,153,154,155,156,157,158,159,160,160,161,162,163,164,165,166,
+     166,167,168,169,170,171,172,172,173,174,175,176,177,178,178,179,
+     180,181,182,183,183,184,185,186,187,188,188,189,190,191,192,193,
+     193,194,195,196,197,197,198,199,200,201,201,202,203,204,205,206,
+     206,207,208,209,210,210,211,212,213,213,214,215,216,217,217,218,
+     219,220,221,221,222,223,224,224,225,226,227,228,228,229,230,231,
+     231,232,233,234,235,235,236,237,238,238,239,240,241,241,242,243,
+     244,244,245,246,247,247,248,249,250,251,251,252,253,254,254,255},
+    {8,12,16,19,22,24,27,29,31,34,36,38,40,41,43,45,
+     47,49,50,52,53,55,57,58,60,61,63,64,65,67,68,70,
+     71,72,74,75,76,77,79,80,81,82,84,85,86,87,88,90,
+     91,92,93,94,95,96,98,99,100,101,102,103,104,105,106,107,
+     108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,
+     124,125,126,127,128,129,130,131,132,133,134,135,135,136,137,138,
+     139,140,141,142,143,143,144,145,146,147,148,149,150,150,151,152,
+     153,154,155,155,156,157,158,159,160,160,161,162,163,164,165,165,
+     166,167,168,169,169,170,171,172,173,173,174,175,176,176,177,178,
+     179,180,180,181,182,183,183,184,185,186,186,187,188,189,189,190,
+     191,192,192,193,194,195,195,196,197,197,198,199,200,200,201,202,
+     202,203,204,205,205,206,207,207,208,209,210,210,211,212,212,213,
+     214,214,215,216,216,217,218,219,219,220,221,221,222,223,223,224,
+     225,225,226,227,227,228,229,229,230,231,231,232,233,233,234,235,
+     235,236,237,237,238,238,239,240,240,241,242,242,243,244,244,245,
+     246,246,247,247,248,249,249,250,251,251,252,253,253,254,254,255},
+    {16,23,28,32,36,39,42,45,48,50,53,55,57,60,62,64,
+     66,68,69,71,73,75,76,78,80,81,83,84,86,87,89,90,
+     92,93,94,96,97,98,100,101,102,103,105,106,107,108,109,110,
+     112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,128,
+     128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,
+     143,144,145,146,147,148,149,150,150,151,152,153,154,155,155,156,
+     157,158,159,159,160,161,162,163,163,164,165,166,166,167,168,169,
+     169,170,171,172,172,173,174,175,175,176,177,177,178,179,180,180,
+     181,182,182,183,184,184,185,186,187,187,188,189,189,190,191,191,
+     192,193,193,194,195,195,196,196,197,198,198,199,200,200,201,202,
+     202,203,203,204,205,205,206,207,207,208,208,209,210,210,211,211,
+     212,213,213,214,214,215,216,216,217,217,218,219,219,220,220,221,
+     221,222,223,223,224,224,225,225,226,227,227,228,228,229,229,230,
+     230,231,232,232,233,233,234,234,235,235,236,236,237,237,238,239,
+     239,240,240,241,241,242,242,243,243,244,244,245,245,246,246,247,
+     247,248,248,249,249,250,250,251,251,252,252,253,254,254,255,255}
 };
 
 /* Palette storage (doom hands us 256 × RGB 0-255 triplets). */
@@ -97,7 +164,6 @@ static grabmouse_callback_t grabmouse_cb;
 #define GPU_PACE_VTOTAL_UPDATE_US 500000u
 #define GPU_PACE_POCKET_VTOTAL_UPDATE_US 100000u
 #define GPU_PACE_POCKET_VTOTAL_STEP 12u
-#define DISPLAY_QUEUE_MISS_RESYNC_COUNT 4u
 
 typedef struct
 {
@@ -125,11 +191,7 @@ static unsigned int video_present_count;
 static int current_vtotal_valid;
 static int display_frame_paced;
 static int display_render_ahead;
-static int display_cadence_locked;
 static int display_flip_queued;
-static int display_resync_after_miss;
-static unsigned int display_queue_miss_count;
-static uint32_t display_flip_queued_vblank;
 static uint64_t fixed_display_sample_raw_us;
 static uint64_t fixed_display_last_raw_vblank_us;
 static unsigned int fixed_display_period_us;
@@ -159,6 +221,11 @@ static void I_CheckAdaptivePacingOptions(void)
 
 static unsigned int I_RefreshModeVTotal(int mode)
 {
+    const struct of_capabilities *caps = of_get_caps();
+
+    if (caps && caps->platform_id == OF_PLATFORM_MISTER)
+        return DOOM_VIDEO_VTOTAL_60HZ;
+
     switch (mode)
     {
         case REFRESH_MODE_PAL:
@@ -299,28 +366,6 @@ static void I_WaitForQueuedDisplayFlip(void)
 
     of_video_wait_flip();
     display_flip_queued = 0;
-    display_flip_queued_vblank = 0;
-}
-
-static void I_MarkDisplayFlipQueued(void)
-{
-    of_video_timing_t timing;
-
-    of_video_get_timing(&timing);
-    display_flip_queued = 1;
-    display_flip_queued_vblank = timing.vblank_count;
-}
-
-static int I_DisplayFlipMissedQueueWindow(void)
-{
-    of_video_timing_t timing;
-
-    if (!display_flip_queued || display_flip_queued_vblank == 0)
-        return 0;
-
-    of_video_get_timing(&timing);
-    return timing.vblank_count != 0
-        && timing.vblank_count != display_flip_queued_vblank;
 }
 
 static uint64_t I_NextFixedDisplaySampleUS(const of_video_timing_t *timing)
@@ -347,24 +392,8 @@ static int I_WaitForNextVBlank(uint32_t *last_seen_vblank,
 {
     unsigned int start_us = of_time_us();
     of_video_timing_t timing;
-    uint32_t total_elapsed = 0;
 
-    /* If rendering overran the previous display slot, vblank_count may
-     * already be ahead when we enter.  Account for those missed slots, then
-     * wait for the next fresh vblank instead of returning immediately and
-     * rendering a burst frame. */
-    of_video_get_timing(&timing);
-    if (timing.vblank_count != *last_seen_vblank)
-    {
-        uint32_t previous = *last_seen_vblank;
-        uint32_t delta = previous == 0
-                       ? 0u
-                       : timing.vblank_count - previous;
-
-        *last_seen_vblank = timing.vblank_count;
-        total_elapsed += delta;
-    }
-
+    /* An elapsed vblank already supplies a new display slot. */
     for (;;)
     {
         of_video_get_timing(&timing);
@@ -379,13 +408,10 @@ static int I_WaitForNextVBlank(uint32_t *last_seen_vblank,
                   : timing.vblank_count - previous;
             if (delta == 0)
                 delta = 1u;
-            total_elapsed += delta;
 
             if (elapsed_vblanks != NULL)
             {
-                *elapsed_vblanks = total_elapsed == 0
-                                 ? 1u
-                                 : total_elapsed;
+                *elapsed_vblanks = delta;
             }
             if (out_timing != NULL)
                 *out_timing = timing;
@@ -872,8 +898,6 @@ void I_StartFrame(void)
         last_seen_vblank = 0;
         display_frame_paced = 0;
         display_render_ahead = 0;
-        display_resync_after_miss = 0;
-        display_queue_miss_count = 0;
         I_SetDisplayFrameSampleUS(0);
         I_ResetFixedDisplaySample();
         I_AdaptiveGpuPaceReset();
@@ -885,22 +909,12 @@ void I_StartFrame(void)
     else
         I_ApplyCappedRefresh();
 
-    use_vblank_wait = frame_interpolation
+    use_vblank_wait = !singletics && frame_interpolation
                    && gpu_pace.pocket_pacing_enabled
                    && effective_refresh_mode != failed_refresh_mode;
     I_SetPocketPacing(0);
     display_frame_paced = use_vblank_wait;
     display_render_ahead = use_vblank_wait && R_GPU_UsingDirectFramebuffer();
-    /* The queue-window/resync logic below keeps the render-ahead pipeline
-     * phase-locked to a FIXED panel cadence (one queued flip per known vblank
-     * window).  Under VRR the panel runs V_TOTAL=AUTO, so vblank_count is not
-     * tied to our flip cadence and I_DisplayFlipMissedQueueWindow() reports
-     * spurious misses -- accumulating to a forced, blocking resync that shows
-     * up as a periodic hiccup.  Only arm the miss/resync path when the cadence
-     * is actually locked (non-VRR). */
-    display_cadence_locked = display_render_ahead
-                          && effective_refresh_mode != REFRESH_MODE_VRR;
-
     /* Display-paced refresh modes wait on vblank here, but gameplay stays on
      * vanilla 35 Hz wall-clock tics. d_main.c renders interpolated frames
      * between simulation tics. */
@@ -911,22 +925,11 @@ void I_StartFrame(void)
         I_ResetFixedDisplaySample();
         display_clock_active = 0;
         last_seen_vblank = 0;
-        display_resync_after_miss = 0;
-        display_queue_miss_count = 0;
         return;
     }
 
     if (display_render_ahead)
     {
-        if (display_resync_after_miss)
-        {
-            display_resync_after_miss = 0;
-            display_queue_miss_count = 0;
-            I_WaitForQueuedDisplayFlip();
-            I_ResetFixedDisplaySample();
-            last_seen_vblank = 0;
-        }
-
         of_video_get_timing(&frame_timing);
         display_clock_active = 1;
         if (effective_refresh_mode == REFRESH_MODE_VRR)
@@ -974,8 +977,6 @@ void I_StartFrame(void)
         last_seen_vblank = 0;
         display_frame_paced = 0;
         display_render_ahead = 0;
-        display_resync_after_miss = 0;
-        display_queue_miss_count = 0;
         I_RestoreFallbackRefresh(effective_refresh_mode, "no vblank");
         return;
     }
@@ -999,20 +1000,22 @@ void I_GetWindowPosition(int *x, int *y, int w, int h)
 
 void I_BindVideoVariables(void)
 {
+    static int startup_delay, max_scaling_buffer_pixels, grabmouse;
+
     M_BindIntVariable("use_mouse",               &usemouse);
     M_BindIntVariable("fullscreen",              &fullscreen);
     M_BindIntVariable("aspect_ratio_correct",    &aspect_ratio_correct);
     M_BindIntVariable("integer_scaling",         &integer_scaling);
     M_BindIntVariable("vga_porch_flash",         &vga_porch_flash);
     M_BindIntVariable("smooth_pixel_scaling",    &smooth_pixel_scaling);
-    M_BindIntVariable("startup_delay",           (int[]){0});
+    M_BindIntVariable("startup_delay",           &startup_delay);
     M_BindIntVariable("fullscreen_width",        &screen_width);
     M_BindIntVariable("fullscreen_height",       &screen_height);
     M_BindIntVariable("force_software_renderer", &force_software_renderer);
-    M_BindIntVariable("max_scaling_buffer_pixels", (int[]){0});
+    M_BindIntVariable("max_scaling_buffer_pixels", &max_scaling_buffer_pixels);
     M_BindIntVariable("window_width",            &screen_width);
     M_BindIntVariable("window_height",           &screen_height);
-    M_BindIntVariable("grabmouse",               (int[]){0});
+    M_BindIntVariable("grabmouse",               &grabmouse);
     M_BindIntVariable("usegamma",                &usegamma);
     M_BindIntVariable("png_screenshots",         &png_screenshots);
     M_BindIntVariable("vanilla_keyboard_mapping",&vanilla_keyboard_mapping);
@@ -1024,7 +1027,7 @@ void I_BindVideoVariables(void)
 
 void I_SetPalette(byte *doompal)
 {
-    const byte *gamma = gammatable[usegamma % 5];
+    const byte *gamma = gammatable[usegamma < 0 ? 0 : usegamma % 5];
     for (int i = 0; i < 256; i++) {
         uint32_t r = gamma[*doompal++];
         uint32_t g = gamma[*doompal++];
@@ -1093,13 +1096,11 @@ void I_FinishUpdate(void)
         }
         if (R_GPU_UsingDirectFramebuffer()) {
             unsigned int queued_wait_us = 0;
-            int missed_queue_window = 0;
 
             if (display_render_ahead)
             {
                 unsigned int wait_start_us = of_time_us();
 
-                missed_queue_window = I_DisplayFlipMissedQueueWindow();
                 I_WaitForQueuedDisplayFlip();
                 queued_wait_us = of_time_us() - wait_start_us;
                 R_Perf_PacingAddWait(queued_wait_us);
@@ -1107,20 +1108,7 @@ void I_FinishUpdate(void)
             if (R_GPU_PresentFrame()) {
                 if (display_render_ahead)
                 {
-                    if (display_cadence_locked && missed_queue_window)
-                    {
-                        display_queue_miss_count++;
-                        if (display_queue_miss_count >=
-                            DISPLAY_QUEUE_MISS_RESYNC_COUNT)
-                        {
-                            display_resync_after_miss = 1;
-                        }
-                    }
-                    else
-                    {
-                        display_queue_miss_count = 0;
-                    }
-                    I_MarkDisplayFlipQueued();
+                    display_flip_queued = 1;
                 }
                 video_present_count++;
                 R_Perf_CountPresentedFrame(1);
@@ -1163,7 +1151,7 @@ void I_FinishUpdate(void)
 
         unsigned int now = of_time_us();
         unsigned int dt  = now - last_flip_us;
-        if (last_flip_us && dt < target_us) {
+        if (!singletics && last_flip_us && dt < target_us) {
             unsigned int wait_start = R_Perf_BeginStage();
             usleep(target_us - dt);
             R_Perf_EndStage(R_PERF_STAGE_VSYNC_WAIT, wait_start);

@@ -96,6 +96,45 @@ byte*			dc_source;
 // just for profiling 
 int			dccount;
 
+/* Reciprocal rounding can sample just outside a masked post. Keep the
+ * ordinary column path for in-range posts and clamp only these edge cases. */
+boolean R_DrawClampedMaskedColumn(int length)
+{
+    int translated = colfunc == R_DrawTranslatedColumn
+                  || colfunc == R_DrawTranslatedColumnLow;
+    int low = colfunc == R_DrawColumnLow || colfunc == R_DrawTranslatedColumnLow;
+    int count = dc_yh - dc_yl + 1;
+    int64_t frac, last;
+    pixel_t *dest;
+    int x;
+
+    if (count <= 0 || length <= 0
+        || (!translated && colfunc != R_DrawColumn && colfunc != R_DrawColumnLow))
+        return false;
+    frac = (int64_t)dc_texturemid + (int64_t)(dc_yl - centery) * dc_iscale;
+    last = frac + (int64_t)(count - 1) * dc_iscale;
+    if (frac >= 0 && last >= 0
+        && frac < (int64_t)length * FRACUNIT && last < (int64_t)length * FRACUNIT)
+        return false;
+
+    x = dc_x << low;
+    R_GPU_PrepareForCPUAccessRect(x, dc_yl, 1 << low, count);
+    R_Perf_CountCpuColumn((unsigned int)count << low);
+    dest = ylookup[dc_yl] + columnofs[x];
+    while (count--)
+    {
+        int sample = frac < 0 ? 0 : frac >= (int64_t)length * FRACUNIT
+                   ? length - 1 : (int)(frac >> FRACBITS);
+        byte color = dc_source[translated ? sample : sample & 127];
+        if (translated) color = dc_translation[color];
+        *dest = dc_colormap[color];
+        if (low) dest[1] = *dest;
+        dest += SCREENWIDTH;
+        frac += dc_iscale;
+    }
+    return true;
+}
+
 //
 // A column is a vertical slice/span from a wall texture that,
 //  given the DOOM style restrictions on the view orientation,

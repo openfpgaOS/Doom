@@ -41,6 +41,7 @@
 #include "i_video.h"
 #include "m_config.h"
 #include "m_misc.h"
+#include "of_caps.h"
 #ifndef OF_PC
 #include "of_analogizer.h"
 #endif
@@ -1169,9 +1170,13 @@ static int M_NormalizeRefreshMode(int mode)
 int M_EffectiveRefreshMode(void)
 {
     int analogizer_mode = M_AnalogizerRefreshMode();
+    const struct of_capabilities *caps = of_get_caps();
 
     if (analogizer_mode >= 0)
         return analogizer_mode;
+
+    if (caps && caps->platform_id == OF_PLATFORM_MISTER)
+        return REFRESH_MODE_FIXED;
 
     return M_NormalizeRefreshMode(refresh_mode);
 }

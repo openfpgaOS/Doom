@@ -385,6 +385,11 @@ void R_DrawMaskedColumn (column_t* column)
 	    {
 		/* recorded */
 	    }
+
+            else if (R_DrawClampedMaskedColumn(column->length))
+            {
+                /* rounded post boundary drawn on the CPU */
+            }
 	    // Drawn by either R_DrawColumn
 	    //  or (SHADOW) R_DrawFuzzColumn.
 	    else if (maskedcolormaprow < 0
@@ -925,21 +930,10 @@ void R_DrawPlayerSprites (void)
 //
 vissprite_t	vsprsortedhead;
 
-/* Ascending scale; equal scales keep spawn order (the vanilla strict-<
- * selection sort was stable), so the draw order is unchanged. */
-static int R_CompareVisSpriteScales(const void *a, const void *b)
-{
-    const vissprite_t *sa = *(const vissprite_t *const *)a;
-    const vissprite_t *sb = *(const vissprite_t *const *)b;
-
-    if (sa->scale != sb->scale)
-	return sa->scale < sb->scale ? -1 : 1;
-    return sa < sb ? -1 : 1;
-}
-
 void R_SortVisSprites (void)
 {
     static vissprite_t*	sorted[MAXVISSPRITES];
+    static vissprite_t* scratch[MAXVISSPRITES];
     int			i;
     int			count;
 
@@ -953,7 +947,45 @@ void R_SortVisSprites (void)
     for (i=0 ; i<count ; i++)
 	sorted[i] = &vissprites[i];
 
-    qsort(sorted, count, sizeof(*sorted), R_CompareVisSpriteScales);
+    /* Stable insertion runs, followed by merges in ascending scale. */
+    for (int base = 0; base < count; base += 8)
+    {
+        int end = base + 8 < count ? base + 8 : count;
+        for (i = base + 1; i < end; i++)
+        {
+            vissprite_t *sprite = sorted[i];
+            int j = i;
+            while (j > base && sorted[j - 1]->scale > sprite->scale)
+            {
+                sorted[j] = sorted[j - 1];
+                j--;
+            }
+            sorted[j] = sprite;
+        }
+    }
+    for (int width = 8; width < count; width *= 2)
+    {
+        for (int base = 0; base + width < count; base += width * 2)
+        {
+            int mid = base + width;
+            int end = mid + width < count ? mid + width : count;
+            int left = base, right = mid, out = base;
+
+            if (sorted[mid - 1]->scale <= sorted[mid]->scale)
+                continue;
+            while (left < mid && right < end)
+            {
+                if (sorted[left]->scale <= sorted[right]->scale)
+                    scratch[out++] = sorted[left++];
+                else
+                    scratch[out++] = sorted[right++];
+            }
+            while (left < mid) scratch[out++] = sorted[left++];
+            while (right < end) scratch[out++] = sorted[right++];
+            memcpy(sorted + base, scratch + base,
+                   (size_t)(end - base) * sizeof(*sorted));
+        }
+    }
 
     for (i=0 ; i<count ; i++)
     {

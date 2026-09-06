@@ -429,8 +429,9 @@ int of_midi_play(const uint8_t *data, uint32_t len, int loop) {
     M.paused       = 0;
     M.last_pump_us = of_time_us();
 
-    /* Run the MIDI pump at 50 Hz. Combined with the 2 ms PUMP_BUDGET_US
-     * cap below, timer callback CPU load is bounded to 100 ms/sec. */
+    /* Request 50 Hz for legacy services. Current kernels deliver 1 kHz;
+     * the pump accounts actual elapsed time. Its budget caps one call,
+     * not the total CPU time spent in timer callbacks. */
     of_timer_set_callback(of_midi_pump, 50);
     return OF_MIDI_OK;
 }
@@ -506,18 +507,21 @@ void of_midi_pump(void) {
         smp_voice_tick_record_pump((uint32_t)elapsed, ticks_fired,
                                    budget_exceeded);
 
-        /* Single pass: decrement each live track's pending clock and fire its
-         * due events.  (The decrement and dispatch were two loops; merging is
-         * safe because the per-track work is independent and the overrun goto
-         * only fires inside a non-done track, which has already set
-         * any_active.) */
+        /* Advance ALL live track clocks before dispatching any events. The
+         * dispatch budget can stop us partway through the track list; since
+         * last_pump_us already advanced, skipping a later track's countdown
+         * would permanently lose elapsed time and desynchronize its notes. */
         int any_active = 0;
-        int safety = 10000;
         for (int i = 0; i < M.num_tracks; i++) {
             midi_track_t *t = &M.tracks[i];
             if (t->done) continue;
             any_active = 1;
             t->pending_us -= elapsed;
+        }
+
+        int safety = 10000;
+        for (int i = 0; i < M.num_tracks; i++) {
+            midi_track_t *t = &M.tracks[i];
             while (!t->done && t->pending_us <= 0 && safety > 0) {
                 process_event(t);
                 if (!t->done) read_next_delta(t);

@@ -329,14 +329,32 @@ R_ExactDistOffset (const rendersegcache_t *cache,
     int64_t dx1 = ((int64_t)viewx - cache->v1->x) >> 1;
     int64_t dy1 = ((int64_t)viewy - cache->v1->y) >> 1;
     int64_t len = (int64_t)cache->length_half;
-    int64_t dist = ((dy * dx1 - dx * dy1) / len) << 1;
+    int64_t dist, offset;
+
+    /* Axis-aligned walls cancel the length exactly, including its sign. */
+    if (dx == 0 && (dy == len || dy == -len))
+    {
+        dist = dy > 0 ? dx1 : -dx1;
+        offset = dy > 0 ? dy1 : -dy1;
+    }
+    else if (dy == 0 && (dx == len || dx == -len))
+    {
+        dist = dx > 0 ? -dy1 : dy1;
+        offset = dx > 0 ? dx1 : -dx1;
+    }
+    else
+    {
+        dist = (dy * dx1 - dx * dy1) / len;
+        offset = (dx * dx1 + dy * dy1) / len;
+    }
+    dist *= 2;
 
     if (dist < 0)
 	dist = 0;		/* grazing rounding: scale maxes out */
     else if (dist > 0x7fffffff)
 	dist = 0x7fffffff;
     *dist_out = (fixed_t)dist;
-    *offset_out = (fixed_t)(((dx * dx1 + dy * dy1) / len) << 1);
+    *offset_out = (fixed_t)(offset * 2);
 }
 
 // Param-wall path setup: the GPU evaluates the wall's perspective planes,

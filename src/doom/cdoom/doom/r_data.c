@@ -1291,6 +1291,22 @@ int		flatmemory;
 int		texturememory;
 int		spritememory;
 
+static void R_MarkSpawnedSprites(byte *present)
+{
+    static const struct { spritenum_t actor, effect; } spawned[] = {
+        {SPR_TROO, SPR_BAL1}, {SPR_HEAD, SPR_BAL2},
+        {SPR_BOSS, SPR_BAL7}, {SPR_BOS2, SPR_BAL7},
+        {SPR_SKEL, SPR_FATB}, {SPR_SKEL, SPR_FBXP},
+        {SPR_FATT, SPR_MANF}, {SPR_BSPI, SPR_APLS},
+        {SPR_BSPI, SPR_APBX}, {SPR_VILE, SPR_FIRE},
+        {SPR_PAIN, SPR_SKUL}, {SPR_BAR1, SPR_BEXP},
+        {SPR_BBRN, SPR_BOSF}, {SPR_BBRN, SPR_FIRE},
+    };
+    for (unsigned int i = 0; i < sizeof(spawned) / sizeof(spawned[0]); ++i)
+        if (present[spawned[i].actor])
+            present[spawned[i].effect] = 1;
+}
+
 void R_PrecacheLevel (void)
 {
     char*		flatpresent;
@@ -1454,6 +1470,9 @@ void R_PrecacheLevel (void)
 	for (j=0 ; j<(int)(sizeof(fx)/sizeof(fx[0])) ; j++)
 	    spritepresent[fx[j]] = 1;
     }
+
+    /* Monster attacks and barrel explosions are not live at level start. */
+    R_MarkSpawnedSprites(spritepresent);
 
     spritememory = 0;
     for (i=0 ; i<numsprites ; i++)
