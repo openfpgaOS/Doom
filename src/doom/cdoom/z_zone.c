@@ -19,6 +19,7 @@
 //
 
 #include <stdint.h>
+#include <limits.h>
 #include <string.h>
 
 #include "z_zone.h"
@@ -222,6 +223,8 @@ void *Z_Malloc(int size, int tag, void *user)
         I_Error("Z_Malloc: an owner is required for purgable blocks");
 
     // Round to the zone alignment and account for the block header.
+    if (size < 0 || size > INT_MAX - ZONE_ALIGN_MASK - (int)sizeof(memblock_t))
+        I_Error("Z_Malloc: invalid allocation size %i", size);
     size = (size + ZONE_ALIGN_MASK) & ~ZONE_ALIGN_MASK;
     size += sizeof(memblock_t);
 

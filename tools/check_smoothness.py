@@ -26,7 +26,11 @@ def main():
         ("video_pacing", "VIDEO", "src/doom/shim/i_video.c", ["mister-period", "late-frame", "fresh-frame", "timedemo", "overload", "config-lifetime", "gamma"]),
         ("sprite_sort", "SORT", "src/doom/cdoom/doom/r_things.c", [None]),
         ("wall_math", "WALL", "src/doom/cdoom/doom/r_segs.c", [None]),
+        ("wall_scale", "SCALE", "src/doom/cdoom/doom/r_main.c", [None]),
+        ("wall_divide", "WALL", "src/doom/cdoom/doom/r_segs.c", [None]),
+        ("view_cache", "BSP", "src/doom/cdoom/doom/r_bsp.c", [None]),
         ("sprite_precache", "DATA", "src/doom/cdoom/doom/r_data.c", [None]),
+        ("statusbar_overlay", "STATUS", "src/doom/cdoom/doom/st_stuff.c", [None]),
         ("masked_bounds", "DRAW", "src/doom/cdoom/doom/r_draw.c", [None]),
         ("sfx", "SFX", "src/doom/shim/i_sdlsound.c", ["allocation", "pcm", "params"]),
     ]
@@ -37,8 +41,12 @@ def main():
             name = test + "-" + game.lower()
             binary = output / name
             cmd = common + ["-DOF_" + game, '-DDOOM_' + macro + '_SOURCE="' + str(source / path) + '"']
+            if test == "statusbar_overlay" and "void ST_InvalidateBuffer(void)" in (source / path).read_text():
+                cmd.append("-DTEST_STATUS_INVALIDATE")
             if test == "sfx":
                 cmd.insert(1, "-I" + str(ROOT / "tools/tests/audio_mock"))
+            if test == "view_cache":
+                cmd.append(str(source / "src/doom/cdoom/tables.c"))
             cmd += [str(ROOT / "tools/tests" / ("test_" + test + ".c")), "-Wl,--gc-sections", "-o", str(binary)]
             built = subprocess.run(cmd, capture_output=True, text=True)
             (output / (name + "-build.log")).write_text(built.stdout + built.stderr)

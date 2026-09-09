@@ -32,6 +32,7 @@
 #include "doomstat.h"
 
 #include "r_local.h"
+#include "r_walldiv.h"
 #include "r_gpu.h"
 #include "r_perf.h"
 #include "r_sky.h"
@@ -313,48 +314,55 @@ R_PrepareDrawColumn(fixed_t scale, int *iscale, int *lightrow,
     *iscale = dc_iscale;
 }
 
-/* Exact 64-bit perpendicular distance and texture offset (the classic
- * long-wall-error fix).  Merged spans put v1 far from the perpendicular
- * foot, where the vanilla ANG90 offsetangle clamp warps rw_distance /
- * rw_offset (sheared, sliding walls).  Inputs halved so the products fit
- * int64 at map extremes; length_half is the true seg length >> 1, never 0.
- * noinline: the caller lives in APP_BRAM and this needs the 64-bit divide
- * helpers — keep it in regular text. */
+/* Exact perpendicular distance and texture offset for merged walls.
+ * Halved differences bound the products; length_half is never zero.
+ * Keep the wide arithmetic outside the caller's APP_BRAM section. */
 static __attribute__((noinline)) void
 R_ExactDistOffset (const rendersegcache_t *cache,
 		   fixed_t *dist_out, fixed_t *offset_out)
 {
-    int64_t dx  = ((int64_t)cache->v2->x - cache->v1->x) >> 1;
-    int64_t dy  = ((int64_t)cache->v2->y - cache->v1->y) >> 1;
-    int64_t dx1 = ((int64_t)viewx - cache->v1->x) >> 1;
-    int64_t dy1 = ((int64_t)viewy - cache->v1->y) >> 1;
+    /* Halved coordinate differences fit signed 32 bits; widen the products. */
+    int32_t dx  = R_HalfDifference(cache->v2->x, cache->v1->x);
+    int32_t dy  = R_HalfDifference(cache->v2->y, cache->v1->y);
+    int32_t dx1 = R_HalfDifference(viewx, cache->v1->x);
+    int32_t dy1 = R_HalfDifference(viewy, cache->v1->y);
     int64_t len = (int64_t)cache->length_half;
     int64_t dist, offset;
 
     /* Axis-aligned walls cancel the length exactly, including its sign. */
     if (dx == 0 && (dy == len || dy == -len))
     {
-        dist = dy > 0 ? dx1 : -dx1;
-        offset = dy > 0 ? dy1 : -dy1;
+        dist = dy > 0 ? dx1 : -(int64_t)dx1;
+        offset = dy > 0 ? dy1 : -(int64_t)dy1;
     }
     else if (dy == 0 && (dx == len || dx == -len))
     {
-        dist = dx > 0 ? -dy1 : dy1;
-        offset = dx > 0 ? dx1 : -dx1;
+        dist = dx > 0 ? -(int64_t)dy1 : dy1;
+        offset = dx > 0 ? dx1 : -(int64_t)dx1;
     }
     else
     {
-        dist = (dy * dx1 - dx * dy1) / len;
-        offset = (dx * dx1 + dy * dy1) / len;
+        uint64_t dot = (uint64_t)((int64_t)dx * dx1)
+                     + (uint64_t)((int64_t)dy * dy1);
+
+        dist = R_DivideWall((int64_t)dy * dx1 - (int64_t)dx * dy1,
+                            cache->length_half, cache->length_reciprocal);
+        offset = R_DivideWall((int64_t)dot,
+                              cache->length_half, cache->length_reciprocal);
+        /* Two INT32_MIN products can sum to positive 2^63. */
+        if (dot == (UINT64_C(1) << 63))
+            offset = (int64_t)(-(uint64_t)offset);
     }
-    dist *= 2;
 
     if (dist < 0)
 	dist = 0;		/* grazing rounding: scale maxes out */
-    else if (dist > 0x7fffffff)
+
+    if (dist > INT32_MAX / 2)
 	dist = 0x7fffffff;
+    else
+        dist *= 2;
     *dist_out = (fixed_t)dist;
-    *offset_out = (fixed_t)(offset * 2);
+    *offset_out = (fixed_t)((uint64_t)offset * 2);
 }
 
 // Param-wall path setup: the GPU evaluates the wall's perspective planes,

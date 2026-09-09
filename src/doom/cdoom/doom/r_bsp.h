@@ -59,6 +59,7 @@ typedef struct
     angle_t     normalangle;
     fixed_t     offset;
     unsigned int length_half;   /* true seg length >> 1 (16.16), never 0 */
+    uint64_t    length_reciprocal;
     short       pegflags;
     signed char lightbias;
     byte        pad[1];

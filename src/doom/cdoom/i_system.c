@@ -138,6 +138,8 @@ void I_AtExit(atexit_func_t func, boolean run_on_error)
     atexit_listentry_t *entry;
 
     entry = malloc(sizeof(*entry));
+    if (entry == NULL)
+        I_Error("I_AtExit: failed to allocate shutdown callback");
 
     entry->func = func;
     entry->run_on_error = run_on_error;

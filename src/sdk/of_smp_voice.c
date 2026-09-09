@@ -198,14 +198,6 @@ static OF_FASTDATA uint8_t reclaimed_ticks[OF_MIXER_MAX_VOICES];
 static OF_FASTDATA of_mixer_handle_t reclaimed_handle[OF_MIXER_MAX_VOICES];
 static OF_FASTDATA uint32_t reclaimed_pending;
 
-/* Mixer priority the synth allocates music voices at.  MUST be > 0: both
- * steal loops in alloc_voice_grouped() test `priority_shadow[i] < priority`,
- * so a priority-0 request can never steal ANY voice -- once the free scan
- * fails the note is simply dropped, silently.  A small non-zero value keeps
- * music below SFX (effects still win a contended pool) while letting it
- * reclaim an even lower-priority voice instead of going silent. */
-#define SMP_MIXER_PRIORITY 1
-
 /* Minimum envelope level before we consider it done */
 #define ENV_FLOOR 0x100
 
@@ -865,8 +857,7 @@ int smp_voice_note_on(const ofsf_zone_t *zone, int midi_ch, int note,
     of_mixer_handle_t mhv = of_mixer_alloc_for_group_h(OF_MIXER_GROUP_MUSIC,
                                                        sample_ptr,
                                                        zone->sample_length,
-                                                       sr, SMP_MIXER_PRIORITY,
-                                                       200);
+                                                       sr, 0, 200);
     if (mhv == OF_MIXER_HANDLE_INVALID) { v->active = 0; return -1; }
 
 

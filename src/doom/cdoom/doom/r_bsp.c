@@ -23,6 +23,7 @@
 
 #include <math.h>
 #include <stdint.h>
+#include <limits.h>
 
 #include "m_argv.h"
 #include "m_bbox.h"
@@ -39,6 +40,7 @@
 #include "doomstat.h"
 #include "r_state.h"
 #include "r_bsp.h"
+#include "r_walldiv.h"
 #include "z_zone.h"
 
 #include "tables.h"
@@ -72,6 +74,32 @@ typedef struct
 
 static bbox_angle_cache_t bbox_angle_cache[BBOX_ANGLE_CACHE_SIZE]
     R_CACHE_ALIGNED;
+
+static int bsp_view_validcount;
+static boolean bsp_view_valid;
+static fixed_t bsp_view_x, bsp_view_y;
+
+/* Absolute vertex angles and distances depend only on the view's X/Y. */
+static void R_UpdateViewCache(void)
+{
+    if (bsp_view_valid && viewx == bsp_view_x && viewy == bsp_view_y)
+        return;
+
+    if (bsp_view_validcount == INT_MAX)
+    {
+        memset(bbox_angle_cache, 0, sizeof(bbox_angle_cache));
+        for (int i = 0; i < numvertexes; ++i)
+        {
+            vertexes[i].viewanglevalidcount = 0;
+            vertexes[i].viewdistvalidcount = 0;
+        }
+        bsp_view_validcount = 0;
+    }
+    ++bsp_view_validcount;
+    bsp_view_x = viewx;
+    bsp_view_y = viewy;
+    bsp_view_valid = true;
+}
 
 typedef struct
 {
@@ -117,11 +145,12 @@ static void R_FillSegRenderData(void)
 	    /* True length for the exact rw_distance/rw_offset divides; halved
 	     * so it fits 32 bits at map extremes.  Min 1: degenerate segs
 	     * must not divide by zero. */
-	    double dx = (double)(seg->v2->x - seg->v1->x);
-	    double dy = (double)(seg->v2->y - seg->v1->y);
+	    double dx = (double)seg->v2->x - (double)seg->v1->x;
+	    double dy = (double)seg->v2->y - (double)seg->v1->y;
 	    unsigned int len = (unsigned int)(sqrt(dx * dx + dy * dy) * 0.5);
 
 	    dst->length_half = len > 0 ? len : 1;
+	    dst->length_reciprocal = R_WallReciprocal(dst->length_half);
 	}
 	dst->pegflags = line->flags & (ML_DONTPEGTOP | ML_DONTPEGBOTTOM);
 
@@ -204,6 +233,8 @@ void R_UpdateSectorPlaneCache(sector_t *sector,
 void R_BuildBSPRenderData(void)
 {
     byte *raw;
+
+    bsp_view_valid = false;
 
     if (numnodes <= 0 || nodes == NULL)
     {
@@ -355,10 +386,10 @@ static fixed_t __attribute__((noinline)) R_PointToDistBSP(fixed_t x, fixed_t y)
 
 static angle_t R_VertexViewAngle(vertex_t *vertex)
 {
-    if (vertex->viewanglevalidcount != validcount)
+    if (vertex->viewanglevalidcount != bsp_view_validcount)
     {
 	vertex->viewangle = R_PointToAngleBSP(vertex->x, vertex->y);
-	vertex->viewanglevalidcount = validcount;
+	vertex->viewanglevalidcount = bsp_view_validcount;
     }
 
     return vertex->viewangle;
@@ -366,10 +397,10 @@ static angle_t R_VertexViewAngle(vertex_t *vertex)
 
 OF_FASTTEXT fixed_t R_VertexViewDist(vertex_t *vertex)
 {
-    if (vertex->viewdistvalidcount != validcount)
+    if (vertex->viewdistvalidcount != bsp_view_validcount)
     {
 	vertex->viewdist = R_PointToDistBSP(vertex->x, vertex->y);
-	vertex->viewdistvalidcount = validcount;
+	vertex->viewdistvalidcount = bsp_view_validcount;
     }
 
     return vertex->viewdist;
@@ -386,13 +417,13 @@ OF_FASTTEXT static angle_t R_BBoxPointAngle(fixed_t x, fixed_t y)
          ^ ((unsigned int)y >> 19);
     cache = &bbox_angle_cache[hash & (BBOX_ANGLE_CACHE_SIZE - 1)];
 
-    if (cache->validcount == validcount && cache->x == x && cache->y == y)
+    if (cache->validcount == bsp_view_validcount && cache->x == x && cache->y == y)
 	return cache->angle;
 
     cache->x = x;
     cache->y = y;
     cache->angle = R_PointToAngleBSP(x, y);
-    cache->validcount = validcount;
+    cache->validcount = bsp_view_validcount;
 
     return cache->angle;
 }
@@ -938,6 +969,7 @@ static void R_AddWallRange (int x1, int x2, boolean solid)
 //
 void R_ClearClipSegs (void)
 {
+    R_UpdateViewCache();
     solidsegs[0].first = -0x7fffffff;
     solidsegs[0].last = -1;
     solidsegs[1].first = viewwidth;

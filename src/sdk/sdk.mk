@@ -170,8 +170,10 @@ OF_SDL2_OBJ = $(OBJ_DIR)/of_sdl2.o
 
 # ── Sources / objects ────────────────────────────────────────────────
 SRCS_CXX ?=
-APP_C_OBJS   = $(patsubst %.c,$(OBJ_DIR)/%.o,$(filter %.c,$(SRCS)))
-APP_CXX_OBJS = $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(filter %.cpp,$(SRCS_CXX)))
+# Parent-relative SDK sources must stay inside this app's object directory.
+sdk_app_object = $(OBJ_DIR)/$(subst ../,__parent__/,$(basename $(1))).o
+APP_C_OBJS   = $(foreach src,$(filter %.c,$(SRCS)),$(call sdk_app_object,$(src)))
+APP_CXX_OBJS = $(foreach src,$(filter %.cpp,$(SRCS_CXX)),$(call sdk_app_object,$(src)))
 APP_OBJS     = $(APP_C_OBJS) $(APP_CXX_OBJS)
 
 # ── Container-by-default RISC-V build ────────────────────────────────
@@ -247,13 +249,19 @@ $(BUILD_DIR)/app.elf: $(APP_OBJS) $(OF_INIT_OBJ) $(OF_SDL2_OBJ) $(APP_LD) $(CRT_
 	@mkdir -p $(dir $@)
 	$(LD) $(ALL_LDFLAGS) -o $@ $(CRT_OBJS) $(APP_OBJS) $(OF_INIT_OBJ) $(OF_SDL2_OBJ) $(LIBS)
 
-$(OBJ_DIR)/%.o: %.c
-	@mkdir -p $(dir $@)
-	$(CC) $(ALL_CFLAGS) -c -o $@ $<
+define SDK_APP_C_RULE
+$(call sdk_app_object,$(1)): $(1)
+	@mkdir -p $$(dir $$@)
+	$$(CC) $$(ALL_CFLAGS) -c -o $$@ $$<
+endef
+$(foreach src,$(filter %.c,$(SRCS)),$(eval $(call SDK_APP_C_RULE,$(src))))
 
-$(OBJ_DIR)/%.o: %.cpp
-	@mkdir -p $(dir $@)
-	$(CXX) $(ALL_CXXFLAGS) -c -o $@ $<
+define SDK_APP_CXX_RULE
+$(call sdk_app_object,$(1)): $(1)
+	@mkdir -p $$(dir $$@)
+	$$(CXX) $$(ALL_CXXFLAGS) -c -o $$@ $$<
+endef
+$(foreach src,$(filter %.cpp,$(SRCS_CXX)),$(eval $(call SDK_APP_CXX_RULE,$(src))))
 
 $(OF_INIT_OBJ): $(OF_INIT_SRC)
 	@mkdir -p $(dir $@)

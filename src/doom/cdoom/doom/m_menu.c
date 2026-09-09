@@ -70,6 +70,7 @@
 #include "sounds.h"
 
 #include "m_menu.h"
+#include "st_stuff.h"
 
 
 //
@@ -2330,6 +2331,9 @@ void M_Drawer (void)
     int			start;
 
     inhelpscreens = false;
+
+    if (menuactive || messageToPrint || opldev)
+        ST_InvalidateBuffer();
     
     // Horiz. & Vertically center string and print it.
     if (messageToPrint)

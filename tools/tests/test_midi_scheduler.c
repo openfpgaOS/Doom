@@ -172,7 +172,29 @@ static void test_pause_and_loop(void) {
     of_midi_stop();
 }
 
+static void test_file_bounds(void) {
+    const uint8_t track[] = {1,0x80,60,0,0,0xff,0x2f,0};
+    for (int bad = 0; bad < 6; ++bad) {
+        header(); add_track(track, sizeof(track)); song[11] = 1;
+        if (bad == 0) song[7] = 5;
+        if (bad == 1) memset(song + 4, 0xff, 4);
+        if (bad == 2) song[21] = sizeof(track) + 1;
+        if (bad == 3) memset(song + 18, 0xff, 4);
+        if (bad == 4) --song_len;
+        if (bad == 5) song[11] = 2;
+        assert(of_midi_init() == OF_MIDI_OK);
+        assert(of_midi_play(song, song_len, 0) != OF_MIDI_OK);
+        assert(!of_midi_playing() && !timer_callback);
+    }
+    header(); song[11] = 1;
+    const uint8_t extra[] = {'J','U','N','K',0,0,0,1,0};
+    append(extra, sizeof(extra)); add_track(track, sizeof(track));
+    assert(of_midi_play(song, song_len, 0) == OF_MIDI_OK);
+    of_midi_stop();
+}
+
 int main(void) {
+    test_file_bounds();
     test_single_track();
     test_pause_and_loop();
     test_track_deadline(0, 0, 0);

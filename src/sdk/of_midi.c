@@ -217,7 +217,7 @@ static void control_change(int ch, int cc, int val) {
  * ======================================================================== */
 
 static inline int trk_need(midi_track_t *t, uint32_t n) {
-    if (t->pos + n > t->len) { t->done = 1; return 0; }
+    if (t->pos > t->len || n > t->len - t->pos) { t->done = 1; return 0; }
     return 1;
 }
 
@@ -338,6 +338,8 @@ static int parse_header(void) {
         return OF_MIDI_ERR_BAD_HDR;
 
     uint32_t hdr_len = rd32(M.data + 4);
+    if (hdr_len < 6 || hdr_len > M.len - 8)
+        return OF_MIDI_ERR_BAD_HDR;
     M.format     = rd16(M.data + 8);
     M.num_tracks = rd16(M.data + 10);
     M.division   = rd16(M.data + 12);
@@ -351,10 +353,12 @@ static int parse_header(void) {
 
     uint32_t offset = 8 + hdr_len;
     int found = 0;
-    for (int i = 0; i < M.num_tracks && offset + 8 <= M.len; i++) {
+    while (found < M.num_tracks && M.len - offset >= 8) {
+        uint32_t tlen = rd32(M.data + offset + 4);
+        if (tlen > M.len - offset - 8)
+            return OF_MIDI_ERR_BAD_HDR;
         if (M.data[offset] == 'M' && M.data[offset+1] == 'T' &&
             M.data[offset+2] == 'r' && M.data[offset+3] == 'k') {
-            uint32_t tlen = rd32(M.data + offset + 4);
             M.tracks[found].data       = M.data + offset + 8;
             M.tracks[found].len        = tlen;
             M.tracks[found].pos        = 0;
@@ -362,15 +366,12 @@ static int parse_header(void) {
             M.tracks[found].running    = 0;
             M.tracks[found].done       = 0;
             found++;
-            offset += 8 + tlen;
-        } else {
-            uint32_t clen = rd32(M.data + offset + 4);
-            offset += 8 + clen;
         }
+        offset += 8 + tlen;
     }
 
-    M.num_tracks = (uint16_t)found;
     if (found == 0) return OF_MIDI_ERR_NO_TRACKS;
+    if (found != M.num_tracks) return OF_MIDI_ERR_BAD_HDR;
 
     return OF_MIDI_OK;
 }
@@ -429,9 +430,8 @@ int of_midi_play(const uint8_t *data, uint32_t len, int loop) {
     M.paused       = 0;
     M.last_pump_us = of_time_us();
 
-    /* Request 50 Hz for legacy services. Current kernels deliver 1 kHz;
-     * the pump accounts actual elapsed time. Its budget caps one call,
-     * not the total CPU time spent in timer callbacks. */
+    /* Run the MIDI pump at 50 Hz. Combined with the 2 ms PUMP_BUDGET_US
+     * cap below, timer callback CPU load is bounded to 100 ms/sec. */
     of_timer_set_callback(of_midi_pump, 50);
     return OF_MIDI_OK;
 }

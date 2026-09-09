@@ -45,6 +45,9 @@ void ST_Ticker (void);
 // Called by main loop.
 void ST_Drawer (boolean fullscreen, boolean refresh);
 
+// Called before an overlay modifies the current status-bar pixels.
+void ST_InvalidateBuffer(void);
+
 // Called when the console player is spawned on each level.
 void ST_Start (void);
 

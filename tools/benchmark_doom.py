@@ -12,7 +12,8 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 WRAPS = ["I_StartFrame", "I_FinishUpdate", "R_RenderPlayerView", "TryRunTics", "S_UpdateSounds",
-         "R_PrecacheLevel", "R_GPU_TextureDataUpdated"]
+         "R_PrecacheLevel", "R_GPU_TextureDataUpdated", "R_RenderBSPNode", "R_DrawPlanes", "R_DrawMasked",
+         "R_ScaleFromGlobalAngle"]
 
 
 def build(source, output, label):
@@ -32,15 +33,21 @@ def build(source, output, label):
     return binary
 
 
-def run(binary, output, label, wad, demo, number, trace):
-    stem = f"{label}-{demo}-{number}"
+def run(binary, output, label, wad, demo, number, trace, merges=()):
+    stem = f"{label}-{Path(demo).stem}-{number}"
     work = output / stem
     work.mkdir()
     env = dict(os.environ, SDL_VIDEODRIVER="dummy", SDL_AUDIODRIVER="dummy")
     if trace:
         env["DOOM_BENCH_TRACE"] = str(work / "trace.csv")
+        env["DOOM_BENCH_SCALE"] = str(work / "scale.bin")
+    else:
+        env.pop("DOOM_BENCH_TRACE", None)
+        env.pop("DOOM_BENCH_SCALE", None)
     cmd = [str(binary), "-iwad", str(wad), "-timedemo", demo, "-nosound",
-           "-config", str(work / "doom.cfg"), "-extraconfig", str(work / "extra.cfg")]
+           "-noautoload", "-config", str(work / "doom.cfg"), "-extraconfig", str(work / "extra.cfg")]
+    if merges:
+        cmd += ["-merge", *map(str, merges), "-dehlump"]
     result = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, timeout=60)
     log = result.stdout + result.stderr
     (work / "run.log").write_text(log)
@@ -65,6 +72,7 @@ def main():
     parser.add_argument("--baseline", type=Path, required=True, help="Unmodified checkout or git archive")
     parser.add_argument("--current", type=Path, default=ROOT)
     parser.add_argument("--iwad", type=Path, required=True)
+    parser.add_argument("--merge", type=Path, nargs="+", default=[], help="PWADs in launcher merge order")
     parser.add_argument("--output", type=Path, default=ROOT / "build/review-smoothness/demos")
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--demos", nargs="+", default=["demo1", "demo2", "demo3"])
@@ -72,15 +80,17 @@ def main():
     if args.runs < 1:
         parser.error("--runs must be positive")
     output, wad = args.output.resolve(), args.iwad.resolve()
+    merges = [p.resolve() for p in args.merge]
     output.mkdir(parents=True, exist_ok=True)
     binaries = {label: build(source.resolve(), output, label)
                 for label, source in (("before", args.baseline), ("after", args.current))}
     report = dict(iwad_sha256=hashlib.sha256(wad.read_bytes()).hexdigest(),
+                  merged_wads=[dict(name=p.name, sha256=hashlib.sha256(p.read_bytes()).hexdigest()) for p in merges],
                   scope="Host CPU renderer with display waits, SDL presentation and audio excluded; not FPGA FPS", demos={})
     for demo in args.demos:
         traces = {}
         for label, binary in binaries.items():
-            stats, work = run(binary, output, label, wad, demo, "trace", True)
+            stats, work = run(binary, output, label, wad, demo, "trace", True, merges)
             traces[label] = gameplay_trace(work / "trace.csv")
         if not traces["before"] or traces["before"] != traces["after"]:
             raise RuntimeError(f"Gameplay/framebuffer mismatch in {demo}; inspect trace.csv files")
@@ -88,7 +98,7 @@ def main():
         for n in range(args.runs):
             # Alternate order to reduce warmup/thermal bias; trace cost excluded.
             for label in (list(binaries) if n % 2 == 0 else list(reversed(binaries))):
-                stats, _ = run(binaries[label], output, label, wad, demo, n, False)
+                stats, _ = run(binaries[label], output, label, wad, demo, n, False, merges)
                 measurements[label].append(stats)
         medians = {label: {key: statistics.median(s[key] for s in samples) for key in samples[0]}
                    for label, samples in measurements.items()}

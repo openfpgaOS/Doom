@@ -6,13 +6,43 @@
 #include "doomstat.h"
 #include "i_video.h"
 #include "d_player.h"
+#include "r_main.h"
+#include "r_state.h"
 
 static uint64_t render_ns, tic_ns, sound_ns;
+static uint64_t bsp_ns, planes_ns, masked_ns;
 static uint64_t frames, views, samples[20000];
 static uint64_t lazy_updates, lazy_bytes, precache_updates, precache_bytes;
 static int rendering, precaching;
 static FILE *trace;
 static int trace_checked;
+static FILE *scale_trace;
+static unsigned scale_calls;
+static int scale_checked;
+
+fixed_t __real_R_ScaleFromGlobalAngle(angle_t angle);
+fixed_t __wrap_R_ScaleFromGlobalAngle(angle_t angle)
+{
+    fixed_t result = __real_R_ScaleFromGlobalAngle(angle);
+    if (!scale_checked) {
+        const char *path = getenv("DOOM_BENCH_SCALE");
+        if (path) {
+            scale_trace = fopen(path, "wb");
+            if (!scale_trace) abort();
+        }
+        scale_checked = 1;
+    }
+    if (scale_trace && (scale_calls++ & 255u) == 0) {
+        uint32_t values[] = {angle, viewangle, rw_normalangle, rw_distance,
+                             projection, detailshift, result};
+        for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
+            unsigned char bytes[4];
+            for (unsigned j = 0; j < 4; ++j) bytes[j] = values[i] >> (8 * j);
+            if (fwrite(bytes, sizeof(bytes), 1, scale_trace) != 1) abort();
+        }
+    }
+    return result;
+}
 
 static uint64_t clock_ns(void)
 {
@@ -20,6 +50,24 @@ static uint64_t clock_ns(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000u + ts.tv_nsec;
 }
+
+void __real_R_RenderBSPNode(int node);
+void __wrap_R_RenderBSPNode(int node)
+{
+    uint64_t start = clock_ns();
+    __real_R_RenderBSPNode(node);
+    bsp_ns += clock_ns() - start;
+}
+
+#define STAGE_PROBE(name, counter) \
+    void __real_##name(void); \
+    void __wrap_##name(void) { \
+        uint64_t start = clock_ns(); \
+        __real_##name(); \
+        counter += clock_ns() - start; \
+    }
+STAGE_PROBE(R_DrawPlanes, planes_ns)
+STAGE_PROBE(R_DrawMasked, masked_ns)
 
 void __real_R_RenderPlayerView(player_t *player);
 void __wrap_R_RenderPlayerView(player_t *player)
@@ -108,14 +156,17 @@ static int compare_u64(const void *a, const void *b)
 __attribute__((destructor)) static void report(void)
 {
     if (trace) fclose(trace);
+    if (scale_trace && fclose(scale_trace)) abort();
     size_t n = views < 20000 ? views : 20000;
     qsort(samples, n, sizeof(samples[0]), compare_u64);
     fprintf(stderr, "DOOM_BENCH {\"frames\":%" PRIu64 ",\"views\":%" PRIu64
             ",\"render_ns\":%" PRIu64 ",\"tic_ns\":%" PRIu64
             ",\"sound_ns\":%" PRIu64 ",\"render_p99_ns\":%" PRIu64
+            ",\"bsp_ns\":%" PRIu64 ",\"planes_ns\":%" PRIu64 ",\"masked_ns\":%" PRIu64
             ",\"lazy_texture_updates\":%" PRIu64 ",\"lazy_texture_bytes\":%" PRIu64
             ",\"precache_updates\":%" PRIu64 ",\"precache_bytes\":%" PRIu64 "}\n",
             frames, views, render_ns, tic_ns, sound_ns,
             n ? samples[(n - 1) * 99 / 100] : 0,
+            bsp_ns, planes_ns, masked_ns,
             lazy_updates, lazy_bytes, precache_updates, precache_bytes);
 }

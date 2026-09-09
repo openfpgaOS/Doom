@@ -468,34 +468,50 @@ void R_InitPointToAngle (void)
 //  at the given angle.
 // rw_distance must be calculated first.
 //
-static inline fixed_t R_PositiveScaleDiv(fixed_t num, int den)
+/* Q30 reciprocal seeds: floor(2^61 / ((i + 32)*2^26 + 2^25)). */
+static const uint32_t scale_reciprocal_seed[32] = {
+    1057222719u, 1025663831u, 995934445u, 967879954u,
+    941362695u, 916259689u, 892460736u, 869866794u,
+    848388601u, 827945502u, 808464432u, 789879042u,
+    772128952u, 755159085u, 738919104u, 723362913u,
+    708448213u, 694136128u, 680390858u, 667179385u,
+    654471207u, 642238100u, 630453915u, 619094385u,
+    608136962u, 597560667u, 587345955u, 577474594u,
+    567929559u, 558694932u, 549755813u, 541098242u,
+};
+
+/* num is unsigned; 0 < den <= INT32_MAX. Keep the helper in cached SDRAM. */
+static __attribute__((noinline)) uint32_t R_PositiveScaleDiv(uint32_t num, uint32_t den)
 {
-    uint32_t whole;
-    uint32_t rem;
-    uint32_t result;
-    uint32_t uden;
-    uint32_t bit;
+    if ((num >> 6) >= den)
+        return 64u << FRACBITS;
 
-    uden = (uint32_t)den;
-    whole = (uint32_t)num / uden;
-
-    if (whole >= 64u)
-	return 64 * FRACUNIT;
-
-    rem = (uint32_t)num - whole * uden;
-    result = whole << FRACBITS;
-
-    for (bit = 1u << (FRACBITS - 1); bit != 0; bit >>= 1)
-    {
-	rem <<= 1;
-	if (rem >= uden)
-	{
-	    result |= bit;
-	    rem -= uden;
-	}
+    /* Normalize without a library call on RV32IM. */
+    unsigned shift = 0;
+    uint32_t normalized = den;
+    if (normalized < (1u << 16)) { normalized <<= 16; shift += 16; }
+    if (normalized < (1u << 24)) { normalized <<= 8; shift += 8; }
+    if (normalized < (1u << 28)) { normalized <<= 4; shift += 4; }
+    if (normalized < (1u << 30)) { normalized <<= 2; shift += 2; }
+    if (normalized < (1u << 31)) { normalized <<= 1; shift += 1; }
+    uint32_t reciprocal = scale_reciprocal_seed[(normalized >> 26) - 32];
+    for (unsigned i = 0; i < 2; ++i) {
+        uint32_t product = ((uint64_t)normalized * reciprocal) >> 32;
+        reciprocal = ((uint64_t)reciprocal * ((1u << 30) - product)) >> 29;
     }
-
-    return (fixed_t)result;
+    /* Bias below the exact reciprocal; the quotient is at most one too low. */
+    reciprocal -= 4;
+    uint32_t result;
+    if (shift > 13) {
+        /* The saturation guard ensures this shifted numerator fits in 25 bits. */
+        uint32_t scaled_num = num << (shift - 13);
+        result = ((uint64_t)scaled_num * reciprocal) >> 32;
+    } else {
+        result = (((uint64_t)num * reciprocal) >> 32) >> (13 - shift);
+    }
+    /* A low estimate leaves 0 <= remainder < 2*den, so 32 bits suffice. */
+    uint32_t remainder = (num << FRACBITS) - result * den;
+    return result + (remainder >= den);
 }
 
 OF_FASTTEXT fixed_t R_ScaleFromGlobalAngle (angle_t visangle)

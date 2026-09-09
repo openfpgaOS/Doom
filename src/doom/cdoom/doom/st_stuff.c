@@ -313,6 +313,16 @@ static void ST_InvalidateDirectFBSlots(void)
 	st_directfb_slots[i].valid = false;
 }
 
+void ST_InvalidateBuffer(void)
+{
+    int slot = R_GPU_UsingDirectFramebuffer() ? R_GPU_CurrentDrawSlot() : -1;
+
+    if (slot >= 0 && slot < 3)
+        st_directfb_slots[slot].valid = false;
+    else
+        st_firsttime = true;
+}
+
 static void ST_SaveDirectFBSlot(int slot)
 {
     st_directfb_slot_t *state = &st_directfb_slots[slot];

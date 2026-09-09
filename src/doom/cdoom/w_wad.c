@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 #include "doomtype.h"
 
@@ -112,6 +113,7 @@ wad_file_t *W_AddFile (const char *filename)
     filelump_t *filerover;
     lumpinfo_t *filelumps;
     int numfilelumps;
+    size_t header_read;
 
     // If the filename begins with a ~, it indicates that we should use the
     // reload hack.
@@ -142,7 +144,7 @@ wad_file_t *W_AddFile (const char *filename)
     }
 
     memset(&header, 0, sizeof(header));
-    W_Read(wad_file, 0, &header, sizeof(header));
+    header_read = W_Read(wad_file, 0, &header, sizeof(header));
 
     if ((strlen(filename) < 3
       || strcasecmp(filename+strlen(filename)-3 , "wad" ))
@@ -170,6 +172,9 @@ wad_file_t *W_AddFile (const char *filename)
     {
 	// WAD file
 
+        if (header_read != sizeof(header))
+            I_Error("W_AddFile: truncated header in %s", filename);
+
 	if (strncmp(header.identification,"IWAD",4))
 	{
 	    // Homebrew levels?
@@ -195,12 +200,35 @@ wad_file_t *W_AddFile (const char *filename)
          }
 
 	header.infotableofs = LONG(header.infotableofs);
+
+        if (header.numlumps < 0 || header.infotableofs < 0 ||
+            (unsigned)header.infotableofs > wad_file->length ||
+            (unsigned)header.numlumps >
+                (wad_file->length - (unsigned)header.infotableofs) / sizeof(filelump_t) ||
+            (unsigned)header.numlumps > INT_MAX / sizeof(filelump_t))
+            I_Error("W_AddFile: invalid directory in %s", filename);
 	length = header.numlumps*sizeof(filelump_t);
 	fileinfo = Z_Malloc(length, PU_STATIC, 0);
 
-        W_Read(wad_file, header.infotableofs, fileinfo, length);
+        if (W_Read(wad_file, header.infotableofs, fileinfo, length) != (size_t)length)
+            I_Error("W_AddFile: truncated directory in %s", filename);
 	numfilelumps = header.numlumps;
     }
+
+    for (i = 0; i < numfilelumps; ++i)
+    {
+        int position = LONG(fileinfo[i].filepos);
+        int size = LONG(fileinfo[i].size);
+        if (size < 0 || (size > 0 &&
+            (position < 0 || (unsigned)position > wad_file->length ||
+             (unsigned)size > wad_file->length - (unsigned)position)))
+            I_Error("W_AddFile: lump %.8s outside %s", fileinfo[i].name, filename);
+        // Empty markers have no data; their unused offsets need not be valid.
+        if (size == 0) fileinfo[i].filepos = LONG(0);
+    }
+    if (numlumps > INT_MAX || (unsigned)numfilelumps > INT_MAX - numlumps ||
+        (size_t)(numlumps + numfilelumps) > SIZE_MAX / sizeof(*lumpinfo))
+        I_Error("W_AddFile: too many lumps in %s", filename);
 
     // Increase size of numlumps array to accomodate the new file.
     filelumps = calloc(numfilelumps, sizeof(lumpinfo_t));
