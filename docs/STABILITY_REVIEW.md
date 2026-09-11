@@ -88,3 +88,45 @@ The source fixes and deterministic tests do not prove the cause of issue #15,
 nor that all music dropouts or heavy-scene frame drops are resolved. Sustained
 audio memory contention can still exceed the mixer budget. No hardware boot,
 listening session, deployment or public release was performed in this pass.
+
+## MiSTer OSD and music recovery — 2026-09-10 follow-up
+
+These changes are included in the MiSTer 1.1.25 release.
+
+The released MiSTer core pauses presentation under its OSD. The kernel's
+bounded frame-acquisition fallback could return another draw buffer while
+`CMD_FLIP` was still queued, eventually filling the GPU queue and trapping.
+Doom now waits for that flip's fence before acquiring a buffer, servicing audio
+while waiting. Its watchdog counts active vblanks, so a paused display can
+resume without trapping; a GPU that stays stuck with active scanout still
+triggers the watchdog.
+
+PCM read failures now leave the last complete audio buffer playing. Short
+reads roll back the staging chunk, and failed DMA does not skip track data.
+Retries back off without issuing blocking reads through a failed async bridge.
+Lost interrupts and late completions are polled and retired before staging is
+reused. Save/load operations leave the file bridge free; a missing music WAD or
+failed initial fill falls back to MIDI. WAD stdio reads also check seek errors
+and clear previous stream errors before retrying.
+
+`python3 tools/check_pcm_recovery.py` passes 15 groups under ASan/UBSan,
+including partial reads, loop boundaries, DMA failures, track switching, a
+minute-long simulated OSD pause and the active-scanout watchdog. Normal and
+PCM diagnostic MiSTer executables build through the SDK container. The Pocket
+executable also builds and is byte-identical to the normal MiSTer executable;
+the runtime supplies the platform-specific services.
+
+On the SS1, six uninstrumented OSD navigation cycles survived and resumed
+gameplay. MiSTer's `OSD_VISIBLE` log confirmed every open/close transition.
+The final rotation sample measured 58.0 distinct DDR view rows per second,
+against 57.91 for the release baseline; a separate post-menu diagnostic
+measured 58.8 rendered FPS. Row samples are not full HDMI frame comparisons.
+An earlier 16.35-row/s result following manual loader recovery did not recur
+after normal core loading and remains recorded as an unresolved anomaly.
+Listening validation remains separate from these measurements.
+
+The tested executable was installed on the normal SS1 launcher with the user's
+first-slot save unchanged. The installed FPGA core remains the released core;
+its RTL presentation and audio-buffer improvements are still awaiting positive
+timing. Detailed captures, hashes and deployment records are in the sibling
+core repository's `build/mister-followup-20260910/` directory.

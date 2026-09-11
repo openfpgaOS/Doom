@@ -88,7 +88,9 @@ size_t W_StdC_Read(wad_file_t *wad, unsigned int offset,
 
     // Jump to the specified position in the file.
 
-    fseek(stdc_wad->fstream, offset, SEEK_SET);
+    clearerr(stdc_wad->fstream);
+    if (fseek(stdc_wad->fstream, offset, SEEK_SET) != 0)
+        return 0;
 
     // Read into the buffer.
 

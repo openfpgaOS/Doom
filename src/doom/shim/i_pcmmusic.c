@@ -69,6 +69,7 @@
 #define CD_STAGE_FALLBACK_FRAMES 2048  /* async_max_read unsupported (old OS): old HI size */
 #define MUS_PRIORITY    200
 #define PRESENT_STALE_US 250000u       /* no scanout for this long == OSD/stall */
+#define PCM_READ_RETRY_MS 100u
 
 /* Output gain on the music samples, hard-clamped so peaks limit (not wrap).
  * Unity (1.0): the PCM is pre-mastered (loudnorm) with -1 dBTP headroom, so any
@@ -106,6 +107,8 @@ static wad_file_t *pcm_wad;
 static unsigned    pcm_base;           /* lump file offset */
 static unsigned    pcm_size;           /* lump byte length (whole frames) */
 static unsigned    pcm_rd;             /* sync read cursor within the lump */
+static uint32_t    pcm_retry_ms;
+static int         pcm_read_failed;
 
 /* deinterleaved SDRAM rings (+1 guard frame mirrors [0] for the loop seam) */
 static int16_t     ringL[RING_FRAMES_MAX + 1];
@@ -149,19 +152,11 @@ static int           cd_frames;         /* frames the in-flight read delivers */
 static unsigned      cd_read_off;       /* async read cursor within the lump */
 static volatile int  cd_done;           /* set by the completion IRQ callback */
 static volatile int  cd_result;         /* IRQ result: 0 ok, <0 error */
-static int           cd_menu_prev;      /* `quiet` (menu/save/load) last Poll, edge detect */
 
-/* Async DMA refill is ENABLED, but suspended while frame presentation is
- * stalled.  When the Analogue Pocket *system* menu opens, the Pocket owns the
- * display (scanout stops) and the shared single data-slot bridge; an in-flight
- * of_file_read_async issued then gets stuck on the bridge and the stalled
- * transfer starves the GPU until its watchdog traps (==TRAP== mcause=3 in
- * of_gpu_wait — reproduced only with CD music).  We detect the stall via the
- * OS present_count freezing (of_video_get_timing) and, like Quake, freeze the
- * voices (the ring repeats the last sample) and issue no DMA until scanout
- * resumes. */
+/* Suspend new reads while presentation is stalled, since a system menu can
+ * also own the file bridge.  Keep the mixer looping the last good buffer;
+ * setting its rate to zero would hold a DC sample instead of playing audio. */
 static const int     pcm_async_enabled = 1;
-static int           pcm_frozen;            /* voices frozen during a scanout stall */
 static uint32_t      pcm_present_count;      /* last of_video present_count seen */
 static uint32_t      pcm_present_change_us;  /* of_time_us when present_count last moved */
 
@@ -236,11 +231,13 @@ static void ring_write(const int16_t *src, int frames)
     }
 }
 
-/* Synchronous read of `count` interleaved frames into staging, looping within
- * the lump.  Returns the count of *real* (non-EOF-pad) frames. */
+/* Read a complete staging chunk, or leave the source cursor unchanged so it
+ * can be retried.  A short read is an I/O failure, not the lump's known EOF.
+ * Returns real frames (excluding EOF padding), or -1 on failure. */
 static int pcm_read_frames(int count)
 {
     int got = 0, real = 0;
+    unsigned saved_rd = pcm_rd;
 
     while (got < count)
     {
@@ -264,11 +261,10 @@ static int pcm_read_frames(int count)
         if (want > remain) want = remain;
 
         n = W_Read(pcm_wad, pcm_base + pcm_rd, &staging[got * MUS_CHANNELS], want);
-        if (n == 0)
+        if (n != want)
         {
-            memset(&staging[got * MUS_CHANNELS], 0,
-                   (size_t)(count - got) * MUS_BYTES_FRAME);
-            return real;
+            pcm_rd = saved_rd;
+            return -1;
         }
         pcm_rd += (unsigned)n;
         got    += (int)n / MUS_BYTES_FRAME;
@@ -278,8 +274,10 @@ static int pcm_read_frames(int count)
 }
 
 /* Synchronous producer: read+deinterleave `nframes` into the ring. */
-static void pcm_produce(int nframes)
+static int pcm_produce(int nframes)
 {
+    if (pcm_read_failed && (int32_t)(of_time_ms() - pcm_retry_ms) < 0)
+        return 0;
     while (nframes > 0)
     {
         int batch = nframes;
@@ -287,10 +285,20 @@ static void pcm_produce(int nframes)
         if (batch > STAGING_FRAMES)
             batch = STAGING_FRAMES;
         real = pcm_read_frames(batch);
+        if (real < 0)
+        {
+            /* Keep the last good ring contents playing; never publish a
+             * partial transfer or replace valid music with error padding. */
+            pcm_read_failed = 1;
+            pcm_retry_ms = of_time_ms() + PCM_READ_RETRY_MS;
+            return 0;
+        }
+        pcm_read_failed = 0;
         ring_write(staging, batch);
         ring_valid += real;
         nframes -= batch;
     }
+    return 1;
 }
 
 /* ---- diagnostics (PCM_DIAG): state ----------------------------------------
@@ -325,9 +333,8 @@ static unsigned dg_sync_topup, dg_drain_timeout, dg_async_dropped;
 #define DG(x) do { } while (0)
 #endif
 
-/* Drop to the sync path with a scheduled retry: a wedged bridge (Pocket OSD,
- * save collision) is transient, so a permanent downgrade left the rest of the
- * track doing blocking main-thread SD reads (= frame stutter). */
+/* Retry a failed bridge later while the last good audio buffer loops.
+ * Blocking reads through the same stalled bridge cannot provide a fallback. */
 static void cd_async_drop(void)
 {
     cd_async_ok = 0;
@@ -348,7 +355,7 @@ static void cd_cb(int token, int result)
 }
 
 /* Kick a DMA read at cd_read_off, looping/EOF.
- * Non-blocking: sets cd_pending and pre-advances the read cursor. */
+ * Non-blocking: the source cursor advances only after a successful read. */
 static int cd_issue(void)
 {
     /* Adaptive size: fill all free ring space in one read (capped by the
@@ -404,7 +411,6 @@ static int cd_issue(void)
 
     cd_pending = 1;
     cd_frames  = frames;
-    cd_read_off += (unsigned)frames * MUS_BYTES_FRAME;
     DG(dg_cd_issue++);
     return 0;
 }
@@ -414,7 +420,7 @@ static int cd_issue(void) { cd_async_ok = 0; return -1; }
 
 /* Retire an in-flight DMA read so the single-slot bridge is free for the
  * engine's own blocking file I/O.  Called from W_StdC_Read and the save path.
- * Bounded wait; on timeout, drop to the sync refill path. */
+ * Bounded wait; on timeout, retain the buffer and retry later. */
 void I_PCM_DrainAsync(void)
 {
 #ifndef OF_PC
@@ -437,7 +443,7 @@ void I_PCM_DrainAsync(void)
         if ((unsigned)(of_time_ms() - start) >= 200u)
         {
             cd_drain_gaveup = 1;    /* don't re-stall every following read */
-            cd_async_drop();        /* wedged — sync for now, retry later */
+            cd_async_drop();
             DG(dg_drain_timeout++; dg_async_dropped++);
             break;
         }
@@ -536,11 +542,11 @@ static void dg_flush(void)
     if (dg_evt_len)
         fwrite(dg_evt, 1, dg_evt_len, fp);
     n = snprintf(sum, sizeof(sum),
-        "SUMMARY wad=%s ready=%d cd_slot=%d async_ok=%d frozen=%d rate=%d ring=%d\n"
+        "SUMMARY wad=%s ready=%d cd_slot=%d async_ok=%d rate=%d ring=%d\n"
         "  gamemission=%d gamemode=%d\n"
         "  tryplay=%u pcm_started=%u midi_fallthrough=%u lump_missing=%u empty_lump=%u no_voices=%u\n"
         "  cd_issue=%u cd_ok=%u cd_fail=%u issue_err=%u sync_topup=%u drain_timeout=%u async_dropped=%u\n",
-        pcm_wad_name(), pcm_ready, cd_slot, cd_async_ok, pcm_frozen, mus_rate, ring_frames,
+        pcm_wad_name(), pcm_ready, cd_slot, cd_async_ok, mus_rate, ring_frames,
         (int)gamemission, (int)gamemode,
         dg_tryplay, dg_pcm_started, dg_midi_fallthrough, dg_lump_missing, dg_empty_lump, dg_no_voices,
         dg_cd_issue, dg_cd_ok, dg_cd_fail, dg_cd_issue_err, dg_sync_topup, dg_drain_timeout, dg_async_dropped);
@@ -716,6 +722,13 @@ int I_PCM_TryPlay(boolean looping)
     if (pcm_playing)
         I_PCM_Stop();
 
+#ifndef OF_PC
+    /* Stop may have timed out waiting for an old track's DMA.  Its static
+     * staging buffer remains alive, but cannot be reused until it completes. */
+    if (of_file_async_busy())
+        return 0;
+#endif
+
     pcm_looping = looping ? 1 : 0;
     pcm_paused  = 0;
     pcm_ended   = 0;
@@ -723,6 +736,11 @@ int I_PCM_TryPlay(boolean looping)
     pcm_base    = (unsigned)l->position;
     pcm_size    = (unsigned)l->size & ~3u;
     pcm_rd      = 0;
+    pcm_read_failed = 0;
+    cd_backoff_ms = 0;
+    cd_retry_ms = 0;
+    cd_issue_defers = 0;
+    cd_drain_gaveup = 0;
 
     /* Prefill the whole ring synchronously (one-time per track, ~100 ms,
      * hidden inside the level transition).  It must cover the level-load
@@ -731,7 +749,12 @@ int I_PCM_TryPlay(boolean looping)
      * runs dry there and the track goes silent for seconds. */
     write_pos  = 0;
     ring_valid = 0;
-    pcm_produce(ring_frames);
+    if (!pcm_produce(ring_frames))
+    {
+        /* No complete initial buffer to repeat: let the caller use MIDI. */
+        ring_valid = 0;
+        return 0;
+    }
     write_pos  = 0;
     last_pos   = 0;
 
@@ -739,7 +762,6 @@ int I_PCM_TryPlay(boolean looping)
     cd_async_ok = (pcm_async_enabled && cd_stage != NULL && cd_slot >= 0);
     cd_pending  = 0;
     cd_read_off = pcm_rd;          /* async resumes where the prefill left off */
-    pcm_frozen  = 0;
     pcm_present_count = 0;
     pcm_present_change_us = of_time_us();
 
@@ -779,7 +801,7 @@ int I_PCM_TryPlay(boolean looping)
 /* Fold a finished DMA read into the ring. */
 static void cd_fold(void)
 {
-    if (cd_async_ok && cd_pending && cd_done)
+    if (cd_pending && cd_done)
     {
         if (cd_result >= 0)
         {
@@ -798,30 +820,29 @@ static void cd_fold(void)
                 ring_write((const int16_t *)cd_stage_mem, cd_frames);
             }
             ring_valid += cd_frames;
+            cd_read_off += (unsigned)cd_frames * MUS_BYTES_FRAME;
+            pcm_rd = cd_read_off;
             cd_backoff_ms = 0;      /* healthy again: reset the retry backoff */
             DG(dg_cd_ok++);
         }
         else
         {
-            /* Refill DMA failed: the frames the cursor already freed stay
-             * silent-or-stale and, if this keeps up, the ring laps = the
-             * "loops every few seconds" symptom.  Count it. */
+            /* Leave both the ring and source cursor intact.  Retry this
+             * same chunk after the bridge has had time to recover. */
+            cd_async_drop();
             DG(dg_cd_fail++);
         }
         cd_pending = 0;
     }
 }
 
-/* No async CD reads across the save/load sequence: sendsave covers
+/* No music reads across the save/load sequence: sendsave covers
  * menu-confirm -> button, gameaction covers the tic the blocking slot I/O
  * executes, and the Load/Save menus cover the browsing in between -- the
  * confirm closes the menu a few tics BEFORE G_DoSaveGame/G_DoLoadGame runs
  * the blocking slot I/O, and a read still in flight there collides with it
- * on the single data-slot bridge (GPU watchdog hang).  I_PCM_DrainAsync
- * alone does not close that window: its wait is bounded at 200 ms and then
- * hands the bridge over anyway.  Every OTHER menu stays async -- a menu-wide
- * quiet window put every refill on the blocking sync path (one ~25 ms bridge
- * command per poll, the APF host's per-command latency). */
+ * on the single data-slot bridge.  The existing ring keeps playing while
+ * these operations own the bridge.  Other game menus stay asynchronous. */
 static int pcm_quiet(void)
 {
     extern gameaction_t gameaction;
@@ -842,16 +863,15 @@ void I_PCM_Poll(void)
         of_video_timing_t vt;
         uint32_t now_us = of_time_us();
 
+#ifndef OF_PC
+        /* Poll even our own pending read: a lost completion IRQ must not
+         * leave it pending forever.  Do not reuse staging until it retires. */
+        if (of_file_async_busy())
+            of_file_async_poll();
+#endif
         cd_fold();
 
-        /* Track scanout: present_count advances each time the Pocket presents a
-         * core frame.  It freezes while the Pocket *system* menu owns the
-         * display — and at that point the Pocket also owns the shared data-slot
-         * bridge, so an async CD read issued then wedges it and starves the GPU
-         * (watchdog trap).  Detect the stall and, like Quake, freeze the voices
-         * (the ring repeats the last sample) + issue no DMA until scanout
-         * resumes.  Uses our own of_time_us stamp of the last change, so it
-         * makes no cross-clock assumption about present timestamps. */
+        /* Use a local timestamp so this does not assume matching clocks. */
         of_video_get_timing(&vt);
         if (vt.present_count != pcm_present_count)
         {
@@ -860,64 +880,16 @@ void I_PCM_Poll(void)
         }
         present_live = (uint32_t)(now_us - pcm_present_change_us) < PRESENT_STALE_US;
 
-        if (!present_live)
-        {
-            if (!pcm_frozen)
-            {
-                I_PCM_DrainAsync();             /* retire any in-flight read */
-                cd_fold();
-                of_mixer_set_rate_h(vL, 0);     /* freeze cursors -> ring repeats */
-                of_mixer_set_rate_h(vR, 0);
-                pcm_frozen = 1;
-            }
-            I_OpenFPGAMixerPump();
-            return;                             /* no DMA while the OSD owns the bridge */
-        }
-        if (pcm_frozen)
-        {
-            of_mixer_set_rate_h(vL, mus_rate);  /* scanout resumed — unfreeze */
-            of_mixer_set_rate_h(vR, mus_rate);
-            pcm_frozen = 0;
-        }
-
-        /* Orphaned OS-side transfer (completion IRQ lost, e.g. across a
-         * Pocket OSD visit): the OS poll fallback observes latched DONE and
-         * retires it, unwedging of_file_read_async — which otherwise returns
-         * BUSY forever and pins us to the blocking sync path. */
-#ifndef OF_PC
-        if (!cd_pending && of_file_async_busy())
-            of_file_async_poll();
-#endif
-
         /* Async dropped earlier (bridge error / drain timeout): those causes
          * are transient, so re-arm after the backoff instead of spending the
          * rest of the track on blocking main-thread reads. */
         if (!cd_async_ok && pcm_async_enabled && cd_stage != NULL
-            && cd_slot >= 0 && !quiet && !cd_pending
+            && cd_slot >= 0 && present_live && !quiet && !cd_pending
             && (int32_t)(of_time_ms() - cd_retry_ms) >= 0)
         {
             cd_async_ok = 1;
             cd_read_off = pcm_rd;   /* async resumes where sync left off */
         }
-
-        /* Entering a quiet window (see pcm_quiet): retire the in-flight read
-         * and refill synchronously (plain file reads, no DMA bridge), so the
-         * slot I/O that follows owns the bridge alone; hand back to async on
-         * the way out. */
-        if (cd_async_ok)
-        {
-            if (quiet && !cd_menu_prev)
-            {
-                I_PCM_DrainAsync();
-                cd_fold();
-                pcm_rd = cd_read_off;   /* sync resumes where async left off */
-            }
-            else if (!quiet && cd_menu_prev)
-            {
-                cd_read_off = pcm_rd;   /* async resumes where sync left off */
-            }
-        }
-        cd_menu_prev = quiet;
 
         pos = of_mixer_get_position_h(vL);
         if (pos >= 0)
@@ -941,19 +913,26 @@ void I_PCM_Poll(void)
             if (ring_valid < 0)
                 ring_valid = 0;
 
-            if (cd_async_ok && !quiet)
+            if (!present_live || quiet || cd_pending)
+            {
+                /* No producer work: the hardware repeats the buffered audio.
+                 * Still account for playback so recovery sees the free space. */
+            }
+            else if (cd_async_ok)
             {
                 /* Issue the next read once the cursor freed a min chunk. */
                 if (!cd_pending && !pcm_ended &&
                     ring_frames - ring_valid >= CHUNK_FRAMES)
                     cd_issue();
-
-                if (!cd_async_ok)            /* async dropped mid-stream */
-                    pcm_rd = cd_read_off;    /* resync the sync cursor */
             }
-            else if (consumed > 0)
+            else if (cd_stage == NULL && consumed > 0)
             {
-                pcm_produce(consumed);       /* sync top-up (save/load, or no async) */
+                /* Platforms without async support retry failed blocking reads
+                 * at a bounded rate.  Async failures wait for their retry above. */
+                int refill = ring_frames - ring_valid;
+                if (refill > STAGING_FRAMES)
+                    refill = STAGING_FRAMES;
+                pcm_produce(refill);
                 DG(dg_sync_topup++);
             }
 

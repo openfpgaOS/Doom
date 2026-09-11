@@ -290,6 +290,9 @@ int R_GPU_TranslationSlot(const byte *translation)
 #include "of_gpu.h"
 #include "of_texture.h"
 #include "of_video.h"
+#include "of_timer.h"
+#include "i_sound.h"
+#include "r_gpu_wait.h"
 #include "v_video.h"
 #include "z_zone.h"
 
@@ -985,6 +988,10 @@ static int gpu_acquire_draw_buffer(void)
         return 0;
 
     wait_start = R_Perf_BeginStage();
+    /* Older cores pause CMD_FLIP under the system OSD.  The kernel's
+     * bounded acquire fallback must not return a buffer while that command
+     * is still queued, or further rendering eventually fills the GPU ring. */
+    gpu_wait_present_fence(gpu_acquire_token);
     gpu_draw_idx = of_video_acquire_next(gpu_acquire_idx,
                                          gpu_acquire_token);
     R_Perf_EndStage(R_PERF_STAGE_GPU_WAIT, wait_start);
