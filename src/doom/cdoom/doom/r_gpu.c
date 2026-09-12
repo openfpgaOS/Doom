@@ -2620,12 +2620,13 @@ static void gpu_param_encode_q29(of_gpu_param_span_list_t *p,
         float dv_span = f_dv[i] * fmv;
         float c;
 
-        c = __builtin_fabsf(o);                     if (c > fmax) fmax = c;
-        c = __builtin_fabsf(f_du[i]);               if (c > fmax) fmax = c;
-        c = __builtin_fabsf(f_dv[i]);               if (c > fmax) fmax = c;
-        c = __builtin_fabsf(o + du_span);           if (c > fmax) fmax = c;
-        c = __builtin_fabsf(o + dv_span);           if (c > fmax) fmax = c;
-        c = __builtin_fabsf(o + du_span + dv_span); if (c > fmax) fmax = c;
+        /* fmax.s keeps the bound in the FPU without a branch per corner. */
+        c = __builtin_fabsf(o);                    fmax = __builtin_fmaxf(fmax, c);
+        c = __builtin_fabsf(f_du[i]);               fmax = __builtin_fmaxf(fmax, c);
+        c = __builtin_fabsf(f_dv[i]);               fmax = __builtin_fmaxf(fmax, c);
+        c = __builtin_fabsf(o + du_span);           fmax = __builtin_fmaxf(fmax, c);
+        c = __builtin_fabsf(o + dv_span);           fmax = __builtin_fmaxf(fmax, c);
+        c = __builtin_fabsf(o + du_span + dv_span); fmax = __builtin_fmaxf(fmax, c);
     }
 
     {
