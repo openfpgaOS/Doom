@@ -9,6 +9,9 @@
 #include DOOM_WALL_SOURCE
 
 fixed_t viewx, viewy;
+#ifdef TEST_WALL_VIEW_CACHE
+int bsp_view_validcount = 1;
+#endif
 static uint32_t seed = 1;
 static uint32_t random_u32(void)
 {
@@ -30,6 +33,15 @@ static void check(rendersegcache_t *cache)
     R_ExactDistOffset(cache, &actual_d, &actual_o);
     assert(actual_d == (d < 0 ? 0 : d > INT32_MAX ? INT32_MAX : (fixed_t)d));
     assert(actual_o == (fixed_t)o);
+#ifdef TEST_WALL_VIEW_CACHE
+    ++bsp_view_validcount;
+    R_CachedDistOffset(cache, &actual_d, &actual_o);
+    assert(actual_d == (d < 0 ? 0 : d > INT32_MAX ? INT32_MAX : (fixed_t)d));
+    assert(actual_o == (fixed_t)o);
+    R_CachedDistOffset(cache, &actual_d, &actual_o);
+    assert(actual_d == (d < 0 ? 0 : d > INT32_MAX ? INT32_MAX : (fixed_t)d));
+    assert(actual_o == (fixed_t)o);
+#endif
 }
 
 int main(void)

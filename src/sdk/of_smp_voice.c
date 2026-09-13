@@ -29,6 +29,11 @@
 #define SMP_VOICE_ENABLE_TICK_STATS 0
 #endif
 
+/* Opt in only after budgeting the app's shared fast code/data region. */
+#ifndef SMP_VOICE_FAST_TICK
+#define SMP_VOICE_FAST_TICK 0
+#endif
+
 /* Hung-voice guard.  A voice with no natural end -- a LOOPING sample, or a
  * one-shot whose length we could not track -- only leaves ENV_SUSTAIN on a
  * note-off (-> ENV_RELEASE -> ENV_DONE).  If that note-off is dropped -- e.g.
@@ -174,6 +179,24 @@ static OF_FASTDATA int master_vol = 255;
 static OF_FASTDATA uint32_t prev_rate[SMP_MAX_VOICES];
 static OF_FASTDATA uint8_t  prev_vol_l[SMP_MAX_VOICES];
 static OF_FASTDATA uint8_t  prev_vol_r[SMP_MAX_VOICES];
+
+/* Stored in the voice structure's existing handle-alignment padding on RV32.
+ * Routing is immutable for a note; controller changes invalidate calculations
+ * for the next tick without moving their hardware writes ahead of envelopes. */
+#define VOICE_PITCH_VIB   1u
+#define VOICE_PITCH_MOD   2u
+#define VOICE_PITCH_ENV   4u
+#define VOICE_PITCH_DIRTY 8u
+#define VOICE_VOLUME_DIRTY 16u
+
+static void voice_invalidate_channel(int ch, unsigned flags)
+{
+    for (int i = 0; i < SMP_MAX_VOICES; i++) {
+        smp_voice_t *v = &voices[i];
+        if (v->active && v->midi_ch == ch)
+            v->update_flags |= flags;
+    }
+}
 
 /* Voices pending steal (waiting for hardware fade-out) */
 #define STEAL_PENDING -2
@@ -655,12 +678,19 @@ static void voice_recompute_pan(smp_voice_t *v)
     }
 }
 
-static void compute_vol_lr(smp_voice_t *v, int *out_l, int *out_r)
+static inline int voice_env_volume(const smp_voice_t *v)
 {
     /* env_vol: Q16.16 -> 0..256 */
     int32_t env_vol = v->vol_env.level >> 8;
     if (env_vol > 255) env_vol = 255;
     if (env_vol < 0)   env_vol = 0;
+    return env_vol;
+}
+
+static void compute_vol_lr(smp_voice_t *v, int *out_l, int *out_r)
+{
+    int32_t env_vol = voice_env_volume(v);
+    v->cached_env_volume = (uint8_t)env_vol;
 
     int ch = v->midi_ch;
 
@@ -824,6 +854,10 @@ int smp_voice_note_on(const ofsf_zone_t *zone, int midi_ch, int note,
     v->mixer_voice = OF_MIXER_HANDLE_INVALID;
     v->age = tick_counter;
     v->sustain_since = tick_counter;
+    v->update_flags = VOICE_PITCH_DIRTY
+        | (zone->vib_lfo_to_pitch ? VOICE_PITCH_VIB : 0)
+        | (zone->mod_lfo_to_pitch ? VOICE_PITCH_MOD : 0)
+        | (zone->mod_env_to_pitch ? VOICE_PITCH_ENV : 0);
 
     /* Pre-bake voice_base_vol = (velocity_gain × initial_attn_scale) >> 8.
      * One u8 field now replaces the two multiplies the old compute_vol_lr
@@ -945,6 +979,9 @@ void smp_voice_note_off(int midi_ch, int note)
     }
 }
 
+#if SMP_VOICE_FAST_TICK
+OF_FASTTEXT
+#endif
 void smp_voice_tick(void)
 {
 #if SMP_VOICE_ENABLE_TICK_STATS
@@ -1019,8 +1056,8 @@ void smp_voice_tick(void)
          * INVARIANT: if an amplitude- or filter-LFO consumer is ever added,
          * widen this gate to cover its routing field too. */
         if (z) {
-            if (z->vib_lfo_to_pitch) lfo_advance(&v->vib_lfo);
-            if (z->mod_lfo_to_pitch) lfo_advance(&v->mod_lfo);
+            if (v->update_flags & VOICE_PITCH_VIB) lfo_advance(&v->vib_lfo);
+            if (v->update_flags & VOICE_PITCH_MOD) lfo_advance(&v->mod_lfo);
         }
 
         /* Hung-voice guard (see SMP_VOICE_MAX_SUSTAIN_TICKS).  Measure time
@@ -1057,9 +1094,15 @@ void smp_voice_tick(void)
             continue;
         }
 
-        int vl, vr;
-        compute_vol_lr(v, &vl, &vr);
-        uint32_t rate = compute_pitch(v);
+        int vl = prev_vol_l[i], vr = prev_vol_r[i];
+        if (voice_env_volume(v) != v->cached_env_volume ||
+            (v->update_flags & VOICE_VOLUME_DIRTY))
+            compute_vol_lr(v, &vl, &vr);
+        uint32_t rate = prev_rate[i];
+        if ((v->update_flags & (VOICE_PITCH_DIRTY | VOICE_PITCH_VIB | VOICE_PITCH_ENV)) ||
+            ((v->update_flags & VOICE_PITCH_MOD) && ch_mod_depth[v->midi_ch]))
+            rate = compute_pitch(v);
+        v->update_flags &= ~(VOICE_PITCH_DIRTY | VOICE_VOLUME_DIRTY);
         int rate_changed = (rate != prev_rate[i]);
         int vol_changed  = (vl != prev_vol_l[i] || vr != prev_vol_r[i]);
         if (rate_changed || vol_changed) {
@@ -1109,9 +1152,12 @@ void smp_voice_update_volume(int midi_ch, int volume, int expression)
     if (midi_ch < 0 || midi_ch > 15) return;
     volume = clamp_midi7(volume);
     expression = clamp_midi7(expression);
+    int previous = ch_vol_combined[midi_ch];
     ch_volume[midi_ch]     = volume;
     ch_expression[midi_ch] = expression;
     channel_recompute_cached(midi_ch);
+    if (ch_vol_combined[midi_ch] != previous)
+        voice_invalidate_channel(midi_ch, VOICE_VOLUME_DIRTY);
 }
 
 void smp_voice_update_pan(int midi_ch, int pan)
@@ -1124,8 +1170,10 @@ void smp_voice_update_pan(int midi_ch, int pan)
      * live voice on this channel so the hot path stays divide-free. */
     for (int i = 0; i < SMP_MAX_VOICES; i++) {
         smp_voice_t *v = &voices[i];
-        if (v->active && v->active != STEAL_PENDING && v->midi_ch == midi_ch)
+        if (v->active && v->active != STEAL_PENDING && v->midi_ch == midi_ch) {
             voice_recompute_pan(v);
+            v->update_flags |= VOICE_VOLUME_DIRTY;
+        }
     }
 }
 
@@ -1134,15 +1182,21 @@ void smp_voice_update_bend(int midi_ch, int bend)
     if (midi_ch < 0 || midi_ch > 15) return;
     if (bend < -8192) bend = -8192;
     if (bend > 8191) bend = 8191;
+    int previous = ch_bend_cents[midi_ch];
     ch_bend[midi_ch] = bend;
     ch_bend_cents[midi_ch] = ((int32_t)bend * BEND_RANGE_CENTS) / 8192;
+    if (ch_bend_cents[midi_ch] != previous)
+        voice_invalidate_channel(midi_ch, VOICE_PITCH_DIRTY);
 }
 
 void smp_voice_update_mod(int midi_ch, int mod_depth)
 {
     if (midi_ch < 0 || midi_ch > 15) return;
     mod_depth = clamp_midi7(mod_depth);
-    ch_mod_depth[midi_ch] = mod_depth;
+    if (ch_mod_depth[midi_ch] != mod_depth) {
+        ch_mod_depth[midi_ch] = mod_depth;
+        voice_invalidate_channel(midi_ch, VOICE_PITCH_DIRTY);
+    }
 }
 
 void smp_voice_update_sustain(int midi_ch, int sustain_on)
@@ -1257,7 +1311,11 @@ void smp_voice_set_master_volume(int vol)
 {
     if (vol < 0)   vol = 0;
     if (vol > 255) vol = 255;
-    master_vol = vol;
+    if (master_vol != vol) {
+        master_vol = vol;
+        for (int i = 0; i < SMP_MAX_VOICES; i++)
+            voices[i].update_flags |= VOICE_VOLUME_DIRTY;
+    }
 }
 
 #else /* OF_PC — desktop has no HW mixer voice path; silent stubs */

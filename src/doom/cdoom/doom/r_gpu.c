@@ -31,6 +31,7 @@ void R_GPU_Init(void) { }
 void R_GPU_Shutdown(void) { }
 void R_GPU_BeginDisplayFrame(void) { }
 void R_GPU_BeginFrame(void) { }
+void R_GPU_BeginView(void) { }
 void R_GPU_EndFrame(void) { }
 void R_GPU_PrepareForCPUAccess(void) { }
 void R_GPU_PrepareForCPUAccessRect(int x, int y, int w, int h)
@@ -232,6 +233,15 @@ boolean R_GPU_WallTierColumn(int tier, int x, int yl, int yh, fixed_t scale)
     (void)scale;
     return false;
 }
+void R_GPU_WallColumns(int x, int count, const r_gpu_wall_column_t *columns,
+                       fixed_t scale, fixed_t scalestep)
+{
+    (void)x;
+    (void)count;
+    (void)columns;
+    (void)scale;
+    (void)scalestep;
+}
 void R_GPU_WallTiersEnd(void) { }
 boolean R_GPU_SpriteBegin(const byte *tex2d, int tex_height, int tex_width,
                           fixed_t texturemid, fixed_t iscale,
@@ -286,6 +296,7 @@ int R_GPU_TranslationSlot(const byte *translation)
 #else
 
 #include "of_cache.h"
+#include "of_fastram.h"
 #include "of_caps.h"
 #include "of_gpu.h"
 #include "of_texture.h"
@@ -358,6 +369,9 @@ static of_gpu_param_span_list_t gpu_plane_params;
 static gpu_plane_band_t gpu_plane_bands[GPU_PLANE_BANDS];
 static int gpu_plane_record_count;   /* total staged across all bands */
 static int gpu_plane_band_rr;        /* round-robin eviction cursor */
+/* A stale slot is harmless: its light tag must still match. This avoids
+ * clearing 64 entries per plane and preserves the existing eviction order. */
+static uint8_t gpu_plane_light_slot[64];
 static int gpu_plane_active;
 static int gpu_plane_fixed_light;    /* fixedcolormap row, -1 = per-span */
 static int gpu_use_param_span;
@@ -1089,6 +1103,21 @@ static void gpu_flush_column_batch(void)
     of_gpu_kick();
 }
 
+/* These private lists contain only spans accepted by PlaneSpanLight,
+ * WallTierColumn or SpritePost: every count is positive and bounded by the
+ * viewport. Avoid rescanning the counts before the SDK packs the records.
+ * Keep the SDK emitter's size, depth/capability and ring-reservation guards. */
+static inline void gpu_emit_screen_span_records(const of_gpu_param_span_list_t *params,
+                                                const of_gpu_param_span_record_t *records,
+                                                uint32_t count)
+{
+#if SCREENWIDTH <= 4095 && SCREENHEIGHT <= 4095
+    _gpu_emit_param_span_list(params, records, count, 0xFFFu);
+#else
+    of_gpu_draw_param_span_list(params, records, count);
+#endif
+}
+
 /* Emit one light band as a param-span command.  The band stays assigned
  * to its light so accumulation can continue after a capacity flush. */
 static void gpu_flush_plane_band(gpu_plane_band_t *band)
@@ -1100,7 +1129,7 @@ static void gpu_flush_plane_band(gpu_plane_band_t *band)
 
     gpu_plane_params.light_origin = (int32_t)band->light << 16;
     gpu_spancont_gate();
-    of_gpu_draw_param_span_list(&gpu_plane_params, band->records,
+    gpu_emit_screen_span_records(&gpu_plane_params, band->records,
                                 (uint32_t)n);
 
     gpu_plane_record_count -= n;
@@ -1131,7 +1160,7 @@ static void gpu_flush_wall_band(gpu_wall_tier_t *tier, gpu_wall_band_t *band)
 
     tier->params.light_origin = (int32_t)band->light << 16;
     gpu_spancont_gate();
-    of_gpu_draw_param_span_list(&tier->params, band->records, (uint32_t)n);
+    gpu_emit_screen_span_records(&tier->params, band->records, (uint32_t)n);
 
     gpu_wall_record_count -= n;
     band->count = 0;
@@ -1159,7 +1188,7 @@ static void gpu_flush_sprite_batch(void)
         return;
 
     gpu_spancont_gate();
-    of_gpu_draw_param_span_list(&gpu_sprite_params, gpu_sprite_records,
+    gpu_emit_screen_span_records(&gpu_sprite_params, gpu_sprite_records,
                                 (uint32_t)n);
 
     gpu_sprite_record_count = 0;
@@ -2599,35 +2628,139 @@ boolean R_GPU_DrawSpanLightDirect(int y, int x1, int x2, const byte *source,
     return true;
 }
 
+/* A plane's Q29 coefficients depend on the current view and signed height,
+ * not its texture or light band. Cleared after each R_SetupFrame. A zero
+ * height marks an empty slot; zero-height planes already use the fallback. */
+#define GPU_PLANE_COEFF_CACHE_BITS 5
+#define GPU_PLANE_COEFF_CACHE_SIZE (1u << GPU_PLANE_COEFF_CACHE_BITS)
+typedef struct {
+    fixed_t height;
+    uint32_t shift;
+    int32_t origin[3], du[3], dv[3];
+} gpu_plane_coeff_t;
+static gpu_plane_coeff_t gpu_plane_coeff_cache[GPU_PLANE_COEFF_CACHE_SIZE];
+
+static struct {
+    float proj, inv_proj;
+    float cos_va, sin_va, edge, s_du, t_du;
+    float vx, ty, w2;
+} gpu_view_basis;
+
+void R_GPU_BeginView(void)
+{
+    const float inv16 = 1.0f / 65536.0f;
+    unsigned int fa;
+
+    if (!gpu_present || !gpu_frame_active ||
+        (!gpu_use_param_span && !gpu_use_wall_param))
+        return;
+
+    /* Keep the original operations/rounding. Only their frequency changes:
+     * R_SetupFrame has finalized camera interpolation and the view size. */
+    gpu_view_basis.proj = (float)centerxfrac * inv16;
+    gpu_view_basis.inv_proj = 1.0f / gpu_view_basis.proj;
+    fa = (unsigned int)(viewangle >> ANGLETOFINESHIFT);
+    gpu_view_basis.cos_va = (float)finecosine[fa] * inv16;
+    gpu_view_basis.sin_va = (float)finesine[fa] * inv16;
+    gpu_view_basis.edge = (float)centerx / gpu_view_basis.proj;
+    gpu_view_basis.s_du = gpu_view_basis.sin_va / gpu_view_basis.proj;
+    gpu_view_basis.t_du = gpu_view_basis.cos_va / gpu_view_basis.proj;
+    gpu_view_basis.vx = (float)(viewx & ((64 << FRACBITS) - 1)) * inv16;
+    gpu_view_basis.ty = (float)((0u - (uint32_t)viewy)
+                              & ((64u << FRACBITS) - 1u)) * inv16;
+    gpu_view_basis.w2 = (float)((viewwidth << detailshift) >> 1);
+
+    /* Only the geometry, texture and light_origin change between surfaces.
+     * Reset the reserved/clamp/depth fields once per view; these private
+     * parameter blocks are otherwise only read by the command emitter. */
+    memset(&gpu_plane_params, 0, sizeof(gpu_plane_params));
+    gpu_plane_params.fb_base = gpu_fb_row_addr[viewwindowy]
+                             + (uint32_t)viewwindowx;
+    gpu_plane_params.fb_major_step = SCREENWIDTH;
+    gpu_plane_params.fb_minor_step = 1;
+    gpu_plane_params.tex_width = 64;
+    gpu_plane_params.tex_w_mask = 63;
+    gpu_plane_params.tex_h_mask = 63;
+    gpu_plane_params.flags = OF_GPU_SPAN_COLORMAP | OF_GPU_SPAN_PERSP;
+    gpu_plane_params.colormap_id = 0;
+    gpu_plane_params.attr_mode = OF_GPU_PARAM_ATTR_PERSP_Q29;
+    gpu_plane_params.span_axis = OF_GPU_PARAM_AXIS_X;
+    gpu_plane_params.z_mode = OF_GPU_PARAM_Z_NONE;
+    for (int tier = 0; tier < GPU_WALL_TIERS; tier++)
+    {
+        gpu_wall_tier_t *t = &gpu_wall_tiers[tier];
+        memset(&t->params, 0, sizeof(t->params));
+        t->params.fb_base = gpu_fb_row_addr[viewwindowy] + (uint32_t)viewwindowx;
+        t->params.fb_major_step = 1;            /* AXIS_Y: per-column */
+        t->params.fb_minor_step = SCREENWIDTH;  /* per-pixel walk = row stride */
+        t->params.flags = OF_GPU_SPAN_COLORMAP | OF_GPU_SPAN_PERSP;
+        t->params.colormap_id = 0;
+        t->params.attr_mode = OF_GPU_PARAM_ATTR_PERSP_Q29;
+        t->params.span_axis = OF_GPU_PARAM_AXIS_Y;
+        t->params.z_mode = OF_GPU_PARAM_Z_NONE;
+    }
+    for (int i = 0; i < GPU_PLANE_COEFF_CACHE_SIZE; i++)
+        gpu_plane_coeff_cache[i].height = 0;
+}
+
 /* Q29 dynamic-scale encode of the value-unit float planes — same scheme
  * as the proven Quake2 world path (sw_scan.c R_WTriBuildParams): bound
  * the magnitude over the view-rect corners, pick the shift from the
- * float exponent, scale all three planes by 2^(29-shift). */
-static void gpu_param_encode_q29(of_gpu_param_span_list_t *p,
+ * float exponent, scale all three planes by 2^(29-shift).
+ * Inline/unroll so each caller removes its known zero terms and avoids
+ * spilling the nine float coefficients to the RV32 stack. */
+static inline __attribute__((always_inline)) void gpu_param_encode_q29(of_gpu_param_span_list_t *p,
                                  const float f_org[3], const float f_du[3],
-                                 const float f_dv[3])
+                                 const float f_dv[3], int wall)
 {
     const float fmu = (float)viewwidth;
     const float fmv = (float)viewheight;
-    float fmax = 0.0f;
+    float bounds[3];
+    float fmax;
     float scale;
     int sh;
 
+#pragma GCC unroll 3
     for (int i = 0; i < 3; i++)
     {
         float o = f_org[i];
-        float du_span = f_du[i] * fmu;
-        float dv_span = f_dv[i] * fmv;
-        float c;
+        float du_span;
+        float dv_span;
+        float a, b, c;
 
-        /* fmax.s keeps the bound in the FPU without a branch per corner. */
-        c = __builtin_fabsf(o);                    fmax = __builtin_fmaxf(fmax, c);
-        c = __builtin_fabsf(f_du[i]);               fmax = __builtin_fmaxf(fmax, c);
-        c = __builtin_fabsf(f_dv[i]);               fmax = __builtin_fmaxf(fmax, c);
-        c = __builtin_fabsf(o + du_span);           fmax = __builtin_fmaxf(fmax, c);
-        c = __builtin_fabsf(o + dv_span);           fmax = __builtin_fmaxf(fmax, c);
-        c = __builtin_fabsf(o + du_span + dv_span); fmax = __builtin_fmaxf(fmax, c);
+        /* Wall attributes 1/2 have no v term; horizontal plane attribute 2
+         * has no u term. Their duplicate corners cannot change the bound.
+         * The surviving corner arithmetic retains the original grouping. */
+        if (wall && i != 0)
+        {
+            du_span = f_du[i] * fmu;
+            a = __builtin_fabsf(o);
+            b = __builtin_fabsf(f_du[i]);
+            c = __builtin_fabsf(o + du_span);
+            bounds[i] = __builtin_fmaxf(a, __builtin_fmaxf(b, c));
+            continue;
+        }
+        if (!wall && i == 2)
+        {
+            dv_span = f_dv[i] * fmv;
+            a = __builtin_fabsf(o);
+            b = __builtin_fabsf(f_dv[i]);
+            c = __builtin_fabsf(o + dv_span);
+            bounds[i] = __builtin_fmaxf(a, __builtin_fmaxf(b, c));
+            continue;
+        }
+        du_span = f_du[i] * fmu;
+        dv_span = f_dv[i] * fmv;
+        /* Independent fmax.s chains let RV32 overlap FPU latency. Keep
+         * the exact same corner expressions and include the zero bound. */
+        a = __builtin_fmaxf(__builtin_fabsf(o), __builtin_fabsf(f_du[i]));
+        b = __builtin_fmaxf(__builtin_fabsf(f_dv[i]), __builtin_fabsf(o + du_span));
+        c = __builtin_fmaxf(__builtin_fabsf(o + dv_span),
+                           __builtin_fabsf(o + du_span + dv_span));
+        bounds[i] = __builtin_fmaxf(a, __builtin_fmaxf(b, c));
     }
+    fmax = __builtin_fmaxf(__builtin_fmaxf(bounds[0], bounds[1]),
+                           __builtin_fmaxf(bounds[2], 0.0f));
 
     {
         union { float f; uint32_t u; } mb, sb;
@@ -2644,6 +2777,7 @@ static void gpu_param_encode_q29(of_gpu_param_span_list_t *p,
     }
 
     p->q29_attr_shift = (uint8_t)sh;
+#pragma GCC unroll 3
     for (int i = 0; i < 3; i++)
     {
         p->attr_origin[i] = (int32_t)(f_org[i] * scale);
@@ -2656,11 +2790,11 @@ boolean R_GPU_BeginPlaneSpans(const byte *source, fixed_t height_delta,
                               int fixed_light)
 {
     float f_org[3], f_du[3], f_dv[3];
-    float cos_va, sin_va, cx_f, cy_f, w2, ph_f, invD;
+    float cos_va, sin_va, cy_f, w2, ph_f, invD;
     float vx_f, ty_f, zi_org, zi_dv, edge;
     const float inv16 = 1.0f / 65536.0f;
-    unsigned int fa;
     fixed_t ph;
+    gpu_plane_coeff_t *coeff;
 
     if (!gpu_use_param_span || !gpu_present || !gpu_frame_active ||
         I_VideoBuffer == NULL)
@@ -2680,71 +2814,85 @@ boolean R_GPU_BeginPlaneSpans(const byte *source, fixed_t height_delta,
     gpu_flush_affine_batch();
     gpu_flush_column_batch();
 
-    /* Screen-space planes for a horizontal world plane.  Along a row z is
-     * constant, so the HW per-pixel divide degenerates to exactly Doom's
-     * per-row-constant steps:
-     *   1/z(v)  = +-(v + 0.5 - centery) / (|planeheight| * viewwidth/2)
-     *   s/z     = viewx*zi(v) + cos(va) - sin(va)*(centerx - u)/focal
-     *   t/z     = -viewy*zi(v) - sin(va) - cos(va)*(centerx - u)/focal
-     * (focal = centerxfrac for Doom's fixed 90-degree FOV; the same scale
-     * basexscale/baseyscale are built from.)  Flats tile every 64 world
-     * units, so viewx/-viewy are rebased mod 64 — texel-identical, and it
-     * keeps plane magnitudes (and the Q29 shift) small. */
-    fa = (unsigned int)(viewangle >> ANGLETOFINESHIFT);
-    cos_va = (float)finecosine[fa] * inv16;
-    sin_va = (float)finesine[fa] * inv16;
-    cx_f = (float)centerxfrac * inv16;
-    cy_f = (float)centery;
-    w2 = (float)((viewwidth << detailshift) >> 1);
-    ph = height_delta < 0 ? -height_delta : height_delta;
-    ph_f = (float)ph * inv16;
-    invD = 1.0f / (ph_f * w2);
-
-    vx_f = (float)(viewx & ((64 << FRACBITS) - 1)) * inv16;
-    ty_f = (float)((-viewy) & ((64 << FRACBITS) - 1)) * inv16;
-
-    if (height_delta < 0)
+    /* Hash integer world height; fractional height remains in the exact key.
+     * Collisions only rebuild coefficients, never reuse another height. */
+    coeff = &gpu_plane_coeff_cache[
+        (((uint32_t)height_delta >> FRACBITS) * 0x9e3779b1u) >> (32 - GPU_PLANE_COEFF_CACHE_BITS)];
+    if (coeff->height != height_delta)
     {
-        /* floor: rows below the horizon */
-        zi_dv = invD;
-        zi_org = (0.5f - cy_f) * invD;
+        /* Screen-space planes for a horizontal world plane.  Along a row z is
+         * constant, so the HW per-pixel divide degenerates to exactly Doom's
+         * per-row-constant steps:
+         *   1/z(v)  = +-(v + 0.5 - centery) / (|planeheight| * viewwidth/2)
+         *   s/z     = viewx*zi(v) + cos(va) - sin(va)*(centerx - u)/focal
+         *   t/z     = -viewy*zi(v) - sin(va) - cos(va)*(centerx - u)/focal
+         * (focal = centerxfrac for Doom's fixed 90-degree FOV; the same scale
+         * basexscale/baseyscale are built from.)  Flats tile every 64 world
+         * units, so viewx/-viewy are rebased mod 64 — texel-identical, and it
+         * keeps plane magnitudes (and the Q29 shift) small. */
+        cos_va = gpu_view_basis.cos_va;
+        sin_va = gpu_view_basis.sin_va;
+        cy_f = (float)centery;
+        w2 = gpu_view_basis.w2;
+        ph = height_delta < 0 ? -height_delta : height_delta;
+        ph_f = (float)ph * inv16;
+        invD = 1.0f / (ph_f * w2);
+
+        vx_f = gpu_view_basis.vx;
+        ty_f = gpu_view_basis.ty;
+
+        if (height_delta < 0)
+        {
+            /* floor: rows below the horizon */
+            zi_dv = invD;
+            zi_org = (0.5f - cy_f) * invD;
+        }
+        else
+        {
+            /* ceiling: rows above the horizon */
+            zi_dv = -invD;
+            zi_org = (cy_f - 0.5f) * invD;
+        }
+
+        edge = gpu_view_basis.edge;
+
+        f_du[0] = gpu_view_basis.s_du;
+        f_dv[0] = vx_f * zi_dv;
+        f_org[0] = cos_va - sin_va * edge + vx_f * zi_org;
+
+        f_du[1] = gpu_view_basis.t_du;
+        f_dv[1] = ty_f * zi_dv;
+        f_org[1] = -sin_va - cos_va * edge + ty_f * zi_org;
+
+        f_du[2] = 0.0f;
+        f_dv[2] = zi_dv;
+        f_org[2] = zi_org;
+
+        gpu_param_encode_q29(&gpu_plane_params, f_org, f_du, f_dv, 0);
+        coeff->height = height_delta;
+        coeff->shift = gpu_plane_params.q29_attr_shift;
+#pragma GCC unroll 3
+        for (int i = 0; i < 3; i++)
+        {
+            coeff->origin[i] = gpu_plane_params.attr_origin[i];
+            coeff->du[i] = gpu_plane_params.attr_du[i];
+            coeff->dv[i] = gpu_plane_params.attr_dv[i];
+        }
     }
     else
     {
-        /* ceiling: rows above the horizon */
-        zi_dv = -invD;
-        zi_org = (cy_f - 0.5f) * invD;
+        gpu_plane_params.q29_attr_shift = (uint8_t)coeff->shift;
+#pragma GCC unroll 3
+        for (int i = 0; i < 3; i++)
+        {
+            gpu_plane_params.attr_origin[i] = coeff->origin[i];
+            gpu_plane_params.attr_du[i] = coeff->du[i];
+            gpu_plane_params.attr_dv[i] = coeff->dv[i];
+        }
     }
 
-    edge = (float)centerx / cx_f;
-
-    f_du[0] = sin_va / cx_f;
-    f_dv[0] = vx_f * zi_dv;
-    f_org[0] = cos_va - sin_va * edge + vx_f * zi_org;
-
-    f_du[1] = cos_va / cx_f;
-    f_dv[1] = ty_f * zi_dv;
-    f_org[1] = -sin_va - cos_va * edge + ty_f * zi_org;
-
-    f_du[2] = 0.0f;
-    f_dv[2] = zi_dv;
-    f_org[2] = zi_org;
-
-    memset(&gpu_plane_params, 0, sizeof(gpu_plane_params));
-    gpu_plane_params.fb_base = gpu_fb_row_addr[viewwindowy]
-                             + (uint32_t)viewwindowx;
-    gpu_plane_params.fb_major_step = SCREENWIDTH;
-    gpu_plane_params.fb_minor_step = 1;
+    gpu_plane_params.light_origin = 0;
     gpu_plane_params.tex_addr = gpu_tex_addr(source);
-    gpu_plane_params.tex_width = 64;
-    gpu_plane_params.tex_w_mask = 63;
-    gpu_plane_params.tex_h_mask = 63;
-    gpu_plane_params.flags = OF_GPU_SPAN_COLORMAP | OF_GPU_SPAN_PERSP;
-    gpu_plane_params.colormap_id = 0;
-    gpu_plane_params.attr_mode = OF_GPU_PARAM_ATTR_PERSP_Q29;
-    gpu_plane_params.span_axis = OF_GPU_PARAM_AXIS_X;
-    gpu_plane_params.z_mode = OF_GPU_PARAM_Z_NONE;
-    gpu_param_encode_q29(&gpu_plane_params, f_org, f_du, f_dv);
 
     /* All bands were flushed by the previous EndPlaneSpans; unassign the
      * lights so stale rows never bleed into this visplane. */
@@ -2777,23 +2925,17 @@ boolean R_GPU_PlaneSpanLight(int y, int x1, int x2, int light)
     if (count <= 0)
         return true;
 
-    band = NULL;
-    for (int i = 0; i < GPU_PLANE_BANDS; i++)
+    band = &gpu_plane_bands[gpu_plane_light_slot[light]];
+    if (band->light != light)
     {
-        if (gpu_plane_bands[i].light == light)
-        {
-            band = &gpu_plane_bands[i];
-            break;
-        }
-    }
-    if (band == NULL)
-    {
+        int slot = gpu_plane_band_rr;
         /* Evict round-robin; bands are pixel-disjoint within the
          * visplane, so emission order between them is free. */
-        band = &gpu_plane_bands[gpu_plane_band_rr];
-        gpu_plane_band_rr = (gpu_plane_band_rr + 1) & (GPU_PLANE_BANDS - 1);
+        band = &gpu_plane_bands[slot];
+        gpu_plane_band_rr = (slot + 1) & (GPU_PLANE_BANDS - 1);
         gpu_flush_plane_band(band);
         band->light = light;
+        gpu_plane_light_slot[light] = (uint8_t)slot;
     }
 
     if (band->count >= GPU_PLANE_BAND_RECORDS)
@@ -2852,7 +2994,7 @@ boolean R_GPU_WallSegBegin(int x1, int x2, fixed_t scale1, fixed_t scalestep,
 
     /* zi(x) = scale(x)/projection; Doom's linear scale walk along the
      * seg IS the exact affine zi for a vertical plane. */
-    proj = (float)centerxfrac * inv16;
+    proj = gpu_view_basis.proj;
     gpu_wall_zi_du = ((float)scalestep * inv16) / proj;
     zi1 = ((float)scale1 * inv16) / proj;
     gpu_wall_zi_org = zi1 - (float)x1 * gpu_wall_zi_du;
@@ -2889,7 +3031,7 @@ static boolean gpu_wall_tier_begin(int tier, const byte *tex2d, int tex_height,
 {
     const float inv16 = 1.0f / 65536.0f;
     float f_org[3], f_du[3], f_dv[3];
-    float proj, tm_f, rebase;
+    float tm_f, rebase;
     gpu_wall_tier_t *t;
     fixed_t tmr;
     int k;
@@ -2909,7 +3051,6 @@ static boolean gpu_wall_tier_begin(int tier, const byte *tex2d, int tex_height,
         return false;                       /* non-pow2 period -> &mask is invalid */
 
     t = &gpu_wall_tiers[tier];
-    proj = (float)centerxfrac * inv16;
 
     /* vtex wraps &(vperiod-1) like R_DrawColumn, so texturemid rebases mod
      * vperiod texels — texel-identical, keeps the Q29 shift small. */
@@ -2926,7 +3067,7 @@ static boolean gpu_wall_tier_begin(int tier, const byte *tex2d, int tex_height,
      * are swapped to fit the column-major 2D block: tex_width = column
      * stride (texheight), w_mask = vperiod-1 vertical wrap, h_mask = width. */
     f_du[0] = tm_f * gpu_wall_zi_du;
-    f_dv[0] = 1.0f / proj;
+    f_dv[0] = gpu_view_basis.inv_proj;
     f_org[0] = tm_f * gpu_wall_zi_org - (float)centery * f_dv[0];
 
     f_du[1] = gpu_wall_szi_du - rebase * gpu_wall_zi_du;
@@ -2937,20 +3078,12 @@ static boolean gpu_wall_tier_begin(int tier, const byte *tex2d, int tex_height,
     f_dv[2] = 0.0f;
     f_org[2] = gpu_wall_zi_org;
 
-    memset(&t->params, 0, sizeof(t->params));
-    t->params.fb_base = gpu_fb_row_addr[viewwindowy] + (uint32_t)viewwindowx;
-    t->params.fb_major_step = 1;            /* AXIS_Y: per-column */
-    t->params.fb_minor_step = SCREENWIDTH;  /* per-pixel walk = row stride */
+    t->params.light_origin = 0;
     t->params.tex_addr = gpu_tex_addr(tex2d);
     t->params.tex_width = (uint16_t)tex_height;
     t->params.tex_w_mask = (uint16_t)(vperiod - 1);
     t->params.tex_h_mask = (uint16_t)widthmask;
-    t->params.flags = OF_GPU_SPAN_COLORMAP | OF_GPU_SPAN_PERSP;
-    t->params.colormap_id = 0;
-    t->params.attr_mode = OF_GPU_PARAM_ATTR_PERSP_Q29;
-    t->params.span_axis = OF_GPU_PARAM_AXIS_Y;
-    t->params.z_mode = OF_GPU_PARAM_Z_NONE;
-    gpu_param_encode_q29(&t->params, f_org, f_du, f_dv);
+    gpu_param_encode_q29(&t->params, f_org, f_du, f_dv, 1);
 
     for (int b = 0; b < GPU_WALL_BANDS; b++)
         t->bands[b].light = -1;
@@ -2967,32 +3100,11 @@ boolean R_GPU_WallTierBegin(int tier, const byte *tex2d, int tex_height,
     return gpu_wall_tier_begin(tier, tex2d, tex_height, widthmask, texturemid, 128);
 }
 
-boolean R_GPU_WallTierColumn(int tier, int x, int yl, int yh, fixed_t scale)
+static inline __attribute__((always_inline)) void gpu_append_wall_column(
+    gpu_wall_tier_t *t, int x, int yl, int count, int light)
 {
-    of_gpu_param_span_record_t *r;
-    gpu_wall_tier_t *t = &gpu_wall_tiers[tier];
     gpu_wall_band_t *band;
-    unsigned int lindex;
-    int light;
-    int count;
-
-    if (!t->active)
-        return false;
-    if ((unsigned int)x >= (unsigned int)viewwidth ||
-        yl < 0 || yh >= viewheight)
-        return false;
-
-    lindex = (unsigned int)scale >> LIGHTSCALESHIFT;
-    if (lindex >= MAXLIGHTSCALE)
-        lindex = MAXLIGHTSCALE - 1;
-    light = walllightrows[lindex];
-    if (light < 0 || light > 63)
-        return false;
-
-    count = yh - yl + 1;
-    if (count <= 0)
-        return true;
-
+    of_gpu_param_span_record_t *r;
     band = &t->bands[0];
     if (band->light != light)
     {
@@ -3017,7 +3129,57 @@ boolean R_GPU_WallTierColumn(int tier, int x, int yl, int yh, fixed_t scale)
     r->count = (uint16_t)count;
 
     R_Perf_CountGpuColumn((unsigned int)count);
+}
+
+boolean R_GPU_WallTierColumn(int tier, int x, int yl, int yh, fixed_t scale)
+{
+    gpu_wall_tier_t *t = &gpu_wall_tiers[tier];
+    unsigned int lindex;
+    int light;
+    int count;
+
+    if (!t->active)
+        return false;
+    if ((unsigned int)x >= (unsigned int)viewwidth ||
+        yl < 0 || yh >= viewheight)
+        return false;
+
+    lindex = (unsigned int)scale >> LIGHTSCALESHIFT;
+    if (lindex >= MAXLIGHTSCALE)
+        lindex = MAXLIGHTSCALE - 1;
+    light = walllightrows[lindex];
+    if (light < 0 || light > 63)
+        return false;
+
+    count = yh - yl + 1;
+    if (count <= 0)
+        return true;
+
+    gpu_append_wall_column(t, x, yl, count, light);
     return true;
+}
+
+/* Clipping and tier eligibility were established before this batch. Keep
+ * the x/tier order and band eviction identical to WallTierColumn. */
+OF_FASTTEXT
+void R_GPU_WallColumns(int x, int count, const r_gpu_wall_column_t *columns,
+                       fixed_t scale, fixed_t scalestep)
+{
+    for (int i = 0; i < count; ++i, ++x)
+    {
+        unsigned int lindex = (unsigned int)scale >> LIGHTSCALESHIFT;
+        if (lindex >= MAXLIGHTSCALE) lindex = MAXLIGHTSCALE - 1;
+        int light = walllightrows[lindex];
+        for (int tier = 0; tier < GPU_WALL_TIERS; ++tier)
+        {
+            uint32_t packed = tier == 0 ? columns[i].upper : columns[i].lower;
+            int pixels = packed >> 16;
+            if (pixels)
+                gpu_append_wall_column(&gpu_wall_tiers[tier], x,
+                                       packed & 0xffffu, pixels, light);
+        }
+        scale = (fixed_t)((uint32_t)scale + (uint32_t)scalestep);
+    }
 }
 
 void R_GPU_WallTiersEnd(void)

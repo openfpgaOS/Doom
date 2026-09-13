@@ -31,6 +31,8 @@ void R_GPU_Init(void);
 void R_GPU_Shutdown(void);
 void R_GPU_BeginDisplayFrame(void);
 void R_GPU_BeginFrame(void);
+/* Called after R_SetupFrame establishes the interpolated view. */
+void R_GPU_BeginView(void);
 void R_GPU_EndFrame(void);
 void R_GPU_PrepareForCPUAccess(void);
 void R_GPU_PrepareForCPUAccessRect(int x, int y, int w, int h);
@@ -102,6 +104,14 @@ boolean R_GPU_WallTierBegin(int tier, const byte *tex2d, int tex_height,
 /* scale = rw_scale at this column; the light row (walllightrows) lookup
  * happens inside so the OF_FASTTEXT seg loop stays small. */
 boolean R_GPU_WallTierColumn(int tier, int x, int yl, int yh, fixed_t scale);
+/* Opaque columns already clipped to the viewport by R_RenderGpuSegLoop.
+ * Each packed tier is {count:16, top:16}; zero count means no draw. Every
+ * nonempty tier must have been accepted by WallTierBegin before submission. */
+typedef struct {
+    uint32_t upper, lower;
+} r_gpu_wall_column_t;
+void R_GPU_WallColumns(int x, int count, const r_gpu_wall_column_t *columns,
+                       fixed_t scale, fixed_t scalestep);
 void R_GPU_WallTiersEnd(void);
 
 /* Affine sprite path (ATTR_AFFINE, AXIS_Y records): a vissprite is a

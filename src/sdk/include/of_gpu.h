@@ -1221,7 +1221,7 @@ static inline void of_gpu_clear_rect_strided(uint32_t start_byte_addr,
 static inline void
 _gpu_emit_param_span_list(const of_gpu_param_span_list_t *p,
                           const of_gpu_param_span_record_t *records,
-                          uint32_t record_count);
+                          uint32_t record_count, uint32_t counts_or);
 
 /* RTL span-count wires are 12-bit: a count >= 4096 truncates mod 4096 in
  * hardware (documented failure class — misrendered spans, and on some
@@ -1441,7 +1441,7 @@ of_gpu_draw_persp_span_group(const of_gpu_persp_span_group_t *span) {
             live |= records[i].count;
         }
         if (live != 0)
-            _gpu_emit_param_span_list(&p, records, n);
+            _gpu_emit_param_span_list(&p, records, n, live);
         first += n;
         lanes_left -= n;
     }
@@ -1514,7 +1514,7 @@ _gpu_emit_param_span_header_words(const of_gpu_param_span_list_t *p,
 static inline void
 _gpu_emit_param_span_list(const of_gpu_param_span_list_t *p,
                           const of_gpu_param_span_record_t *records,
-                          uint32_t record_count) {
+                          uint32_t record_count, uint32_t counts_or) {
     uint32_t control;
     uint32_t q29_attr_shift = 0;
 
@@ -1550,7 +1550,17 @@ _gpu_emit_param_span_list(const of_gpu_param_span_list_t *p,
 #ifndef OF_PC
             && of_has_feature(OF_HW_GPU_SPAN_CONT)
 #endif
-            && __builtin_memcmp(hdr, _gpu_span_hdr_cache, sizeof(hdr)) == 0;
+            ;
+        /* Both arrays contain words, and only equality matters. Avoid the
+         * RV32 libc's byte-at-a-time memcmp for every resident surface. */
+        if (use_cont) {
+            for (uint32_t i = 0; i < 29u; i++) {
+                if (hdr[i] != _gpu_span_hdr_cache[i]) {
+                    use_cont = 0;
+                    break;
+                }
+            }
+        }
         if (use_cont) {
             /* Records-only continuation: {count, shift} + record pairs. */
             uint32_t *w;
@@ -1563,9 +1573,18 @@ _gpu_emit_param_span_list(const of_gpu_param_span_list_t *p,
         } else {
             _gpu_cmd_header(GPU_CMD_DRAW_PARAM_SPAN_LIST,
                             OF_GPU_PARAM_SPAN_LIST_WORDS(record_count));
-            _gpu_emit_param_span_header_words(p, control, record_count,
-                                              q29_attr_shift);
-            __builtin_memcpy(_gpu_span_hdr_cache, hdr, sizeof(hdr));
+            uint32_t *w = _gpu_ring_claim();
+            /* Reuse the comparison's words. Publish and remember the
+             * header in one pass. */
+#pragma GCC unroll 4
+            for (uint32_t i = 0; i < 29u; i++) {
+                uint32_t word = hdr[i];
+                w[i] = word;
+                _gpu_span_hdr_cache[i] = word;
+            }
+            w[29] = record_count;
+            w[30] = q29_attr_shift;
+            _gpu_ring_commit(31u);
             _gpu_span_hdr_valid = 1;
         }
     }
@@ -1574,19 +1593,35 @@ _gpu_emit_param_span_list(const of_gpu_param_span_list_t *p,
         /* Record pairs as raw sequential stores; the odd tail pairs with
          * an implicit zero record (same wire bytes as before). */
         uint32_t *w = _gpu_ring_claim();
-        uint32_t pairs = record_count >> 1;
-        for (uint32_t i = 0; i < pairs; i++) {
-            const of_gpu_param_span_record_t *a = &records[2u * i];
-            const of_gpu_param_span_record_t *b = a + 1;
-            *w++ = ((uint32_t)a->v << 16) | (uint32_t)a->u;
-            *w++ = ((uint32_t)b->u << 16) | _gpu_count12((uint32_t)a->count);
-            *w++ = (_gpu_count12((uint32_t)b->count) << 16) | (uint32_t)b->v;
-        }
-        if (record_count & 1u) {
-            const of_gpu_param_span_record_t *a = &records[record_count - 1u];
-            *w++ = ((uint32_t)a->v << 16) | (uint32_t)a->u;
-            *w++ = _gpu_count12((uint32_t)a->count);
-            *w++ = 0u;
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+        /* On RV32 the six-byte {u,v,count} records already have wire order.
+         * Reuse the callers' count scan to prove that clamping is unnecessary.
+         * Bulk copies pay off for larger, word-aligned batches on Pocket.
+         * Direct packing below handles short/two-byte-aligned lists without
+         * memcpy setup cost. The odd tail still has a whole zero record. */
+        if (sizeof(*records) == 6u && (counts_or & ~0xFFFu) == 0u
+                && record_count >= 16u && ((uintptr_t)records & 3u) == 0u) {
+            uint32_t bytes = record_count * 6u;
+            __builtin_memcpy(w, records, bytes);
+            if (record_count & 1u)
+                __builtin_memset((uint8_t *)w + bytes, 0, 6u);
+        } else
+#endif
+        {
+            uint32_t pairs = record_count >> 1;
+            for (uint32_t i = 0; i < pairs; i++) {
+                const of_gpu_param_span_record_t *a = &records[2u * i];
+                const of_gpu_param_span_record_t *b = a + 1;
+                *w++ = ((uint32_t)a->v << 16) | (uint32_t)a->u;
+                *w++ = ((uint32_t)b->u << 16) | _gpu_count12((uint32_t)a->count);
+                *w++ = (_gpu_count12((uint32_t)b->count) << 16) | (uint32_t)b->v;
+            }
+            if (record_count & 1u) {
+                const of_gpu_param_span_record_t *a = &records[record_count - 1u];
+                *w++ = ((uint32_t)a->v << 16) | (uint32_t)a->u;
+                *w++ = _gpu_count12((uint32_t)a->count);
+                *w++ = 0u;
+            }
         }
         _gpu_ring_commit(3u * ((record_count + 1u) >> 1));
     }
@@ -1607,7 +1642,7 @@ of_gpu_draw_param_span_list(const of_gpu_param_span_list_t *params,
         any_pixels |= records[i].count;
 
     if (any_pixels != 0)
-        _gpu_emit_param_span_list(params, records, record_count);
+        _gpu_emit_param_span_list(params, records, record_count, any_pixels);
 }
 
 /* GPU_CMD_DRAW_PARAM_TRI — hardware edge walker.

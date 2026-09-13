@@ -9,6 +9,7 @@
 #define OF_CACHE_H
 #define OF_FASTRAM_H
 #define OF_FASTDATA
+#define OF_FASTTEXT __attribute__((noinline))
 #include VOICE_SOURCE
 
 typedef struct {

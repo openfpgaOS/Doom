@@ -93,6 +93,7 @@ fixed_t			baseyscale;
 
 fixed_t			cachedheight[SCREENHEIGHT] R_CACHE_ALIGNED;
 fixed_t			cacheddistance[SCREENHEIGHT] R_CACHE_ALIGNED;
+static byte cachedstepsvalid[SCREENHEIGHT];
 fixed_t			cachedxstep[SCREENHEIGHT] R_CACHE_ALIGNED;
 fixed_t			cachedystep[SCREENHEIGHT] R_CACHE_ALIGNED;
 unsigned		cachedlightindex[SCREENHEIGHT] R_CACHE_ALIGNED;
@@ -206,8 +207,7 @@ R_MapPlane
     {
 	cachedheight[y] = planeheight;
 	distance = cacheddistance[y] = FixedMul (planeheight, yslope[y]);
-	xstep = cachedxstep[y] = FixedMul (distance,basexscale);
-	ystep = cachedystep[y] = FixedMul (distance,baseyscale);
+	cachedstepsvalid[y] = 0;
 	index = distance >> LIGHTZSHIFT;
 	if (index >= MAXLIGHTZ )
 	    index = MAXLIGHTZ-1;
@@ -216,8 +216,6 @@ R_MapPlane
     else
     {
 	distance = cacheddistance[y];
-	xstep = cachedxstep[y];
-	ystep = cachedystep[y];
 	index = cachedlightindex[y];
     }
 
@@ -239,6 +237,17 @@ R_MapPlane
     {
 	goto done;
     }
+
+    /* The parameter GPU path consumes distance/light only. Preserve cached
+     * steps for fallback spans without computing them for GPU-only rows. */
+    if (!cachedstepsvalid[y])
+    {
+        cachedxstep[y] = FixedMul(distance, basexscale);
+        cachedystep[y] = FixedMul(distance, baseyscale);
+        cachedstepsvalid[y] = 1;
+    }
+    xstep = cachedxstep[y];
+    ystep = cachedystep[y];
 
     length = FixedMul (distance,distscale[x1]);
     angle = (viewangle + xtoviewangle[x1])>>ANGLETOFINESHIFT;
@@ -370,7 +379,7 @@ R_FindPlane
     check->minx = SCREENWIDTH;
     check->maxx = -1;
     
-    memset (check->top,0xff,sizeof(check->top));
+    /* R_CheckPlane initializes columns as they enter [minx,maxx]. */
     R_LinkVisplane(check);
 		
     result = check;
@@ -425,6 +434,17 @@ R_CheckPlane
 
     if (R_PlaneRangeIsOpen(pl->top, intrl, intrh))
     {
+        /* Only [minx,maxx] is readable. Initialize newly exposed columns,
+         * including gaps between disjoint ranges, before expanding it. */
+        if (pl->minx > pl->maxx)
+            memset(pl->top + unionl, 0xff, unionh - unionl + 1);
+        else
+        {
+            if (unionl < pl->minx)
+                memset(pl->top + unionl, 0xff, pl->minx - unionl);
+            if (unionh > pl->maxx)
+                memset(pl->top + pl->maxx + 1, 0xff, unionh - pl->maxx);
+        }
 	pl->minx = unionl;
 	pl->maxx = unionh;
 
@@ -445,7 +465,7 @@ R_CheckPlane
     pl->minx = start;
     pl->maxx = stop;
 
-    memset (pl->top,0xff,sizeof(pl->top));
+    memset(pl->top + start, 0xff, stop - start + 1);
     R_LinkVisplane(pl);
 		
     R_PERF_DETAIL_END(R_PERF_DETAIL_BSP_CHECK_PLANE, perf_start);

@@ -47,6 +47,9 @@ def main():
                 cmd.insert(1, "-I" + str(ROOT / "tools/tests/audio_mock"))
             if test == "view_cache":
                 cmd.append(str(source / "src/doom/cdoom/tables.c"))
+            if test in ("wall_math", "view_cache") and "view_distance;" in (
+                    source / "src/doom/cdoom/doom/r_bsp.h").read_text():
+                cmd.append("-DTEST_WALL_VIEW_CACHE")
             cmd += [str(ROOT / "tools/tests" / ("test_" + test + ".c")), "-Wl,--gc-sections", "-o", str(binary)]
             built = subprocess.run(cmd, capture_output=True, text=True)
             (output / (name + "-build.log")).write_text(built.stdout + built.stderr)

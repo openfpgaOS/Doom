@@ -365,6 +365,22 @@ R_ExactDistOffset (const rendersegcache_t *cache,
     *offset_out = (fixed_t)((uint64_t)offset * 2);
 }
 
+/* Distance and texture offset depend only on the segment geometry and the
+ * interpolated view X/Y, like the vertex angle cache. Keep the exact integer
+ * result across clipped ranges and rotations; movement or rebuilt geometry
+ * invalidates it through the BSP view generation. */
+static void R_CachedDistOffset(rendersegcache_t *cache,
+                               fixed_t *dist_out, fixed_t *offset_out)
+{
+    if (cache->view_validcount != bsp_view_validcount || !bsp_view_validcount)
+    {
+        R_ExactDistOffset(cache, &cache->view_distance, &cache->view_offset);
+        cache->view_validcount = bsp_view_validcount;
+    }
+    *dist_out = cache->view_distance;
+    *offset_out = cache->view_offset;
+}
+
 // Param-wall path setup: the GPU evaluates the wall's perspective planes,
 // so each tier column reduces to a {x, ytop, count} record and the
 // per-column texturecolumn/iscale math is skipped entirely.  Tiers whose
@@ -551,7 +567,102 @@ R_AddWallColumnBatch(wall_column_batch_t *batch,
     batch->light[lane] = (uint8_t)lightrow;
 }
 
-OF_FASTTEXT void R_RenderSegLoop (void)
+/* The parameter-wall path needs clip updates and GPU column records only.
+ * Keep that loop in fast RAM; column-batch fallback remains available below. */
+static r_gpu_wall_column_t gpu_wall_columns[SCREENWIDTH];
+
+OF_FASTTEXT static void R_RenderGpuSegLoop(int draw_mid, int draw_top, int draw_bottom)
+{
+    int x = rw_x, stopx = rw_stopx;
+    r_gpu_wall_column_t *column = gpu_wall_columns;
+    fixed_t scale = rw_scale, scalestep = rw_scalestep;
+    fixed_t topf = topfrac, bottomf = bottomfrac;
+    fixed_t pixh = pixhigh, pixl = pixlow;
+    fixed_t pixhstep = pixhighstep, pixlstep = pixlowstep;
+    fixed_t top_step = topstep, bottom_step = bottomstep;
+    short *ceiling_clip = ceilingclip, *floor_clip = floorclip;
+    visplane_t *ceiling_plane = ceilingplane, *floor_plane = floorplane;
+    boolean do_markceiling = markceiling, do_markfloor = markfloor;
+
+    for (; x < stopx; x++)
+    {
+        int yl = (topf + HEIGHTUNIT - 1) >> HEIGHTBITS;
+        int yh, top, bottom, mid;
+        uint32_t upper = 0, lower = 0;
+        if (yl < ceiling_clip[x] + 1) yl = ceiling_clip[x] + 1;
+        if (do_markceiling)
+        {
+            top = ceiling_clip[x] + 1;
+            bottom = yl - 1;
+            if (bottom >= floor_clip[x]) bottom = floor_clip[x] - 1;
+            if (top <= bottom)
+            {
+                ceiling_plane->top[x] = top;
+                ceiling_plane->bottom[x] = bottom;
+            }
+        }
+        yh = bottomf >> HEIGHTBITS;
+        if (yh >= floor_clip[x]) yh = floor_clip[x] - 1;
+        if (do_markfloor)
+        {
+            top = yh + 1;
+            bottom = floor_clip[x] - 1;
+            if (top <= ceiling_clip[x]) top = ceiling_clip[x] + 1;
+            if (top <= bottom)
+            {
+                floor_plane->top[x] = top;
+                floor_plane->bottom[x] = bottom;
+            }
+        }
+        if (draw_mid)
+        {
+            if (yl <= yh) upper = ((uint32_t)(yh - yl + 1) << 16) | (uint32_t)yl;
+            ceiling_clip[x] = viewheight;
+            floor_clip[x] = -1;
+        }
+        else
+        {
+            if (draw_top)
+            {
+                mid = pixh >> HEIGHTBITS;
+                pixh += pixhstep;
+                if (mid >= floor_clip[x]) mid = floor_clip[x] - 1;
+                if (mid >= yl)
+                {
+                    upper = ((uint32_t)(mid - yl + 1) << 16) | (uint32_t)yl;
+                    ceiling_clip[x] = mid;
+                }
+                else ceiling_clip[x] = yl - 1;
+            }
+            else if (do_markceiling) ceiling_clip[x] = yl - 1;
+            if (draw_bottom)
+            {
+                mid = (pixl + HEIGHTUNIT - 1) >> HEIGHTBITS;
+                pixl += pixlstep;
+                if (mid <= ceiling_clip[x]) mid = ceiling_clip[x] + 1;
+                if (mid <= yh)
+                {
+                    lower = ((uint32_t)(yh - mid + 1) << 16) | (uint32_t)mid;
+                    floor_clip[x] = mid;
+                }
+                else floor_clip[x] = yh + 1;
+            }
+            else if (do_markfloor) floor_clip[x] = yh + 1;
+        }
+        column->upper = upper;
+        column->lower = lower;
+        ++column;
+        topf += top_step;
+        bottomf += bottom_step;
+    }
+    R_GPU_WallColumns(rw_x, x - rw_x, gpu_wall_columns, scale, scalestep);
+    rw_scale = (fixed_t)((uint32_t)scale + (uint32_t)scalestep * (unsigned)(x - rw_x));
+    rw_x = x;
+    topfrac = topf; bottomfrac = bottomf;
+    pixhigh = pixh; pixlow = pixl;
+}
+
+void R_RenderSegLoop (void)
 {
     int			yl;
     int			yh;
@@ -597,6 +708,27 @@ OF_FASTTEXT void R_RenderSegLoop (void)
     unsigned int        perf_start;
 
     perf_start = R_PERF_DETAIL_BEGIN();
+
+    /* Ordinary scale-light rows are 0..NUMCOLORMAPS-1. Active parameter
+     * tiers accept every nonempty clipped column from this loop. R_SetupFrame
+     * fills every fixed-light row with the same value, so standard fixed maps
+     * also qualify. Unsupported rows and masked walls keep the general path. */
+    if (!maskedtexture && NUMCOLORMAPS <= 64 &&
+        (!fixedcolormap || walllightrows[0] < 64))
+    {
+        R_GPUWallTiersBegin(rw_x, rw_stopx, rw_scale, rw_scalestep,
+                           &gpu_tier_mid, &gpu_tier_top, &gpu_tier_bottom);
+        if ((gpu_tier_mid || gpu_tier_top || gpu_tier_bottom) &&
+            (midtexture ? gpu_tier_mid :
+             ((!toptexture || gpu_tier_top) && (!bottomtexture || gpu_tier_bottom))))
+        {
+            R_RenderGpuSegLoop(midtexture != 0, toptexture != 0, bottomtexture != 0);
+            R_GPU_WallTiersEnd();
+            R_PERF_DETAIL_END(R_PERF_DETAIL_BSP_SEG_LOOP, perf_start);
+            return;
+        }
+    }
+
 
     x = rw_x;
     stopx = rw_stopx;
@@ -646,8 +778,11 @@ OF_FASTTEXT void R_RenderSegLoop (void)
 	bottom_widthmask = R_GetTextureWidthMask(bottomtexture);
     }
 
+
+    /* A cold fallback column table can build texture data. Establish tiers
+     * after that preparation, in the same order as the general path. */
     R_GPUWallTiersBegin(x, stopx, scale, scalestep,
-			&gpu_tier_mid, &gpu_tier_top, &gpu_tier_bottom);
+                       &gpu_tier_mid, &gpu_tier_top, &gpu_tier_bottom);
 
     for ( ; x < stopx ; x++)
     {
@@ -1239,7 +1374,7 @@ R_StoreWallRange
 
     if (wallmerge_enabled)
     {
-	R_ExactDistOffset (cache, &rw_distance, &rw_exactoffset);
+	R_CachedDistOffset (cache, &rw_distance, &rw_exactoffset);
     }
     else
     {

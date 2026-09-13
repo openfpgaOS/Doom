@@ -36,6 +36,7 @@
 #include "m_menu.h"
 
 #include "r_local.h"
+#include "r_gpu.h"
 #include "r_perf.h"
 #include "r_sky.h"
 
@@ -1003,6 +1004,7 @@ void R_RenderPlayerView (player_t* player)
     view_start = R_Perf_BeginStage();
 
     R_SetupFrame (player);
+    R_GPU_BeginView ();
 
     // Clear buffers.
     R_ClearClipSegs ();

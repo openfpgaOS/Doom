@@ -13,7 +13,7 @@
 fixed_t viewx, viewy, viewz;
 angle_t viewangle;
 int validcount = 1, viewwidth = 320;
-int numvertexes, numnodes;
+int numvertexes, numnodes, numsegs;
 vertex_t *vertexes;
 node_t *nodes;
 
@@ -41,9 +41,12 @@ static void check_points(void)
 int main(void)
 {
     static bbox_angle_cache_t saved_bbox[BBOX_ANGLE_CACHE_SIZE];
+    static rendersegcache_t cached_segs[3];
     vertex_t saved_points[3];
     vertexes = points;
     numvertexes = sizeof(points) / sizeof(points[0]);
+    rendersegcache = cached_segs;
+    numsegs = 3;
     R_BuildBSPRenderData();
     R_ClearClipSegs();
     check_points();
@@ -84,6 +87,10 @@ int main(void)
 
     /* A reused generation must not revive entries left from that generation. */
     bsp_view_validcount = INT_MAX;
+#ifdef TEST_WALL_VIEW_CACHE
+    for (int i = 0; i < numsegs; ++i)
+        cached_segs[i].view_validcount = 1;
+#endif
     for (int i = 0; i < numvertexes; ++i) {
         points[i].viewanglevalidcount = points[i].viewdistvalidcount = 1;
         points[i].viewangle = 123;
@@ -96,6 +103,10 @@ int main(void)
     ++viewx;
     R_ClearClipSegs();
     assert(bsp_view_validcount == 1);
+#ifdef TEST_WALL_VIEW_CACHE
+    for (int i = 0; i < numsegs; ++i)
+        assert(cached_segs[i].view_validcount == 0);
+#endif
     check_points();
 
     /* More coordinates than cache slots exercise replacement collisions. */

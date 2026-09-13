@@ -75,7 +75,7 @@ typedef struct
 static bbox_angle_cache_t bbox_angle_cache[BBOX_ANGLE_CACHE_SIZE]
     R_CACHE_ALIGNED;
 
-static int bsp_view_validcount;
+int bsp_view_validcount;
 static boolean bsp_view_valid;
 static fixed_t bsp_view_x, bsp_view_y;
 
@@ -93,6 +93,9 @@ static void R_UpdateViewCache(void)
             vertexes[i].viewanglevalidcount = 0;
             vertexes[i].viewdistvalidcount = 0;
         }
+        if (rendersegcache != NULL)
+            for (int i = 0; i < numsegs; ++i)
+                rendersegcache[i].view_validcount = 0;
         bsp_view_validcount = 0;
     }
     ++bsp_view_validcount;
@@ -141,6 +144,7 @@ static void R_FillSegRenderData(void)
 	dst->angle = seg->angle;
 	dst->normalangle = seg->angle + ANG90;
 	dst->offset = seg->offset;
+        dst->view_validcount = 0;
 	{
 	    /* True length for the exact rw_distance/rw_offset divides; halved
 	     * so it fits 32 bits at map extremes.  Min 1: degenerate segs

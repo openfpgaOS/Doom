@@ -63,10 +63,14 @@ typedef struct
     short       pegflags;
     signed char lightbias;
     byte        pad[1];
+    int         view_validcount;
+    fixed_t     view_distance;
+    fixed_t     view_offset;
 } rendersegcache_t;
 
 extern rendersegcache_t* rendersegcache;
 extern rendersegcache_t* cursegcache;
+extern int bsp_view_validcount;
 
 
 typedef void (*drawfunc_t) (int start, int stop);

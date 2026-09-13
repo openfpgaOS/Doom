@@ -35,6 +35,17 @@ SHIM_SRCS   = $(wildcard shim/*.c)
 CDOOM_SRCS  = $(filter-out cdoom/w_file_win32.c cdoom/z_native.c,$(wildcard cdoom/*.c))
 DOOM_SRCS   = $(wildcard cdoom/doom/*.c)
 
+# Keep the hot renderer translation units together on Pocket's single-issue
+# CPU. Order also controls their APP_BRAM functions/data and branch/cache
+# placement. Validated with normal ELFs replaying Doom II and SIGIL inputs;
+# see docs/pocket-performance.md before changing this order.
+ifeq ($(TARGET),pocket)
+POCKET_RENDER_SRCS = cdoom/doom/r_segs.c cdoom/doom/r_bsp.c \
+                    cdoom/doom/r_plane.c cdoom/doom/r_things.c \
+                    cdoom/doom/r_gpu.c cdoom/doom/r_main.c
+DOOM_SRCS := $(POCKET_RENDER_SRCS) $(filter-out $(POCKET_RENDER_SRCS),$(DOOM_SRCS))
+endif
+
 SDK_MIDI    = $(SDK_DIR)/of_midi.c $(SDK_DIR)/of_smp_voice.c \
               $(SDK_DIR)/of_smp_bank.c $(SDK_DIR)/of_smp_tables.c
 
@@ -45,6 +56,8 @@ SRCS_CXX    =
 CFLAGS  = -Ishim -Icdoom -Icdoom/doom
 CFLAGS += -DDISABLE_SDL2MIXER -DDISABLE_SDL2NET
 CFLAGS += -DSMP_MAX_VOICES=20
+# The compact GPU wall loop leaves room for the 1 kHz envelope tick in BRAM.
+CFLAGS += -DSMP_VOICE_FAST_TICK=1
 CFLAGS += -DOF_DOOM   # selects the Doom-only shim paths (e.g. i_pcmmusic.c)
 CFLAGS += -Wno-unused-parameter -Wno-unused-function
 CFLAGS += -Wno-unused-variable -Wno-sign-compare
@@ -100,6 +113,9 @@ endif
 .DEFAULT_GOAL := all
 
 include $(SDK_DIR)/sdk.mk
+
+# Source order affects the linked layout even when no object needs rebuilding.
+$(OBJ_DIR)/app.elf: Makefile
 
 -include $(APP_OBJS:.o=.d) $(OF_INIT_OBJ:.o=.d) $(OF_SDL2_OBJ:.o=.d)
 
