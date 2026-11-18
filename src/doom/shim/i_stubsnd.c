@@ -148,7 +148,16 @@ static void opl_SetVolume(int vol)
     }
 
     opl_music_volume = vol;
-    of_midi_set_volume((vol * 255) / 127);
+    /* The HW mixer saturates the summed voices.  Cores before openfpgaOS
+     * 0.9.1 mix down by /16 and take the full MIDI master at the top of
+     * the slider.  From 0.9.1 the mix-down is /4, where a passage of half
+     * a dozen coincident voices would clip at 255, so the top maps to 128
+     * (the SDK's own polyphony-headroom default); music is still about
+     * 6 dB louder than under the old mixer. */
+    static int midi_top;
+    if (!midi_top)
+        midi_top = of_get_version() < OF_VERSION(0, 9, 1) ? 255 : 128;
+    of_midi_set_volume((vol * midi_top) / 127);
 
     if (vol == 0)
     {

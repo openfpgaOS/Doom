@@ -92,6 +92,7 @@
 void D_DoomLoop (void);
 
 static char *gamedescription;
+static boolean initial_game_pending;
 
 // Location where savegames are stored
 
@@ -643,9 +644,6 @@ void D_DoomLoop (void)
                " may cause demos and network games to get out of sync.\n");
     }
 
-    if (demorecording)
-	G_BeginRecording ();
-
     main_loop_started = true;
 
     I_SetWindowTitle(gamedescription);
@@ -654,6 +652,16 @@ void D_DoomLoop (void)
     I_RegisterWindowIcon(doom_icon_data, doom_icon_w, doom_icon_h);
     I_InitGraphics();
     EnableLoadingDisk();
+
+    /* Command-line starts must build their texture store after GPU init.
+     * Keep G_InitNew here so startup skill and gameplay flags are preserved. */
+    if (initial_game_pending)
+    {
+        initial_game_pending = false;
+        G_InitNew(startskill, startepisode, startmap);
+    }
+    if (demorecording)
+        G_BeginRecording();
 
     TryRunTics();
 
@@ -2177,7 +2185,7 @@ void D_DoomMain (void)
     if (gameaction != ga_loadgame )
     {
 	if (autostart || netgame)
-	    G_InitNew (startskill, startepisode, startmap);
+	    initial_game_pending = true;
 	else
 	    D_StartTitle ();                // start up intro loop
     }

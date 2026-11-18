@@ -1,16 +1,18 @@
 # openfpgaOS runtime publish manifest — written by 'make sdk'.
 # Consumers (platforms/<t>/image.sh) verify staged artifacts against
 # these md5s; a mismatch means a hand-mixed runtime set, which boots
-# into undefined behaviour.  source: openfpgaos-mister-v0.9.5
+# into undefined behaviour.  source: openfpgaos-mister-v0.9.5-dirty
 769c01d5b16c190a9d7745264e5072e4  ./bank.ofsf
 71ef4a38021f999718e4a1bec1bf9a3e  ./mister/openfpgaOS.rbf
 1414ee2a1d19d99ccfaaaa99bdf7e219  ./mister/os.bin
-c67dcb8ab4b6ff06de73e4f5334bf488  ./pocket/ap_core.sof
+48d8236e74a369fb298b2267ecae4322  ./pocket/ap_core.sof
 48c625e82daf68d14680893ac8cb27af  ./pocket/loader.bin
 faad7e5e84ea0f864587712dfd16a98f  ./pocket/os20.rbf_r
-01ce2f8600670ba2844ca03b23977b4b  ./pocket/os25.rbf_r
+fa9c2f861fb1cfe18fd9313eeb7ad456  ./pocket/os25.rbf_r
 3a960eeb817d8bd4e4f7d789e29e7f20  ./pocket/os25zf.rbf_r
 8558cba71c7bb0c1ac835b9c59046ec1  ./pocket/os30-macxf.rbf_r
 85bd093d1935d16eecd68343ef5eb3b0  ./pocket/os30.rbf_r
 a0811076cb58ea950f39cdecf67332be  ./pocket/os30-vtx.rbf_r
-65a436e6020d43612f460a583ab58a7d  ./pocket/os.bin
+1cfb6a10ab683f3a223736f5fadbac76  ./pocket/os.bin
+0cc6828d18632b339a1a0c5c3403d506  ./pocket/stability-20260909.rbf_r
+32d6fb0040705cd22f500ee55eff2740  ./pocket/stability-90-20260909.rbf_r
