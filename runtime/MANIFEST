@@ -1,3 +1,7 @@
+# Scoped Pocket refresh 2026-11-18 (openfpgaOS source 2f0e66d):
+# pocket/os25.rbf_r and pocket/ap_core.sof only (single-cycle shifts; seed 28,
+# setup -0.601 ns, worst hold +0.092 ns at the configured 100 MHz; not
+# 100 MHz timing closure).  Other entries retain their prior provenance.
 # openfpgaOS runtime publish manifest — written by 'make sdk'.
 # Consumers (platforms/<t>/image.sh) verify staged artifacts against
 # these md5s; a mismatch means a hand-mixed runtime set, which boots
@@ -5,10 +9,10 @@
 769c01d5b16c190a9d7745264e5072e4  ./bank.ofsf
 71ef4a38021f999718e4a1bec1bf9a3e  ./mister/openfpgaOS.rbf
 1414ee2a1d19d99ccfaaaa99bdf7e219  ./mister/os.bin
-48d8236e74a369fb298b2267ecae4322  ./pocket/ap_core.sof
+d3b3187a972621dd185f6922d0a1bd3e  ./pocket/ap_core.sof
 48c625e82daf68d14680893ac8cb27af  ./pocket/loader.bin
 faad7e5e84ea0f864587712dfd16a98f  ./pocket/os20.rbf_r
-fa9c2f861fb1cfe18fd9313eeb7ad456  ./pocket/os25.rbf_r
+98b37966a5e0543d9a7c4a0762af16c8  ./pocket/os25.rbf_r
 3a960eeb817d8bd4e4f7d789e29e7f20  ./pocket/os25zf.rbf_r
 8558cba71c7bb0c1ac835b9c59046ec1  ./pocket/os30-macxf.rbf_r
 85bd093d1935d16eecd68343ef5eb3b0  ./pocket/os30.rbf_r

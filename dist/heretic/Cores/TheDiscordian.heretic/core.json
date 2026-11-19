@@ -9,8 +9,8 @@
             "description": "Heretic on openfpgaOS",
             "author": "TheDiscordian",
             "url": "",
-            "version": "1.0.4",
-            "date_release": "2026-08-13"
+            "version": "1.0.5",
+            "date_release": "2026-11-18"
         },
         "framework": {
             "target_product": "Analogue Pocket",

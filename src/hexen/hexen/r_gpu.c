@@ -1472,9 +1472,9 @@ static int gpu_init_for_doom(const struct of_capabilities *caps)
 
     _gpu_base = caps->gpu_base;
 
+    _gpu_cpu_ring = 0;
     _gpu_wrptr = 0;
     _gpu_known_rdptr = 0;
-    _gpu_fence_next = 1;
     _gpu_cmd_words = 0;
     _gpu_batch_dma_base = 0;
     _gpu_batch_dma_addr = 0;
@@ -1490,11 +1490,14 @@ static int gpu_init_for_doom(const struct of_capabilities *caps)
     _gpu_dbg_ring_spin_iters = 0;
     _gpu_dbg_min_ring_free = OF_GPU_RING_SIZE;
     _gpu_state_valid = 0;
+    _gpu_span_hdr_valid = 0;
 
     GPU_CTRL = 6;
     for (volatile int i = 0; i < 100; i++) {}
     GPU_CTRL = 4;
     GPU_CTRL = 1;
+    /* Existing cores retain the last completed fence across soft reset. */
+    _gpu_fence_next = GPU_FENCE_REACHED + 1u;
 
     batch_base = (uint32_t)(uintptr_t)&_gpu_batch_storage[0][0];
     pal_base = (uint32_t)(uintptr_t)&_gpu_palookup_storage[0];
@@ -1532,6 +1535,10 @@ static int gpu_init_for_doom(const struct of_capabilities *caps)
     _gpu_palookup_dma_base = pal_base;
     GPU_PALOOKUP_BASE = pal_base;
     GPU_TEX_FLUSH = 1;
+
+    /* Supported cores accept commands directly into ring BRAM, avoiding the
+     * SDRAM publish/readback round trip. Older cores retain DMA submission. */
+    of_gpu_use_cpu_ring();
 
     return 1;
 }
