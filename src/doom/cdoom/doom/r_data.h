@@ -51,6 +51,10 @@ byte *R_GetSpriteTexture2D(int spritelump);
 // Post-aware 2D block for the GPU param-masked-midtexture path.
 byte *R_GetMaskedTexture2D(int texnum);
 
+// Column block (column x at block + x*texheight) of a masked midtexture
+// R_GetMaskedTexture2D declined, for GPU affine columns; NULL if none was built.
+byte *R_GetMaskedColumnBlock(int texnum);
+
 
 // I/O, setting up the stuff.
 void R_InitData (void);

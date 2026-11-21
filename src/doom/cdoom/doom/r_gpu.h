@@ -53,6 +53,10 @@ boolean R_GPU_DrawFuzzColumnDirect(int x, int yl, int yh);
 int R_GPU_ColormapRow(const byte *map);
 boolean R_GPU_DrawColumnLightDirect(int x, int yl, int yh, const byte *source,
                                     int texturemid, int iscale, int light);
+boolean R_GPU_CanDrawColumn(int x, int yl, int yh, int light);
+void R_GPU_DrawColumnSegments(int x, int yl, int nseg, const int *count,
+                              const byte *source, const int32_t *t,
+                              const int32_t *tstep, int light);
 boolean R_GPU_DrawColumnLightBatchDirect(int x, int yl, int yh, int lanes,
                                          const byte *const *source,
                                          const int32_t *t,

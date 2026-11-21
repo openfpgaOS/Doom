@@ -523,6 +523,7 @@ static byte **gpu_sprite_tex2d;
 static int gpu_sprite_tex2d_budget;
 static byte **gpu_masked_tex2d;
 static int gpu_masked_tex2d_budget;
+static byte **gpu_maskedcol_tex2d;   /* R_BuildMaskedColumnBlock, by texnum */
 static int gpu_tex2d_dropped;    /* textures over budget -> CPU (diagnostic) */
 
 /* True when this texture's column x is real patch data (has post headers).
@@ -613,6 +614,9 @@ byte *R_GetMaskedTexture2D(int texnum)
         return NULL;
     if (gpu_masked_tex2d[texnum] != NULL)
         return gpu_masked_tex2d[texnum];
+    /* Its GPU texture is the column block: never pair it with a later block. */
+    if (gpu_maskedcol_tex2d != NULL && gpu_maskedcol_tex2d[texnum] != NULL)
+        return NULL;
 
     texture = textures[texnum];
     height = texture->height;
@@ -679,6 +683,111 @@ byte *R_GetMaskedTexture2D(int texnum)
 
     R_GPU_TextureDataUpdated(block, (unsigned int)size);
     return block;
+}
+
+/* Column block for masked midtextures R_GetMaskedTexture2D declines, drawn by
+ * GPU affine columns (R_DrawMaskedColumnGPU) with R_DrawColumn's own stepping:
+ * column x at block + x*height, each post's texels at its topdelta, composite
+ * columns copied whole.  Those columns sample only texels of the post being
+ * drawn, so the block has to hold every post intact: declined unless the width
+ * is a power of two and every post fits the height without overlapping
+ * another.  Built at precache (R_CreateTextures). */
+static byte *R_BuildMaskedColumnBlock(int texnum)
+{
+    texture_t *texture;
+    byte     **column_table;
+    byte      *block;
+    byte       used[256];
+    int        width;
+    int        height;
+    int        size;
+    int        x;
+
+    if (gpu_maskedcol_tex2d == NULL || texnum < 0 || texnum >= numtextures)
+        return NULL;
+    if (gpu_maskedcol_tex2d[texnum] != NULL)
+        return gpu_maskedcol_tex2d[texnum];
+
+    texture = textures[texnum];
+    height = texture->height;
+    width = texturewidthmask[texnum] + 1;
+    if (height <= 0 || height > 256 || width <= 0 || width != texture->width)
+        return NULL;
+    size = width * height + GPU_WALL_TEX2D_PAD;   /* R_CreateTextures registers the pad */
+
+    if (size > gpu_masked_tex2d_budget
+        || R_Tex2DZoneTight(GPU_MASKED_TEX2D_BUDGET - gpu_masked_tex2d_budget, size))
+    {
+        gpu_tex2d_dropped++;            /* over budget / zone tight -> CPU */
+        return NULL;
+    }
+
+    column_table = R_GetColumnTable(texnum);
+    if (column_table == NULL)
+        return NULL;
+
+    for (x = 0; x < width; x++)
+    {
+        const column_t *column;
+
+        if (texturecolumnlump[texnum][x] < 0)
+            continue;                   /* composite column: height texels */
+        if (texturecolumnlump[texnum][x] == 0 || column_table[x] == NULL)
+            return NULL;
+
+        memset(used, 0, (size_t)height);
+        column = (const column_t *)(column_table[x] - 3);
+        while (column->topdelta != 0xff)
+        {
+            int top = column->topdelta;
+            int len = column->length;
+
+            if (top + len > height)
+                return NULL;
+            for (int y = top; y < top + len; y++)
+            {
+                if (used[y])
+                    return NULL;
+                used[y] = 1;
+            }
+            column = (const column_t *)
+                ((const byte *)column + column->length + 4);
+        }
+    }
+
+    block = Z_Malloc(size, PU_LEVEL, &gpu_maskedcol_tex2d[texnum]);
+    gpu_masked_tex2d_budget -= size;
+    memset(block, 0, size);
+
+    for (x = 0; x < width; x++)
+    {
+        const column_t *column;
+
+        if (texturecolumnlump[texnum][x] < 0)
+        {
+            memcpy(block + x * height, column_table[x], height);
+            continue;
+        }
+        column = (const column_t *)(column_table[x] - 3);
+        while (column->topdelta != 0xff)
+        {
+            memcpy(block + x * height + column->topdelta,
+                   (const byte *)column + 3, column->length);
+            column = (const column_t *)
+                ((const byte *)column + column->length + 4);
+        }
+    }
+
+    R_GPU_TextureDataUpdated(block, (unsigned int)size);
+    return block;
+}
+
+byte *R_GetMaskedColumnBlock(int texnum)
+{
+    if (gpu_maskedcol_tex2d == NULL
+        || (unsigned int)texnum >= (unsigned int)numtextures)
+        return NULL;
+    return gpu_maskedcol_tex2d[texnum];
 }
 
 /* Flat 2D sprite block for the GPU affine-sprite path: patch posts
@@ -875,6 +984,8 @@ void R_InitTextures (void)
     gpu_masked_tex2d = Z_Malloc (numtextures * sizeof(*gpu_masked_tex2d), PU_STATIC, 0);
     memset (gpu_masked_tex2d, 0, numtextures * sizeof(*gpu_masked_tex2d));
     gpu_masked_tex2d_budget = GPU_MASKED_TEX2D_BUDGET;
+    gpu_maskedcol_tex2d = Z_Malloc (numtextures * sizeof(*gpu_maskedcol_tex2d), PU_STATIC, 0);
+    memset (gpu_maskedcol_tex2d, 0, numtextures * sizeof(*gpu_maskedcol_tex2d));
 
     //	Really complex printing shit...
     temp1 = W_GetNumForName (DEH_String("S_START"));  // P_???????
@@ -1243,6 +1354,8 @@ static void R_CreateTextures (void)
             continue;
         mblk = R_GetMaskedTexture2D(i);
         if (mblk == NULL)
+            mblk = R_BuildMaskedColumnBlock(i);   /* GPU columns instead */
+        if (mblk == NULL)
             continue;
         w = texturewidthmask[i] + 1;
         if (w > textures[i]->width)
@@ -1302,9 +1415,18 @@ static void R_MarkSpawnedSprites(byte *present)
         {SPR_PAIN, SPR_SKUL}, {SPR_BAR1, SPR_BEXP},
         {SPR_BBRN, SPR_BOSF}, {SPR_BBRN, SPR_FIRE},
     };
+    /* Items P_KillMobj drops; without a GPU sprite texture they draw as
+     * CPU columns. */
+    static const struct { mobjtype_t actor, item; } dropped[] = {
+        {MT_WOLFSS, MT_CLIP}, {MT_POSSESSED, MT_CLIP},
+        {MT_SHOTGUY, MT_SHOTGUN}, {MT_CHAINGUY, MT_CHAINGUN},
+    };
     for (unsigned int i = 0; i < sizeof(spawned) / sizeof(spawned[0]); ++i)
         if (present[spawned[i].actor])
             present[spawned[i].effect] = 1;
+    for (unsigned int i = 0; i < sizeof(dropped) / sizeof(dropped[0]); ++i)
+        if (present[states[mobjinfo[dropped[i].actor].spawnstate].sprite])
+            present[states[mobjinfo[dropped[i].item].spawnstate].sprite] = 1;
 }
 
 void R_PrecacheLevel (void)
@@ -1334,6 +1456,8 @@ void R_PrecacheLevel (void)
 
     if (gpu_masked_tex2d != NULL)
         memset(gpu_masked_tex2d, 0, numtextures * sizeof(*gpu_masked_tex2d));
+    if (gpu_maskedcol_tex2d != NULL)
+        memset(gpu_maskedcol_tex2d, 0, numtextures * sizeof(*gpu_maskedcol_tex2d));
 
     if (texturecolumnptr != NULL)
         memset(texturecolumnptr, 0, numtextures * sizeof(*texturecolumnptr));

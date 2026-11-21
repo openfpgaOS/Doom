@@ -411,6 +411,115 @@ void R_DrawMaskedColumn (column_t* column)
 
 
 
+/* R_DrawMaskedColumn for a masked midtexture column whose posts are also
+ * stored in blockcol (R_GetMaskedColumnBlock, posts at their topdelta): each
+ * post becomes GPU affine columns over blockcol + topdelta with R_DrawColumn's
+ * own t / tstep, and rows that R_DrawClampedMaskedColumn clamps become
+ * constant-texel segments of the post's first or last texel -- the texels the
+ * CPU walk writes.  Returns false, having drawn nothing, if any post can't. */
+#define MASKED_GPU_POSTS 32
+
+typedef struct
+{
+    int yl;
+    int nseg;
+    int count[3];
+    int32_t t[3];
+    int32_t tstep[3];
+    const byte *source;
+} masked_gpu_post_t;
+
+boolean R_DrawMaskedColumnGPU(column_t *column, const byte *blockcol)
+{
+    masked_gpu_post_t plan[MASKED_GPU_POSTS];
+    const column_t *post;
+    int nplan = 0;
+
+    if (maskedcolormaprow < 0 || detailshift != 0 || colfunc != basecolfunc)
+        return false;
+
+    for (post = column; post->topdelta != 0xff;
+         post = (const column_t *)((const byte *)post + post->length + 4))
+    {
+        int topscreen = sprtopscreen + spryscale*post->topdelta;
+        int bottomscreen = topscreen + spryscale*post->length;
+        int yl = (topscreen+FRACUNIT-1)>>FRACBITS;
+        int yh = (bottomscreen-1)>>FRACBITS;
+        masked_gpu_post_t *p;
+        fixed_t texturemid;
+        int64_t frac, last, end;
+        int count;
+
+        if (yh >= mfloorclip[dc_x])
+            yh = mfloorclip[dc_x]-1;
+        if (yl <= mceilingclip[dc_x])
+            yl = mceilingclip[dc_x]+1;
+        if (yl > yh)
+            continue;
+        if (nplan == MASKED_GPU_POSTS
+            || !R_GPU_CanDrawColumn(dc_x, yl, yh, maskedcolormaprow))
+            return false;
+
+        p = &plan[nplan++];
+        p->yl = yl;
+        p->source = blockcol + post->topdelta;
+        texturemid = dc_texturemid - (post->topdelta<<FRACBITS);
+        count = yh - yl + 1;
+        frac = (int64_t)texturemid + (int64_t)(yl - centery) * dc_iscale;
+        last = frac + (int64_t)(count - 1) * dc_iscale;
+        end = (int64_t)post->length * FRACUNIT;
+        if (frac >= 0 && last >= 0 && frac < end && last < end)
+        {
+            p->nseg = 1;
+            p->count[0] = count;
+            p->t[0] = (int32_t)frac;
+            p->tstep[0] = dc_iscale;
+        }
+        else
+        {
+            int before, inside, n = 0;
+
+            if (dc_iscale <= 0 || post->length == 0)
+                return false;
+            before = frac >= 0 ? 0
+                   : (int)((-frac + dc_iscale - 1) / dc_iscale);
+            inside = frac >= end ? 0
+                   : (int)((end - frac + dc_iscale - 1) / dc_iscale);
+            if (before > count) before = count;
+            if (inside > count) inside = count;
+            if (before > 0)
+            {
+                p->count[n] = before;
+                p->t[n] = 0;
+                p->tstep[n++] = 0;
+            }
+            if (inside > before)
+            {
+                p->count[n] = inside - before;
+                p->t[n] = (int32_t)(frac + (int64_t)before * dc_iscale);
+                p->tstep[n++] = dc_iscale;
+            }
+            if (count > inside)
+            {
+                p->count[n] = count - inside;
+                p->t[n] = (post->length - 1) << FRACBITS;
+                p->tstep[n++] = 0;
+            }
+            p->nseg = n;
+        }
+        dc_yl = yl;
+        dc_yh = yh;
+    }
+
+    for (int i = 0; i < nplan; i++)
+        R_GPU_DrawColumnSegments(dc_x, plan[i].yl, plan[i].nseg, plan[i].count,
+                                 plan[i].source, plan[i].t, plan[i].tstep,
+                                 maskedcolormaprow);
+    return true;
+}
+
+
+
 //
 // R_DrawVisSprite
 //  mfloorclip and mceilingclip should also be set.
@@ -1018,34 +1127,84 @@ typedef struct
 
 static drawsegrange_t	drawsegranges[MAXDRAWSEGS];
 static int		numdrawsegranges;
+/* Indices of the cached ranges with masked columns, in drawsegranges order. */
+static unsigned short	dsrmasked[MAXDRAWSEGS];
+static int		numdsrmasked;
+
+/* Per 32-column bin, the indices of the cached ranges touching it, in
+ * drawsegranges order.  A sprite within one or two bins visits only those
+ * lists (merged, duplicates once), which hold every range its own overlap
+ * test can accept; wider sprites walk dsrall, every index in order. */
+#define DSR_BIN_SHIFT	5
+#define DSR_BINS	((SCREENWIDTH + (1 << DSR_BIN_SHIFT) - 1) >> DSR_BIN_SHIFT)
+#define DSR_BIN_MIN	32
+
+static unsigned short	dsrbin[DSR_BINS][MAXDRAWSEGS];
+static int		dsrbincount[DSR_BINS];
+static unsigned short	dsrall[MAXDRAWSEGS];
+static boolean		dsrbins_valid;
+
+static void R_BinDrawSegRanges (void)
+{
+    int i;
+
+    for (i = 0; i < numdrawsegranges; i++)
+	dsrall[i] = (unsigned short)i;
+    dsrbins_valid = false;
+    if (numdrawsegranges < DSR_BIN_MIN)
+	return;
+
+    memset(dsrbincount, 0, sizeof(dsrbincount));
+    for (i = 0; i < numdrawsegranges; i++)
+    {
+	int lo = drawsegranges[i].x1;
+	int hi = drawsegranges[i].x2;
+	int b;
+
+	if (lo > hi)
+	{
+	    int t = lo; lo = hi; hi = t;
+	}
+	if (lo < 0 || hi >= SCREENWIDTH)
+	    return;
+	for (b = lo >> DSR_BIN_SHIFT; b <= (hi >> DSR_BIN_SHIFT); b++)
+	    dsrbin[b][dsrbincount[b]++] = (unsigned short)i;
+    }
+    dsrbins_valid = true;
+}
 
 static void R_CacheDrawSegRanges (void)
 {
     drawseg_t*		ds;
     drawsegrange_t*	dsr = drawsegranges;
 
+    numdsrmasked = 0;
     for (ds=ds_p-1 ; ds >= drawsegs ; ds--)
     {
 	if (!ds->silhouette && !ds->maskedtexturecol)
 	    continue;
 
+	if (ds->maskedtexturecol)
+	    dsrmasked[numdsrmasked++] = (unsigned short)(dsr - drawsegranges);
 	dsr->x1 = (short)ds->x1;
 	dsr->x2 = (short)ds->x2;
 	dsr->ds = ds;
 	dsr++;
     }
     numdrawsegranges = dsr - drawsegranges;
+    R_BinDrawSegRanges();
 }
 
 //
-// R_DrawSprite
+// R_ClipSpriteToRange
+// One cached drawseg range against the sprite: draw a masked range that
+// lies behind it, or clip the sprite's columns by its silhouette.
 //
-void R_DrawSprite (vissprite_t* spr)
+static inline __attribute__((always_inline)) void
+R_ClipSpriteToRange (vissprite_t* spr, const drawsegrange_t* dsr,
+		     short* clipbot, short* cliptop)
 {
     drawseg_t*		ds;
-    drawsegrange_t*	dsr;
-    short		clipbot[SCREENWIDTH];
-    short		cliptop[SCREENWIDTH];
     int			x;
     int			r1;
     int			r2;
@@ -1053,85 +1212,130 @@ void R_DrawSprite (vissprite_t* spr)
     fixed_t		lowscale;
     int			silhouette;
 
+    // determine if the drawseg obscures the sprite
+    if (dsr->x1 > spr->x2 || dsr->x2 < spr->x1)
+    {
+	// does not cover sprite
+	return;
+    }
+
+    ds = dsr->ds;
+    r1 = dsr->x1 < spr->x1 ? spr->x1 : dsr->x1;
+    r2 = dsr->x2 > spr->x2 ? spr->x2 : dsr->x2;
+
+    if (ds->scale1 > ds->scale2)
+    {
+	lowscale = ds->scale2;
+	scale = ds->scale1;
+    }
+    else
+    {
+	lowscale = ds->scale1;
+	scale = ds->scale2;
+    }
+
+    if (scale < spr->scale
+	|| ( lowscale < spr->scale
+	     && !R_PointOnSegSide (spr->gx, spr->gy, ds->curline) ) )
+    {
+	// masked mid texture?
+	if (ds->maskedtexturecol)
+	    R_RenderMaskedSegRange (ds, r1, r2);
+	// seg is behind sprite
+	return;
+    }
+
+
+    // clip this piece of the sprite
+    silhouette = ds->silhouette;
+
+    if (spr->gz >= ds->bsilheight)
+	silhouette &= ~SIL_BOTTOM;
+
+    if (spr->gzt <= ds->tsilheight)
+	silhouette &= ~SIL_TOP;
+
+    if (silhouette == 1)
+    {
+	// bottom sil
+	for (x=r1 ; x<=r2 ; x++)
+	    if (clipbot[x] == -2)
+		clipbot[x] = ds->sprbottomclip[x];
+    }
+    else if (silhouette == 2)
+    {
+	// top sil
+	for (x=r1 ; x<=r2 ; x++)
+	    if (cliptop[x] == -2)
+		cliptop[x] = ds->sprtopclip[x];
+    }
+    else if (silhouette == 3)
+    {
+	// both
+	for (x=r1 ; x<=r2 ; x++)
+	{
+	    if (clipbot[x] == -2)
+		clipbot[x] = ds->sprbottomclip[x];
+	    if (cliptop[x] == -2)
+		cliptop[x] = ds->sprtopclip[x];
+	}
+    }
+}
+
+//
+// R_DrawSprite
+//
+void R_DrawSprite (vissprite_t* spr)
+{
+    const unsigned short *a;
+    const unsigned short *ae;
+    const unsigned short *b;
+    const unsigned short *be;
+    short		clipbot[SCREENWIDTH];
+    short		cliptop[SCREENWIDTH];
+    int			x;
+    int			b1;
+    int			b2;
+
     for (x = spr->x1 ; x<=spr->x2 ; x++)
 	clipbot[x] = cliptop[x] = -2;
 
     // Scan the cached drawseg ranges for obscuring segs.
     // The first drawseg that has a greater scale
     //  is the clip seg.
-    for (dsr=drawsegranges ; dsr < drawsegranges+numdrawsegranges ; dsr++)
+    b1 = spr->x1 >> DSR_BIN_SHIFT;
+    b2 = spr->x2 >> DSR_BIN_SHIFT;
+    if (dsrbins_valid && spr->x1 >= 0 && spr->x1 <= spr->x2
+	&& spr->x2 < SCREENWIDTH && b2 - b1 <= 1)
     {
-	// determine if the drawseg obscures the sprite
-	if (dsr->x1 > spr->x2 || dsr->x2 < spr->x1)
-	{
-	    // does not cover sprite
-	    continue;
-	}
-
-	ds = dsr->ds;
-	r1 = dsr->x1 < spr->x1 ? spr->x1 : dsr->x1;
-	r2 = dsr->x2 > spr->x2 ? spr->x2 : dsr->x2;
-
-	if (ds->scale1 > ds->scale2)
-	{
-	    lowscale = ds->scale2;
-	    scale = ds->scale1;
-	}
-	else
-	{
-	    lowscale = ds->scale1;
-	    scale = ds->scale2;
-	}
-		
-	if (scale < spr->scale
-	    || ( lowscale < spr->scale
-		 && !R_PointOnSegSide (spr->gx, spr->gy, ds->curline) ) )
-	{
-	    // masked mid texture?
-	    if (ds->maskedtexturecol)	
-		R_RenderMaskedSegRange (ds, r1, r2);
-	    // seg is behind sprite
-	    continue;			
-	}
-
-	
-	// clip this piece of the sprite
-	silhouette = ds->silhouette;
-	
-	if (spr->gz >= ds->bsilheight)
-	    silhouette &= ~SIL_BOTTOM;
-
-	if (spr->gzt <= ds->tsilheight)
-	    silhouette &= ~SIL_TOP;
-			
-	if (silhouette == 1)
-	{
-	    // bottom sil
-	    for (x=r1 ; x<=r2 ; x++)
-		if (clipbot[x] == -2)
-		    clipbot[x] = ds->sprbottomclip[x];
-	}
-	else if (silhouette == 2)
-	{
-	    // top sil
-	    for (x=r1 ; x<=r2 ; x++)
-		if (cliptop[x] == -2)
-		    cliptop[x] = ds->sprtopclip[x];
-	}
-	else if (silhouette == 3)
-	{
-	    // both
-	    for (x=r1 ; x<=r2 ; x++)
-	    {
-		if (clipbot[x] == -2)
-		    clipbot[x] = ds->sprbottomclip[x];
-		if (cliptop[x] == -2)
-		    cliptop[x] = ds->sprtopclip[x];
-	    }
-	}
-		
+	a = dsrbin[b1];
+	ae = a + dsrbincount[b1];
+	b = dsrbin[b2];
+	be = b2 != b1 ? b + dsrbincount[b2] : b;
     }
-    
+    else
+    {
+	a = dsrall;
+	ae = a + numdrawsegranges;
+	b = be = a;
+    }
+    for (;;)
+    {
+	unsigned int i;
+
+	if (a < ae && (b >= be || *a <= *b))
+	{
+	    i = *a++;
+	    if (b < be && *b == i)
+		b++;
+	}
+	else if (b < be)
+	    i = *b++;
+	else
+	    break;
+	R_ClipSpriteToRange(spr, &drawsegranges[i], clipbot, cliptop);
+    }
+
     // all clipping has been performed, so draw the sprite
 
     // check for unclipped columns
@@ -1158,7 +1362,6 @@ void R_DrawSprite (vissprite_t* spr)
 void R_DrawMasked (void)
 {
     vissprite_t*	spr;
-    drawsegrange_t*	dsr;
 
     R_SortVisSprites ();
     R_CacheDrawSegRanges ();
@@ -1176,9 +1379,11 @@ void R_DrawMasked (void)
     }
 
     // render any remaining masked mid textures
-    for (dsr=drawsegranges ; dsr < drawsegranges+numdrawsegranges ; dsr++)
-	if (dsr->ds->maskedtexturecol)
-	    R_RenderMaskedSegRange (dsr->ds, dsr->x1, dsr->x2);
+    for (int i = 0; i < numdsrmasked; i++)
+    {
+	const drawsegrange_t *dsr = &drawsegranges[dsrmasked[i]];
+	R_RenderMaskedSegRange (dsr->ds, dsr->x1, dsr->x2);
+    }
 
     // draw the psprites on top of everything
     //  but does not draw on side views

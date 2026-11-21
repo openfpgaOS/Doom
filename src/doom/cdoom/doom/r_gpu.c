@@ -118,6 +118,27 @@ boolean R_GPU_DrawColumnLightDirect(int x, int yl, int yh, const byte *source,
     (void)light;
     return false;
 }
+boolean R_GPU_CanDrawColumn(int x, int yl, int yh, int light)
+{
+    (void)x;
+    (void)yl;
+    (void)yh;
+    (void)light;
+    return false;
+}
+void R_GPU_DrawColumnSegments(int x, int yl, int nseg, const int *count,
+                              const byte *source, const int32_t *t,
+                              const int32_t *tstep, int light)
+{
+    (void)x;
+    (void)yl;
+    (void)nseg;
+    (void)count;
+    (void)source;
+    (void)t;
+    (void)tstep;
+    (void)light;
+}
 boolean R_GPU_DrawColumnLightBatchDirect(int x, int yl, int yh, int lanes,
                                          const byte *const *source,
                                          const int32_t *t,
@@ -805,111 +826,8 @@ static void gpu_inval_line_run(unsigned int first, unsigned int last)
     of_cache_inval_range(ptr, size);
 }
 
-static void gpu_flush_cpu_dirty_lines(void)
-{
-    unsigned int cache_start;
-    unsigned int line = 0;
-
-    if (!gpu_cpu_dirty || gpu_draw_render_base == NULL)
-        return;
-
-    cache_start = R_Perf_BeginStage();
-
-    while (line < GPU_FB_CACHE_LINES)
-    {
-        unsigned int first;
-
-        while (line < GPU_FB_CACHE_LINES &&
-               !gpu_line_test(gpu_cpu_dirty_lines, line))
-            line++;
-
-        if (line >= GPU_FB_CACHE_LINES)
-            break;
-
-        first = line;
-        while (line < GPU_FB_CACHE_LINES &&
-               gpu_line_test(gpu_cpu_dirty_lines, line))
-            line++;
-
-        gpu_flush_line_run(first, line - 1u);
-    }
-
-    R_Perf_EndStage(R_PERF_STAGE_CACHE, cache_start);
-    gpu_clear_line_bits(gpu_cpu_dirty_lines);
-    gpu_cpu_dirty = 0;
-}
-
-static void gpu_invalidate_rect_for_cpu(int x, int y, int w, int h)
-{
-    unsigned int cache_start;
-
-    if (gpu_draw_render_base == NULL)
-        return;
-    if (!gpu_clip_rect(&x, &y, &w, &h))
-        return;
-
-    cache_start = R_Perf_BeginStage();
-
-    for (int row = y; row < y + h; row++)
-    {
-        unsigned int row_off = (unsigned int)row * SCREENWIDTH;
-        unsigned int first = (row_off + (unsigned int)x)
-                           / GPU_FB_CACHE_LINE_BYTES;
-        unsigned int last = (row_off + (unsigned int)x + (unsigned int)w - 1u)
-                          / GPU_FB_CACHE_LINE_BYTES;
-        unsigned int line = first;
-
-        while (line <= last)
-        {
-            unsigned int run_first;
-
-            while (line <= last &&
-                   (gpu_line_test(gpu_cpu_dirty_lines, line) ||
-                    gpu_line_test(gpu_cpu_valid_lines, line)))
-                line++;
-
-            if (line > last)
-                break;
-
-            run_first = line;
-            while (line <= last &&
-                   !gpu_line_test(gpu_cpu_dirty_lines, line) &&
-                   !gpu_line_test(gpu_cpu_valid_lines, line))
-            {
-                gpu_line_set(gpu_cpu_valid_lines, line);
-                line++;
-            }
-
-            gpu_inval_line_run(run_first, line - 1u);
-        }
-    }
-
-    R_Perf_EndStage(R_PERF_STAGE_CACHE, cache_start);
-}
-
-static void gpu_mark_cpu_dirty_rect(int x, int y, int w, int h)
-{
-    if (!gpu_clip_rect(&x, &y, &w, &h))
-        return;
-
-    for (int row = y; row < y + h; row++)
-    {
-        unsigned int row_off = (unsigned int)row * SCREENWIDTH;
-        unsigned int first = (row_off + (unsigned int)x)
-                           / GPU_FB_CACHE_LINE_BYTES;
-        unsigned int last = (row_off + (unsigned int)x + (unsigned int)w - 1u)
-                          / GPU_FB_CACHE_LINE_BYTES;
-
-        for (unsigned int line = first; line <= last; line++)
-        {
-            gpu_line_set(gpu_cpu_dirty_lines, line);
-            gpu_line_set(gpu_cpu_valid_lines, line);
-        }
-    }
-
-    gpu_cpu_dirty = 1;
-    gpu_write_prepared = 0;
-}
+#include "r_ctz.h"
+#include "r_gpu_cpufb.h"   /* r_cpufb: word-level line tracking */
 
 static int gpu_rect_overlaps_view_rows(int x, int y, int w, int h)
 {
@@ -2498,6 +2416,41 @@ boolean R_GPU_DrawColumnLightDirect(int x, int yl, int yh, const byte *source,
 
     R_Perf_CountGpuColumn((unsigned int)count);
     return true;
+}
+
+/* The checks R_GPU_DrawColumnLightDirect makes, for a caller that must know
+ * up front that every column of a set will be accepted. */
+boolean R_GPU_CanDrawColumn(int x, int yl, int yh, int light)
+{
+    int count = yh - yl + 1;
+    int screen_x = x + viewwindowx;
+
+    if (!gpu_present || !gpu_frame_active || I_VideoBuffer == NULL)
+        return false;
+    if (screen_x < 0 || screen_x >= SCREENWIDTH ||
+        yl + viewwindowy < 0 || yh + viewwindowy >= SCREENHEIGHT)
+        return false;
+    if (count <= 0 || count > 4095 || light < 0 || light > 63)
+        return false;
+    return gpu_src_tex != NULL;
+}
+
+/* One screen column [yl, yl + sum(count)) drawn as nseg stacked affine
+ * columns, segment i sampling source with its own t / tstep (texel
+ * (t >> 16) & 127, as R_DrawColumn).  Only after R_GPU_CanDrawColumn
+ * accepted these rows and light, with source inside the bound texture. */
+void R_GPU_DrawColumnSegments(int x, int yl, int nseg, const int *count,
+                              const byte *source, const int32_t *t,
+                              const int32_t *tstep, int light)
+{
+    for (int i = 0; i < nseg; i++)
+    {
+        gpu_add_column(x + viewwindowx, yl + viewwindowy, count[i], source,
+                       t[i], tstep[i], (uint8_t)light, OF_GPU_SPAN_COLORMAP, 0,
+                       1, 0, 127);
+        R_Perf_CountGpuColumn((unsigned int)count[i]);
+        yl += count[i];
+    }
 }
 
 boolean R_GPU_DrawColumnLightBatchDirect(int x, int yl, int yh, int lanes,

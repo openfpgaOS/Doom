@@ -39,9 +39,9 @@ typedef struct {
     const uint8_t *data;
     uint32_t len;
     uint32_t pos;
-    int64_t  pending_us;   /* signed: can go negative during tick processing */
     uint8_t  running;
-    int      done;
+    uint8_t  done;
+    int64_t  due_us;       /* song time (M.song_us) of the next event */
 } midi_track_t;
 
 /* Pinned to BRAM (OF_FASTDATA): the timer ISR updates this struct every
@@ -64,6 +64,16 @@ static OF_FASTDATA struct {
     uint64_t us_per_tick_q16;  /* (us_per_beat << 16) / division, cached */
     uint32_t last_pump_us;
     uint32_t tick_accum_us;   /* accumulates until >= 1000 µs → one voice tick (matches of_smp_tables.c 1 kHz envelope rate) */
+
+    /* Song clock: elapsed time summed since the tracks were (re)started.  A
+     * track's next event is due once song_us >= due_us, so a pump only has
+     * to advance one clock instead of counting down every track.
+     * next_due_us is the earliest due_us of the live tracks (INT64_MAX when
+     * none) and any_active whether a live track remained, both as of the
+     * last track (re)start or event dispatch. */
+    int64_t song_us;
+    int64_t next_due_us;
+    int     any_active;
 
     midi_track_t tracks[MIDI_MAX_TRACKS];
 
@@ -324,7 +334,21 @@ static void read_next_delta(midi_track_t *t) {
     /* delta * (us_per_beat / division), via the cached Q16.16 µs-per-tick — no
      * per-event 64-bit divide.  (division==0 is rejected in parse_header, so
      * us_per_tick_q16 is always valid while playing.) */
-    t->pending_us += (int64_t)(((uint64_t)delta * M.us_per_tick_q16) >> 16);
+    t->due_us += (int64_t)(((uint64_t)delta * M.us_per_tick_q16) >> 16);
+}
+
+/* Refresh next_due_us and any_active from the track table. */
+static void scan_tracks(void) {
+    int64_t next = INT64_MAX;
+    int any = 0;
+    for (int i = 0; i < M.num_tracks; i++) {
+        const midi_track_t *t = &M.tracks[i];
+        if (t->done) continue;
+        any = 1;
+        if (t->due_us < next) next = t->due_us;
+    }
+    M.next_due_us = next;
+    M.any_active  = any;
 }
 
 /* ========================================================================
@@ -362,7 +386,7 @@ static int parse_header(void) {
             M.tracks[found].data       = M.data + offset + 8;
             M.tracks[found].len        = tlen;
             M.tracks[found].pos        = 0;
-            M.tracks[found].pending_us = 0;
+            M.tracks[found].due_us     = 0;
             M.tracks[found].running    = 0;
             M.tracks[found].done       = 0;
             found++;
@@ -377,13 +401,15 @@ static int parse_header(void) {
 }
 
 static void reset_tracks(void) {
+    M.song_us = 0;
     for (int i = 0; i < M.num_tracks; i++) {
         M.tracks[i].pos        = 0;
-        M.tracks[i].pending_us = 0;
+        M.tracks[i].due_us     = 0;
         M.tracks[i].running    = 0;
         M.tracks[i].done       = 0;
         read_next_delta(&M.tracks[i]);
     }
+    scan_tracks();
 }
 
 /* ========================================================================
@@ -480,7 +506,7 @@ void of_midi_pump(void) {
          * dispatching MIDI events for this call.  Avoids ISR-monopoly
          * starvation of the main thread. */
         const uint32_t PUMP_BUDGET_US = 2000;   /* 2 ms hard cap */
-        uint32_t pump_start_us = OF_SVC->timer_get_us();
+        uint32_t pump_start_us = now;   /* the read above starts the budget */
 
         /* of_smp_tables.c bakes envelope rates assuming 1 kHz (1 ms/tick),
          * so smp_voice_tick MUST fire every 1000 µs.  Half-rate (every
@@ -507,34 +533,33 @@ void of_midi_pump(void) {
         smp_voice_tick_record_pump((uint32_t)elapsed, ticks_fired,
                                    budget_exceeded);
 
-        /* Advance ALL live track clocks before dispatching any events. The
-         * dispatch budget can stop us partway through the track list; since
-         * last_pump_us already advanced, skipping a later track's countdown
-         * would permanently lose elapsed time and desynchronize its notes. */
-        int any_active = 0;
-        for (int i = 0; i < M.num_tracks; i++) {
-            midi_track_t *t = &M.tracks[i];
-            if (t->done) continue;
-            any_active = 1;
-            t->pending_us -= elapsed;
-        }
+        /* Advance the song clock for ALL live tracks before dispatching any
+         * events.  The dispatch budget can stop us partway through the
+         * track list; a track left behind keeps its absolute due time, so
+         * no elapsed time is lost and its notes stay in sync. */
+        int any_active = M.any_active;
+        M.song_us += elapsed;
 
-        int safety = 10000;
-        for (int i = 0; i < M.num_tracks; i++) {
-            midi_track_t *t = &M.tracks[i];
-            while (!t->done && t->pending_us <= 0 && safety > 0) {
-                process_event(t);
-                if (!t->done) read_next_delta(t);
-                safety--;
-                /* Same overrun cap as the envelope loop.  Pending MIDI
-                 * events stay queued (their pending_us is still <=0)
-                 * so the next pump call picks them up — no notes lost,
-                 * just delayed. */
-                if ((OF_SVC->timer_get_us() - pump_start_us) > PUMP_BUDGET_US)
-                    goto pump_done;
+        if (M.song_us >= M.next_due_us) {
+            int64_t song_us = M.song_us;
+            int safety = 10000;
+            for (int i = 0; i < M.num_tracks; i++) {
+                midi_track_t *t = &M.tracks[i];
+                while (!t->done && t->due_us <= song_us && safety > 0) {
+                    process_event(t);
+                    if (!t->done) read_next_delta(t);
+                    safety--;
+                    /* Same overrun cap as the envelope loop.  Pending MIDI
+                     * events stay queued (their due_us is still <= song_us)
+                     * so the next pump call picks them up — no notes lost,
+                     * just delayed. */
+                    if ((OF_SVC->timer_get_us() - pump_start_us) > PUMP_BUDGET_US)
+                        goto pump_done;
+                }
             }
+            pump_done:
+            scan_tracks();
         }
-        pump_done: ;
 
         if (!any_active) {
             if (M.looping) {

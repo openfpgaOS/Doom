@@ -20,6 +20,8 @@ static void test_free(void *ptr) { if (ptr) ++frees; free(ptr); }
 static of_mixer_handle_t active, generation;
 static int group, writes, last_left, last_right, stops, releases;
 static byte lump[8 + 32 + 256];
+static uint32_t os_version = OF_VERSION(0, 9, 1);
+uint32_t of_get_version(void) { return os_version; }
 unsigned int of_time_us(void) { static unsigned int t; return ++t; }
 void of_audio_init(void) { }
 void of_mixer_init(int voices, int rate) { (void)voices; (void)rate; }
@@ -58,19 +60,25 @@ int main(int argc, char **argv)
         assert(!load_sfx(&sound));
         assert(sound.driver_data == NULL && frees == 1 && releases == 1);
     } else if (!strcmp(argv[1], "pcm")) {
-        assert(load_sfx(&sound));
-        sfx_slot_t *slot = sound.driver_data;
-        assert(slot->sample_count == 256 && slot->sample_rate == 11025);
-        for (int i = 0; i < 256; ++i) {
-            int expected = (i - 128) * 256;
+        /* Doom boosts SFX by 50% (clamped) only on cores before 0.9.1. */
+        for (int old = 0; old < 2; ++old) {
+            os_version = old ? OF_VERSION(0, 9, 0) : OF_VERSION(0, 9, 1);
+            assert(load_sfx(&sound));
+            sfx_slot_t *slot = sound.driver_data;
+            assert(slot->sample_count == 256 && slot->sample_rate == 11025);
+            for (int i = 0; i < 256; ++i) {
+                int expected = (i - 128) * 256;
 #ifdef OF_DOOM
-            expected = expected * 15 / 10;
-            if (expected > 32767) expected = 32767;
-            if (expected < -32768) expected = -32768;
+                if (old) {
+                    expected = expected * 15 / 10;
+                    if (expected > 32767) expected = 32767;
+                    if (expected < -32768) expected = -32768;
+                }
 #endif
-            assert(slot->pcm[i] == expected);
+                assert(slot->pcm[i] == expected);
+            }
+            free_sfx_slot(&sound);
         }
-        free_sfx_slot(&sound);
     } else if (!strcmp(argv[1], "params")) {
         I_SDL_InitSound(doom);
         assert(I_SDL_StartSound(&sound, 0, 100, 128, NORM_PITCH) == 0);

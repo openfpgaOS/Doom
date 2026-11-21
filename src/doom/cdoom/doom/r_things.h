@@ -45,6 +45,7 @@ extern fixed_t		pspriteiscale;
 
 
 void R_DrawMaskedColumn (column_t* column);
+boolean R_DrawMaskedColumnGPU(column_t *column, const byte *blockcol);
 
 
 void R_SortVisSprites (void);

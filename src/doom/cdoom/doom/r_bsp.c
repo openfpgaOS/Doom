@@ -41,6 +41,7 @@
 #include "r_state.h"
 #include "r_bsp.h"
 #include "r_walldiv.h"
+#include "r_ctz.h"
 #include "z_zone.h"
 
 #include "tables.h"
@@ -836,7 +837,7 @@ static void R_FlushWallMergeSlot (int slot)
 	oldest = slot;
 	for (m = wallmerge_openmask; m != 0; m &= m - 1)
 	{
-	    i = __builtin_ctz(m);
+	    i = R_Ctz32(m);
 	    if (wallmerge[i].age < wallmerge[oldest].age)
 		oldest = i;
 	}
@@ -856,7 +857,7 @@ static void R_FlushWallMergeOverlaps (int x1, int x2, int keep)
 
     for (m = wallmerge_openmask; m != 0; m &= m - 1)
     {
-	i = __builtin_ctz(m);
+	i = R_Ctz32(m);
 	if (i == keep)
 	    continue;
 	/* m is a snapshot: a FIFO cascade below may close slots it still
@@ -872,7 +873,7 @@ static void R_FlushWallMergeOverlaps (int x1, int x2, int keep)
 void R_FlushWallMerge (void)
 {
     while (wallmerge_openmask != 0)
-	R_FlushWallMergeSlot (__builtin_ctz(wallmerge_openmask));
+	R_FlushWallMergeSlot (R_Ctz32(wallmerge_openmask));
 }
 
 /* Entry from R_AddLine (x2 inclusive): extend a pending wall when this
@@ -897,7 +898,7 @@ static void R_AddWallRange (int x1, int x2, boolean solid)
 
     for (m = wallmerge_openmask; m != 0; m &= m - 1)
     {
-	i = __builtin_ctz(m);
+	i = R_Ctz32(m);
 	w = &wallmerge[i];
 	if (solid != w->solid
 	    || cursegcache->linedef != w->segcache->linedef
@@ -945,7 +946,7 @@ static void R_AddWallRange (int x1, int x2, boolean solid)
     }
     else
     {
-	slot = __builtin_ctz(~wallmerge_openmask);
+	slot = R_Ctz32(~wallmerge_openmask);
     }
 
     w = &wallmerge[slot];

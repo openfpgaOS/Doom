@@ -96,6 +96,19 @@ byte*			dc_source;
 // just for profiling 
 int			dccount;
 
+/* The column and span writers below address the framebuffer through
+ * ylookup[] and columnofs[], so a view-relative (x, y) lands on screen pixel
+ * (viewwindowx + x, viewwindowy + y).  R_GPU_PrepareForCPUAccessRect tracks
+ * GPU/CPU cache-line ownership in screen coordinates; with a reduced view
+ * (screenblocks < 10: viewwindowx = 16, viewwindowy = 12 at size 9) passing
+ * the view-relative rect invalidates and marks the wrong 64-byte lines, and
+ * the lines actually written stay dirty in the D-cache, unflushed, until an
+ * eviction writes them over pixels the GPU drew meanwhile. */
+static inline void R_PrepareViewRectForCPU(int x, int y, int w, int h)
+{
+    R_GPU_PrepareForCPUAccessRect(viewwindowx + x, viewwindowy + y, w, h);
+}
+
 /* Reciprocal rounding can sample just outside a masked post. Keep the
  * ordinary column path for in-range posts and clamp only these edge cases. */
 boolean R_DrawClampedMaskedColumn(int length)
@@ -118,7 +131,7 @@ boolean R_DrawClampedMaskedColumn(int length)
         return false;
 
     x = dc_x << low;
-    R_GPU_PrepareForCPUAccessRect(x, dc_yl, 1 << low, count);
+    R_PrepareViewRectForCPU(x, dc_yl, 1 << low, count);
     R_Perf_CountCpuColumn((unsigned int)count << low);
     dest = ylookup[dc_yl] + columnofs[x];
     while (count--)
@@ -165,7 +178,7 @@ void R_DrawColumn (void)
     if (R_GPU_DrawColumn())
 	return;
 
-    R_GPU_PrepareForCPUAccessRect(dc_x, dc_yl, 1, count + 1);
+    R_PrepareViewRectForCPU(dc_x, dc_yl, 1, count + 1);
     R_Perf_CountCpuColumn((unsigned int)(count + 1));
 
     // Framebuffer destination address.
@@ -282,7 +295,7 @@ void R_DrawColumnLow (void)
 
     // Blocky mode, need to multiply by 2.
     x = dc_x << 1;
-    R_GPU_PrepareForCPUAccessRect(x, dc_yl, 2, count + 1);
+    R_PrepareViewRectForCPU(x, dc_yl, 2, count + 1);
     
     dest = ylookup[dc_yl] + columnofs[x];
     dest2 = ylookup[dc_yl] + columnofs[x+1];
@@ -366,7 +379,7 @@ void R_DrawFuzzColumn (void)
     }
 
     R_Perf_CountFuzzCpuColumn((unsigned int)(count + 1));
-    R_GPU_PrepareForCPUAccessRect(dc_x, dc_yl - 1, 1, count + 3);
+    R_PrepareViewRectForCPU(dc_x, dc_yl - 1, 1, count + 3);
     
     dest = ylookup[dc_yl] + columnofs[dc_x];
 
@@ -433,7 +446,7 @@ void R_DrawFuzzColumnLow (void)
     }
 
     R_Perf_CountFuzzCpuColumn((unsigned int)((count + 1) * 2));
-    R_GPU_PrepareForCPUAccessRect(x, dc_yl - 1, 2, count + 3);
+    R_PrepareViewRectForCPU(x, dc_yl - 1, 2, count + 3);
     
     dest = ylookup[dc_yl] + columnofs[x];
     dest2 = ylookup[dc_yl] + columnofs[x+1];
@@ -497,7 +510,7 @@ void R_DrawTranslatedColumn (void)
     
 #endif 
 
-    R_GPU_PrepareForCPUAccessRect(dc_x, dc_yl, 1, count + 1);
+    R_PrepareViewRectForCPU(dc_x, dc_yl, 1, count + 1);
 
     dest = ylookup[dc_yl] + columnofs[dc_x]; 
 
@@ -547,7 +560,7 @@ void R_DrawTranslatedColumnLow (void)
     
 #endif 
 
-    R_GPU_PrepareForCPUAccessRect(x, dc_yl, 2, count + 1);
+    R_PrepareViewRectForCPU(x, dc_yl, 2, count + 1);
 
     dest = ylookup[dc_yl] + columnofs[x]; 
     dest2 = ylookup[dc_yl] + columnofs[x+1]; 
@@ -666,7 +679,7 @@ void R_DrawSpan (void)
     if (R_GPU_DrawSpan())
 	return;
 
-    R_GPU_PrepareForCPUAccessRect(ds_x1, ds_y, ds_x2 - ds_x1 + 1, 1);
+    R_PrepareViewRectForCPU(ds_x1, ds_y, ds_x2 - ds_x1 + 1, 1);
     R_Perf_CountCpuSpan((unsigned int)(ds_x2 - ds_x1 + 1));
 
     // Pack position and step variables into a single 32-bit integer,

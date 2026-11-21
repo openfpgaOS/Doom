@@ -33,6 +33,10 @@ byte **R_GetColumnTable(int t){(void)t;return cols;}
 int R_GetTextureWidthMask(int t){(void)t;return 7;}
 byte *R_GetMaskedTexture2D(int t){(void)t;return data[0];}
 boolean R_ColumnHasPosts(int t,int c){(void)t;return c&1;}
+/* No column blocks here, so every range walks as before; the GPU column-block
+ * path is compared pixel for pixel by check_masked_column_gpu.py. */
+byte *R_GetMaskedColumnBlock(int t){(void)t;return NULL;}
+boolean R_DrawMaskedColumnGPU(column_t *c,const byte *b){(void)c;(void)b;abort();}
 int R_GPU_ColormapRow(const byte *p){return (p-(byte *)maps)/256;}
 void R_GPU_UseMaskedTexture(int t){(void)t;}
 void R_GPU_UseNoTexture(void){accepted=0;}

@@ -116,6 +116,7 @@ R_RenderMaskedSegRange
     boolean	masked_gpu;
     byte**	column_table;
     int		widthmask;
+    byte*	colblock;
     
     // Calculate light table.
     // Use different light tables
@@ -200,7 +201,17 @@ R_RenderMaskedSegRange
 				       ds->gpu_mdistance, ds->gpu_moffset,
 				       ds->gpu_mcenterangle);
     }
-    if (!masked_gpu)
+    // A texture without the param block may have a column block instead
+    // (R_GetMaskedColumnBlock): its posts go to GPU affine columns with
+    // R_DrawColumn's own stepping, so they match the CPU post walk exactly.
+    colblock = NULL;
+    if (!masked_gpu && detailshift == 0)
+    {
+	colblock = R_GetMaskedColumnBlock(texnum);
+	if (colblock != NULL)
+	    R_GPU_UseMaskedTexture(texnum);
+    }
+    if (!masked_gpu && colblock == NULL)
 	R_GPU_UseNoTexture();
 
     // draw the columns
@@ -227,6 +238,7 @@ R_RenderMaskedSegRange
 	    {
 		int tcol = maskedtexturecol[dc_x] & widthmask;
 		byte *cdata = column_table[tcol];
+		int composite_len = 0;
 
 		if (R_ColumnHasPosts(texnum, tcol))
 		{
@@ -250,13 +262,25 @@ R_RenderMaskedSegRange
 		    masked_col_scratch[0] = 0;          /* topdelta */
 		    masked_col_scratch[1] = (byte)h;    /* length   */
 		    masked_col_scratch[2] = 0;          /* pad      */
-		    memcpy(masked_col_scratch + 3, cdata, h);
 		    masked_col_scratch[3 + h] = 0;      /* pad      */
 		    masked_col_scratch[4 + h] = 0xff;   /* end      */
 		    col = (column_t *)masked_col_scratch;
+		    composite_len = h;  /* texels copied only for the CPU walk */
 		}
 
-		R_DrawMaskedColumn (col);
+		if (colblock == NULL
+		    || !R_DrawMaskedColumnGPU(col, colblock
+					      + tcol * (textureheight[texnum] >> FRACBITS)))
+		{
+		    if (composite_len)
+			memcpy(masked_col_scratch + 3, cdata, composite_len);
+		    // The CPU walk's GPU column fallback must not sample the block.
+		    if (colblock != NULL)
+			R_GPU_UseNoTexture();
+		    R_DrawMaskedColumn (col);
+		    if (colblock != NULL)
+			R_GPU_UseMaskedTexture(texnum);
+		}
 	    }
 	    maskedtexturecol[dc_x] = SHRT_MAX;
 	}
@@ -265,6 +289,8 @@ R_RenderMaskedSegRange
 
     if (masked_gpu)
 	R_GPU_MaskedEnd();
+    if (colblock != NULL)
+	R_GPU_UseNoTexture();
 
     maskedcolormaprow = -1;
 	

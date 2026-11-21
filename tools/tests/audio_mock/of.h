@@ -6,6 +6,10 @@ typedef uint64_t of_mixer_handle_t;
 #define OF_MIXER_HANDLE_INVALID ((of_mixer_handle_t)0)
 #define OF_MIXER_GROUP_SFX 0
 #define OF_MIXER_GROUP_MUSIC 1
+/* Packed like the SDK's of_version.h; the test picks the reported version. */
+#define OF_VERSION(maj, min, pat) \
+    (((uint32_t)(maj) << 16) | ((uint32_t)(min) << 8) | (uint32_t)(pat))
+uint32_t of_get_version(void);
 unsigned int of_time_us(void);
 void of_audio_init(void);
 void of_mixer_init(int voices, int rate);

@@ -179,6 +179,9 @@ static OF_FASTDATA int master_vol = 255;
 static OF_FASTDATA uint32_t prev_rate[SMP_MAX_VOICES];
 static OF_FASTDATA uint8_t  prev_vol_l[SMP_MAX_VOICES];
 static OF_FASTDATA uint8_t  prev_vol_r[SMP_MAX_VOICES];
+/* Clamped pitch offset (cents) that prev_rate[] was computed from: while the
+ * offset is unchanged the tick skips the cents->multiplier conversion. */
+static OF_FASTDATA int16_t  prev_cents[SMP_MAX_VOICES];
 
 /* Stored in the voice structure's existing handle-alignment padding on RV32.
  * Routing is immutable for a note; controller changes invalidate calculations
@@ -311,68 +314,106 @@ static void env_init(env_state_t *e, uint32_t delay_ticks,
     e->timer = 0;
 }
 
-static void env_advance(env_state_t *e, const ofsf_zone_t *z, int is_vol)
+/* Stage entries that read the zone.  Out of line: they run once per stage,
+ * while env_advance runs for every live voice on every tick (from BRAM when
+ * SMP_VOICE_FAST_TICK is set). */
+static __attribute__((noinline)) void env_start_decay(env_state_t *e,
+                                                      const ofsf_zone_t *z,
+                                                      int is_vol)
 {
-    switch (e->stage) {
-    case ENV_OFF:
-    case ENV_DONE:
-        return;
+    uint32_t sus_level  = is_vol ? z->vol_sustain_level : z->mod_sustain_level;
+    uint32_t decay_rate = is_vol ? z->vol_decay_rate    : z->mod_decay_rate;
+    e->stage = ENV_DECAY;
+    e->target = (int32_t)sus_level;
+    e->rate = (int32_t)decay_rate;
+}
 
-    case ENV_DELAY:
-        if (--e->timer <= 0) {
-            uint32_t atk_rate = is_vol ? z->vol_attack_rate : z->mod_attack_rate;
-            e->stage = ENV_ATTACK;
-            e->rate = (int32_t)atk_rate;
-            e->target = 0x10000;
+static __attribute__((noinline)) void env_end_delay(env_state_t *e,
+                                                    const ofsf_zone_t *z,
+                                                    int is_vol)
+{
+    uint32_t atk_rate = is_vol ? z->vol_attack_rate : z->mod_attack_rate;
+    e->stage = ENV_ATTACK;
+    e->rate = (int32_t)atk_rate;
+    e->target = 0x10000;
+}
+
+static __attribute__((noinline)) void env_end_attack(env_state_t *e,
+                                                     const ofsf_zone_t *z,
+                                                     int is_vol)
+{
+    e->level = 0x10000;
+    uint32_t hold_ticks = is_vol ? z->vol_hold_ticks : z->mod_hold_ticks;
+    if (hold_ticks > 0) {
+        e->stage = ENV_HOLD;
+        e->timer = (int32_t)hold_ticks;
+        e->rate = 0;
+    } else {
+        env_start_decay(e, z, is_vol);
+    }
+}
+
+/* Attack, delay and hold: short stages, out of the per-tick path. */
+static __attribute__((noinline)) void env_advance_slow(env_state_t *e,
+                                                       const ofsf_zone_t *z,
+                                                       int is_vol)
+{
+    env_stage_t stage = e->stage;
+    if (stage == ENV_ATTACK) {
+        int32_t level = e->level + e->rate;
+        e->level = level;
+        if (level >= 0x10000)
+            env_end_attack(e, z, is_vol);
+    } else if (stage == ENV_DELAY || stage == ENV_HOLD) {
+        int32_t timer = e->timer - 1;
+        e->timer = timer;
+        if (timer <= 0) {
+            if (stage == ENV_DELAY)
+                env_end_delay(e, z, is_vol);
+            else
+                env_start_decay(e, z, is_vol);
         }
-        return;
+    }
+}
 
-    case ENV_ATTACK:
-        e->level += e->rate;
-        if (e->level >= 0x10000) {
-            e->level = 0x10000;
-            uint32_t hold_ticks = is_vol ? z->vol_hold_ticks : z->mod_hold_ticks;
-            if (hold_ticks > 0) {
-                e->stage = ENV_HOLD;
-                e->timer = (int32_t)hold_ticks;
-                e->rate = 0;
-            } else {
-                goto start_decay;
-            }
+/* One envelope tick; returns the new stage and stores the new level in
+ * *level_out.  Release tails and decays are by far the most common stages in
+ * dense scores; sustain and finished envelopes do nothing. */
+static inline __attribute__((always_inline)) env_stage_t env_advance(env_state_t *e,
+                                                                     const ofsf_zone_t *z,
+                                                                     int is_vol,
+                                                                     int32_t *level_out)
+{
+    env_stage_t stage = e->stage;
+    int32_t level;
+    if (stage == ENV_RELEASE) {
+        level = e->level - e->rate;
+        if (level <= ENV_FLOOR) {
+            level = 0;
+            stage = ENV_DONE;
+            e->stage = stage;
         }
-        return;
-
-    case ENV_HOLD:
-        if (--e->timer <= 0) {
-start_decay: ;
-            uint32_t sus_level  = is_vol ? z->vol_sustain_level : z->mod_sustain_level;
-            uint32_t decay_rate = is_vol ? z->vol_decay_rate    : z->mod_decay_rate;
-            e->stage = ENV_DECAY;
-            e->target = (int32_t)sus_level;
-            e->rate = (int32_t)decay_rate;
-        }
-        return;
-
-    case ENV_DECAY:
-        e->level -= e->rate;
-        if (e->level <= e->target) {
-            e->level = e->target;
-            e->stage = ENV_SUSTAIN;
+        e->level = level;
+    } else if (stage == ENV_DECAY) {
+        int32_t target = e->target;
+        level = e->level - e->rate;
+        if (level <= target) {
+            level = target;
+            stage = ENV_SUSTAIN;
+            e->stage = stage;
             e->rate = 0;
         }
-        return;
-
-    case ENV_SUSTAIN:
-        return;
-
-    case ENV_RELEASE:
-        e->level -= e->rate;
-        if (e->level <= ENV_FLOOR) {
-            e->level = 0;
-            e->stage = ENV_DONE;
-        }
-        return;
+        e->level = level;
+    } else if ((1u << stage) & ((1u << ENV_DELAY) | (1u << ENV_ATTACK) |
+                                (1u << ENV_HOLD))) {
+        env_advance_slow(e, z, is_vol);
+        stage = e->stage;
+        level = e->level;
+    } else {
+        level = e->level;        /* sustain, done, off: unchanged */
     }
+    *level_out = level;
+    return stage;
 }
 
 static void env_start_release(env_state_t *e, uint32_t release_ticks)
@@ -403,15 +444,14 @@ static void lfo_init(lfo_state_t *l, uint32_t delay_ticks, uint32_t rate)
     if (l->rate < 1) l->rate = 1;
 }
 
-static int32_t lfo_advance(lfo_state_t *l)
+static inline __attribute__((always_inline)) void lfo_advance(lfo_state_t *l)
 {
-    if (l->delay_ticks > 0) {
-        l->delay_ticks--;
-        return 0;
+    int32_t delay = l->delay_ticks;
+    if (delay > 0) {
+        l->delay_ticks = delay - 1;
+        return;
     }
-    l->phase += l->rate;
-    l->phase &= 0xFFFF;
-    return triangle_wave(l->phase);
+    l->phase = (l->phase + l->rate) & 0xFFFF;
 }
 
 /* ------------------------------------------------------------------ */
@@ -687,9 +727,12 @@ static inline int voice_env_volume(const smp_voice_t *v)
     return env_vol;
 }
 
-static void compute_vol_lr(smp_voice_t *v, int *out_l, int *out_r)
+/* L/R volume for a clamped envelope input env_vol (voice_env_volume). */
+static inline __attribute__((always_inline)) void compute_vol_lr_env(smp_voice_t *v,
+                                                                     int32_t env_vol,
+                                                                     int *out_l,
+                                                                     int *out_r)
 {
-    int32_t env_vol = voice_env_volume(v);
     v->cached_env_volume = (uint8_t)env_vol;
 
     int ch = v->midi_ch;
@@ -710,6 +753,11 @@ static void compute_vol_lr(smp_voice_t *v, int *out_l, int *out_r)
     *out_r = (int)((vol * v->pan_mul_r) >> PAN_SHIFT);
 }
 
+static void compute_vol_lr(smp_voice_t *v, int *out_l, int *out_r)
+{
+    compute_vol_lr_env(v, voice_env_volume(v), out_l, out_r);
+}
+
 /* filter_update retired in v3 — the mixer RTL has no SVF, so the
  * cents→Q0.16 conversion + redundant-write skip + delta tracking
  * was producing zero audible effect.  Each tick was paying ~50–100
@@ -717,55 +765,58 @@ static void compute_vol_lr(smp_voice_t *v, int *out_l, int *out_r)
  * since-removed no-op of_mixer_set_filter().  If SVF returns to
  * the RTL, reintroduce a runtime cap-gated path. */
 
-/* Apply a cents offset to a voice's base playback rate.  Shared by the fast
- * (bend-only) and slow (LFO / mod-env) paths of compute_pitch so the clamp +
- * multiplier lookup + Q16.16 multiply lives in exactly one place. */
-static inline uint32_t pitch_from_cents(uint32_t base_rate_fp16, int32_t cents_offset)
+/* Apply a pitch offset, already clamped to +/-12000 cents, to a voice's base
+ * playback rate.  The playback rate is a function of the clamped offset alone
+ * (an offset of 0 leaves the base rate untouched), which is what lets the tick
+ * reuse prev_rate[] while prev_cents[] still matches. */
+static uint32_t pitch_from_cents(uint32_t base_rate_fp16, int32_t cents_offset)
 {
     if (cents_offset == 0)
         return base_rate_fp16;
-    if (cents_offset > 12000)  cents_offset = 12000;
-    if (cents_offset < -12000) cents_offset = -12000;
     uint32_t mult = smp_cents_to_multiplier(cents_offset);
     return (uint32_t)(((uint64_t)base_rate_fp16 * mult) >> 16);
 }
 
-static uint32_t compute_pitch(smp_voice_t *v)
+/* Pitch offset of a voice in cents (bend + routed LFOs / mod envelope),
+ * clamped to +/-12000.  A voice without a zone plays at its base rate.
+ * The VOICE_PITCH_VIB / _MOD / _ENV bits of flags are set at note-on exactly
+ * when the zone's vib_lfo / mod_lfo / mod_env to-pitch amount is non-zero, so
+ * they stand in for reading those zone fields; a mod-LFO term with CC1 at 0
+ * is 0. */
+static inline __attribute__((always_inline)) int32_t compute_pitch_cents(const smp_voice_t *v,
+                                                                         const ofsf_zone_t *z,
+                                                                         unsigned flags)
 {
+    if (!z)
+        return 0;
+
     int ch = v->midi_ch;
-    const ofsf_zone_t *z = v->zone;
     int32_t cents_offset = ch_bend_cents[ch];
 
-    if (!z)
-        return v->base_rate_fp16;
-
-    if (z->vib_lfo_to_pitch == 0 &&
-        z->mod_env_to_pitch == 0 &&
-        (z->mod_lfo_to_pitch == 0 || ch_mod_depth[ch] == 0)) {
-        return pitch_from_cents(v->base_rate_fp16, cents_offset);
-    }
-
     /* Vibrato LFO */
-    if (z->vib_lfo_to_pitch != 0) {
+    if (flags & VOICE_PITCH_VIB) {
         int32_t lfo_out = triangle_wave(v->vib_lfo.phase);
         cents_offset += (lfo_out * z->vib_lfo_to_pitch) >> 16;
     }
 
-    /* Mod LFO to pitch */
-    if (z->mod_lfo_to_pitch != 0) {
-        int32_t lfo_out = triangle_wave(v->mod_lfo.phase);
-        int32_t depth = z->mod_lfo_to_pitch;
-        /* Scale by CC1 mod wheel */
-        depth = (depth * ch_mod_depth[ch]) / 127;
-        cents_offset += (lfo_out * depth) >> 16;
+    /* Mod LFO to pitch, scaled by the CC1 mod wheel */
+    if (flags & VOICE_PITCH_MOD) {
+        int32_t mod_depth = ch_mod_depth[ch];
+        if (mod_depth) {
+            int32_t lfo_out = triangle_wave(v->mod_lfo.phase);
+            int32_t depth = (z->mod_lfo_to_pitch * mod_depth) / 127;
+            cents_offset += (lfo_out * depth) >> 16;
+        }
     }
 
     /* Mod envelope to pitch */
-    if (z->mod_env_to_pitch != 0) {
+    if (flags & VOICE_PITCH_ENV) {
         cents_offset += ((int64_t)v->mod_env.level * z->mod_env_to_pitch) >> 16;
     }
 
-    return pitch_from_cents(v->base_rate_fp16, cents_offset);
+    if (cents_offset > 12000)  cents_offset = 12000;
+    if (cents_offset < -12000) cents_offset = -12000;
+    return cents_offset;
 }
 
 static void channel_recompute_cached(int ch)
@@ -944,7 +995,10 @@ int smp_voice_note_on(const ofsf_zone_t *zone, int midi_ch, int note,
 
     /* Advance the envelope one tick so the level is non-zero before
      * the ISR runs — otherwise the ISR writes volume 0 immediately. */
-    env_advance(&v->vol_env, zone, 1);
+    {
+        int32_t level;
+        (void)env_advance(&v->vol_env, zone, 1, &level);
+    }
 
     /* Cache pan multipliers before the first compute_vol_lr (and before the
      * ISR ticks this voice), so the hot path is divide-free from tick one. */
@@ -957,6 +1011,7 @@ int smp_voice_note_on(const ofsf_zone_t *zone, int midi_ch, int note,
     prev_vol_l[idx] = vl;
     prev_vol_r[idx] = vr;
     prev_rate[idx]  = v->base_rate_fp16;
+    prev_cents[idx] = 0;   /* pitch_from_cents(base, 0) == base */
 
     return idx;
 }
@@ -979,6 +1034,37 @@ void smp_voice_note_off(int midi_ch, int note)
     }
 }
 
+/* Rare per-voice tick paths, kept out of the (possibly fast-RAM) tick loop. */
+
+/* Hung-voice guard fired: release both envelopes. */
+static __attribute__((noinline)) void voice_release_hung(smp_voice_t *v,
+                                                         const ofsf_zone_t *z)
+{
+    env_start_release(&v->vol_env, z->vol_release_ticks);
+    env_start_release(&v->mod_env, z->mod_release_ticks);
+}
+
+/* The volume envelope reached ENV_DONE this tick.
+ * The DONE transition happens BEFORE this tick's volume write, so the HW is
+ * still sitting at the LAST tick's level — for short releases (rate =
+ * level/ticks) that residual is level/ticks of full scale, several audible
+ * LSBs.  A hard stop here steps that residual to zero in one sample: the
+ * "subtle click on rapid notes" (staccato SCI scores — every note-off cut
+ * its tail).  Only hard-stop when the last written volume was already 0;
+ * otherwise fade first and let voice_cleanup_stolen deactivate after
+ * STEAL_FADE_TICKS. */
+static __attribute__((noinline)) void voice_tick_done(int i)
+{
+    smp_voice_t *v = &voices[i];
+    if (prev_vol_l[i] == 0 && prev_vol_r[i] == 0) {
+        voice_stop_hw_if_owned(v);
+        v->active = 0;
+        v->mixer_voice = OF_MIXER_HANDLE_INVALID;
+    } else {
+        voice_force_off(i);
+    }
+}
+
 #if SMP_VOICE_FAST_TICK
 OF_FASTTEXT
 #endif
@@ -994,27 +1080,41 @@ void smp_voice_tick(void)
     uint8_t  _probe_ch[16] = {0};
 #endif
 
-    tick_counter++;
+    uint32_t now = ++tick_counter;
 
     /* Reap the HW mixer's voice-end queue ONCE per tick.
      * of_mixer_handle_active() runs mixer_reap_ended_pending() first — a
      * non-destructive reap that updates active_shadow and pushes ended voices
      * to the ended-queue WITHOUT consuming it (SFX end-polling is unaffected) —
      * then validates the handle.  We pass an INVALID handle purely to trigger
-     * that reap; the per-voice voice_hw_owned_by_music() checks below then use
-     * the non-reaping of_mixer_handle_group(), so we no longer pay one MMIO
+     * that reap; the per-voice ownership checks below then use the
+     * non-reaping handle_group service, so we no longer pay one MMIO
      * MIX_IRQ_PENDING read per active voice per tick. */
     (void)of_mixer_handle_active(OF_MIXER_HANDLE_INVALID);
 
-    voice_cleanup_stolen();
-    voice_cleanup_reclaimed(0);
+    if (steal_pending_count)
+        voice_cleanup_stolen();
+    if (reclaimed_pending)
+        voice_cleanup_reclaimed(0);
 
+    /* voice_hw_owned_by_music(), with the service lookup done once per tick. */
+    int (*handle_group)(of_mixer_handle_t) =
+        OF_SVC_HAS_FIELD(mixer_handle_group) ? OF_SVC->mixer_handle_group : NULL;
+
+    /* Voice state is OF_FASTDATA, which bypasses the D-cache: each field is
+     * read at most once per voice and only changed fields are written back. */
     for (int i = 0; i < SMP_MAX_VOICES; i++) {
         smp_voice_t *v = &voices[i];
-        if (!v->active || v->active == STEAL_PENDING)
+        int active = v->active;
+        if (!active || active == STEAL_PENDING)
             continue;
-        if (voice_drop_if_stale(v))
+        of_mixer_handle_t mh = v->mixer_voice;
+        if (mh == OF_MIXER_HANDLE_INVALID || !handle_group ||
+            handle_group(mh) != OF_MIXER_GROUP_MUSIC) {
+            v->active = 0;
+            v->mixer_voice = OF_MIXER_HANDLE_INVALID;
             continue;
+        }
 
 #if SMP_VOICE_ENABLE_TICK_STATS
         _probe_active++;
@@ -1031,8 +1131,10 @@ void smp_voice_tick(void)
          * immediately — otherwise the envelope's long SUSTAIN parks the
          * voice (especially SF2 drum zones with very long vol_sustain)
          * and fills all SMP_MAX_VOICES soft voices during dense drum tracks. */
-        if (v->sample_ticks_remaining > 0) {
-            if (--v->sample_ticks_remaining == 0) {
+        int32_t ticks_left = v->sample_ticks_remaining;
+        if (ticks_left > 0) {
+            v->sample_ticks_remaining = --ticks_left;
+            if (ticks_left == 0) {
                 v->vol_env.stage = ENV_DONE;
                 v->vol_env.level = 0;
             }
@@ -1040,24 +1142,21 @@ void smp_voice_tick(void)
 
         /* Caller fires this tick at 1 kHz (every 1 ms — matches
          * of_smp_tables.c's envelope baking).  Advance envelopes
-         * and LFOs ONCE per call.  The previous "advance twice
-         * per call" pattern existed because the pump used to fire
-         * at 500 Hz and the inner double-step compensated to reach
-         * effective 1 kHz; with 1 kHz pump the second pass would
-         * make envelopes 2× too fast (snappy attacks, premature
-         * releases). */
+         * and LFOs ONCE per call. */
         const ofsf_zone_t *z = v->zone;
-        env_advance(&v->vol_env, z, 1);
-        env_advance(&v->mod_env, z, 0);
+        int32_t level, mod_level;
+        env_stage_t stage = env_advance(&v->vol_env, z, 1, &level);
+        (void)env_advance(&v->mod_env, z, 0, &mod_level);
         /* Only advance an LFO whose phase a routing target actually reads —
-         * compute_pitch is the sole consumer and gates on these same zone
-         * fields.  Most GM melodic zones and all drum zones route no LFO to
-         * pitch, so this skips both phase updates for them every tick.
+         * compute_pitch_cents is the sole consumer and gates on these same
+         * zone fields.  Most GM melodic zones and all drum zones route no LFO
+         * to pitch, so this skips both phase updates for them every tick.
          * INVARIANT: if an amplitude- or filter-LFO consumer is ever added,
          * widen this gate to cover its routing field too. */
+        unsigned flags = v->update_flags;
         if (z) {
-            if (v->update_flags & VOICE_PITCH_VIB) lfo_advance(&v->vib_lfo);
-            if (v->update_flags & VOICE_PITCH_MOD) lfo_advance(&v->mod_lfo);
+            if (flags & VOICE_PITCH_VIB) lfo_advance(&v->vib_lfo);
+            if (flags & VOICE_PITCH_MOD) lfo_advance(&v->mod_lfo);
         }
 
         /* Hung-voice guard (see SMP_VOICE_MAX_SUSTAIN_TICKS).  Measure time
@@ -1066,68 +1165,76 @@ void smp_voice_tick(void)
          * voices with no natural end (sample_ticks_remaining == 0: looping or
          * untracked) -- a tracked one-shot self-terminates via ENV_DONE above,
          * so it is never clipped here even if its sample runs past the cap. */
-        if (v->vol_env.stage != ENV_SUSTAIN) {
-            v->sustain_since = tick_counter;
-        } else if (z && v->sample_ticks_remaining == 0 &&
-            (uint32_t)(tick_counter - v->sustain_since) > SMP_VOICE_MAX_SUSTAIN_TICKS) {
-            env_start_release(&v->vol_env, z->vol_release_ticks);
-            env_start_release(&v->mod_env, z->mod_release_ticks);
+        if (stage != ENV_SUSTAIN) {
+            v->sustain_since = now;
+        } else if (z && ticks_left == 0 &&
+            (uint32_t)(now - v->sustain_since) > SMP_VOICE_MAX_SUSTAIN_TICKS) {
+            voice_release_hung(v, z);
+            stage = v->vol_env.stage;
+            level = v->vol_env.level;
         }
 
-        if (v->vol_env.stage == ENV_DONE) {
-            /* The DONE transition happens BEFORE this tick's volume write, so
-             * the HW is still sitting at the LAST tick's level — for short
-             * releases (rate = level/ticks) that residual is level/ticks of
-             * full scale, several audible LSBs.  A hard stop here steps that
-             * residual to zero in one sample: the "subtle click on rapid
-             * notes" (staccato SCI scores — every note-off cut its tail).
-             * Only hard-stop when the last written volume was already 0;
-             * otherwise fade first and let voice_cleanup_stolen deactivate
-             * after STEAL_FADE_TICKS. */
-            if (prev_vol_l[i] == 0 && prev_vol_r[i] == 0) {
-                voice_stop_hw_if_owned(v);
-                v->active = 0;
-                v->mixer_voice = OF_MIXER_HANDLE_INVALID;
-            } else {
-                voice_force_off(i);
-            }
+        if (stage == ENV_DONE) {
+            voice_tick_done(i);
             continue;
         }
 
-        int vl = prev_vol_l[i], vr = prev_vol_r[i];
-        if (voice_env_volume(v) != v->cached_env_volume ||
-            (v->update_flags & VOICE_VOLUME_DIRTY))
-            compute_vol_lr(v, &vl, &vr);
-        uint32_t rate = prev_rate[i];
-        if ((v->update_flags & (VOICE_PITCH_DIRTY | VOICE_PITCH_VIB | VOICE_PITCH_ENV)) ||
-            ((v->update_flags & VOICE_PITCH_MOD) && ch_mod_depth[v->midi_ch]))
-            rate = compute_pitch(v);
-        v->update_flags &= ~(VOICE_PITCH_DIRTY | VOICE_VOLUME_DIRTY);
-        int rate_changed = (rate != prev_rate[i]);
-        int vol_changed  = (vl != prev_vol_l[i] || vr != prev_vol_r[i]);
+        /* Volume and pitch are recomputed only when an input changed: the
+         * clamped envelope level, a controller (dirty flags), or a routed
+         * modulator.  Otherwise both equal prev_vol_* / prev_rate[]. */
+        int32_t env_vol = level >> 8;
+        if (env_vol > 255) env_vol = 255;
+        if (env_vol < 0)   env_vol = 0;
+        int vol_dirty = env_vol != v->cached_env_volume ||
+                        (flags & VOICE_VOLUME_DIRTY);
+        int pitch_dirty = (flags & (VOICE_PITCH_DIRTY | VOICE_PITCH_VIB |
+                                    VOICE_PITCH_ENV)) ||
+                          ((flags & VOICE_PITCH_MOD) && ch_mod_depth[v->midi_ch]);
+        if (!vol_dirty && !pitch_dirty)
+            continue;
+        if (flags & (VOICE_PITCH_DIRTY | VOICE_VOLUME_DIRTY))
+            v->update_flags = (uint8_t)(flags & ~(VOICE_PITCH_DIRTY | VOICE_VOLUME_DIRTY));
+
+        int vl = 0, vr = 0, vol_changed = 0;
+        if (vol_dirty) {
+            compute_vol_lr_env(v, env_vol, &vl, &vr);
+            vol_changed = vl != prev_vol_l[i] || vr != prev_vol_r[i];
+        }
+        uint32_t rate = 0;
+        int rate_changed = 0;
+        if (pitch_dirty) {
+            int32_t cents = compute_pitch_cents(v, z, flags);
+            if (cents != prev_cents[i]) {
+                prev_cents[i] = (int16_t)cents;
+                rate = pitch_from_cents(v->base_rate_fp16, cents);
+                rate_changed = rate != prev_rate[i];
+            }
+        }
         if (rate_changed || vol_changed) {
-            /* This voice's handle was just validated this tick by
-             * voice_drop_if_stale() above, and smp_voice_tick() runs inside
-             * the machine-timer ISR (interrupts already masked on trap
-             * entry).  So bypass the _h API's redundant handle re-validation
-             * + IRQ save/restore: resolve the HW voice index once and issue
-             * only the field(s) that actually changed.  For a sustaining note
-             * the rate is stable while the volume envelope ramps, so RATE is
-             * usually unchanged and skipped entirely. */
-            int hw_voice = of_mixer_handle_voice(v->mixer_voice);
-            if (hw_voice >= 0) {
-                if (rate_changed) {
+            /* This voice's handle was just validated this tick, and
+             * smp_voice_tick() runs inside the machine-timer ISR (interrupts
+             * already masked on trap entry).  So bypass the _h API's redundant
+             * handle re-validation + IRQ save/restore and issue only the
+             * field(s) that actually changed.  hw_index is the voice index of
+             * this same handle, cached at note-on (0xFF when the service table
+             * could not report it); of_mixer_handle_voice() returns exactly
+             * that index for a handle that is still valid. */
+            int hw_voice = v->hw_index < OF_MIXER_MAX_VOICES ? v->hw_index : -1;
+            if (rate_changed) {
+                if (hw_voice >= 0) {
                     of_mixer_set_rate_raw(hw_voice, rate);
                     stat_rate_writes++;
                 }
-                if (vol_changed) {
+                prev_rate[i] = rate;
+            }
+            if (vol_changed) {
+                if (hw_voice >= 0) {
                     of_mixer_set_vol_lr(hw_voice, vl, vr);
                     stat_vol_writes++;
                 }
+                prev_vol_l[i] = (uint8_t)vl;
+                prev_vol_r[i] = (uint8_t)vr;
             }
-            prev_vol_l[i] = vl;
-            prev_vol_r[i] = vr;
-            prev_rate[i] = rate;
         }
     }
 
